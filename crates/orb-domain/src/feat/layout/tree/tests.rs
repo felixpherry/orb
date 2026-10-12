@@ -1340,7 +1340,7 @@ fn shrink_breaks_a_pane_out_of_the_stack(#[case] shown: i64, #[case] expected: N
     layout.shrink_focused(AREA);
 
     // Then one pane leaves the stack with a third of its rows.
-    assert_eq!(layout.root, expected, "Cmd - should break a pane out");
+    assert_eq!(layout.root, expected, "Alt - should break a pane out");
 }
 
 /// Whether the root split's ratio is `expected`, give or take a rounding.

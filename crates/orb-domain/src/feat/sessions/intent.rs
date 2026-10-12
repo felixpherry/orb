@@ -132,7 +132,7 @@ pub(crate) fn delete(state: &mut AppState) -> Vec<Command> {
 /// for the filter to be saved.
 pub(crate) fn filter_to(state: &mut AppState, filter: Option<ProjectId>) -> Vec<Command> {
     state.sessions.filter_to(filter, &state.layouts);
-    with_visit(state, vec![Command::Sessions(SessionsCommand::SaveUi)])
+    vec![Command::Sessions(SessionsCommand::SaveUi)]
 }
 
 /// Asks for `project` to be removed. A filter to it goes back to all
@@ -141,13 +141,10 @@ pub(crate) fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Co
     if state.sessions.filter == Some(project) {
         state.sessions.filter = None;
     }
-    with_visit(
-        state,
-        vec![
-            Command::Sessions(SessionsCommand::RemoveProject(project)),
-            Command::Sessions(SessionsCommand::SaveUi),
-        ],
-    )
+    vec![
+        Command::Sessions(SessionsCommand::RemoveProject(project)),
+        Command::Sessions(SessionsCommand::SaveUi),
+    ]
 }
 
 /// Settles `session`, answered `Yes` in its confirm, if the cursor is still
@@ -165,10 +162,7 @@ pub(crate) fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Co
             state.sessions.cursor = state
                 .sessions
                 .card_neighbour(SidebarItem::Session(session), &state.layouts);
-            with_visit(
-                state,
-                vec![Command::Sessions(SessionsCommand::SettleSession(session))],
-            )
+            vec![Command::Sessions(SessionsCommand::SettleSession(session))]
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
             state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
@@ -203,13 +197,10 @@ pub(crate) fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Co
     if on_it {
         state.sessions.cursor = neighbour;
     }
-    with_visit(
-        state,
-        vec![
-            Command::Sessions(SessionsCommand::DeleteSession(session)),
-            Command::Sessions(SessionsCommand::SaveJumps),
-        ],
-    )
+    vec![
+        Command::Sessions(SessionsCommand::DeleteSession(session)),
+        Command::Sessions(SessionsCommand::SaveJumps),
+    ]
 }
 
 /// Picks `project` in the new-session picker: a filter to another project
@@ -354,17 +345,6 @@ pub(crate) fn new_session(
         }),
         Command::Sessions(SessionsCommand::SaveJumps),
     ]
-}
-
-/// `commands`, then a visit to the session under the cursor, if any.
-pub(crate) fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
-    commands.extend(
-        state
-            .sessions
-            .selected_session()
-            .map(|session| Command::Sessions(SessionsCommand::Visit(session.id))),
-    );
-    commands
 }
 
 #[cfg(test)]

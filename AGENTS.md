@@ -12,7 +12,7 @@ This document defines the _coding conventions_, _patterns_, and _architecture_ f
 - `docs/research.md` — verified external facts (versions, CLI flags, file formats). Re-verify version-sensitive facts before relying on them.
 - `.agents/RECORD.md` — the current state of the app.
 - **At the end of every feature or overhaul step, write its new facts into `.agents/RECORD.md`** (after confirming each entry is true).
-- Keybindings: bind only keys the user has defined (product.md Keys section or the approved plan). Never bind Alt/Option (owned by the user's window manager, paneru); Cmd keys are orb's and reach it through kitty `send_key super+…` maps.
+- Keybindings: bind only keys the user has defined (product.md Keys section or the approved plan). orb's direct keys use Alt, like zellij. On the user's Mac, Option belongs to paneru, and the user reaches orb's Alt keys with Cmd through kitty `map cmd+X send_key alt+X`. Never add a Super binding.
 
 ## 1. Overview
 

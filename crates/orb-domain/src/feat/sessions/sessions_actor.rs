@@ -59,8 +59,8 @@
 //!
 //! An agent whose harness orb doesn't know shows as Gone.
 //!
-//! A turn that ends while the user is on another session shows as unseen
-//! until they select it. A session being deleted is hidden from the sidebar
+//! A turn that ends while the keys aren't in its agent's pane shows as unseen
+//! until the keys enter that pane. A session being deleted is hidden from the sidebar
 //! until it is removed.
 //!
 //! It follows each session's settle lifecycle on its store row: a turn ending
@@ -480,7 +480,7 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::SettleSession(id) => self.settle_session(id),
             SessionsCommand::UnsettleSession(id) => self.unsettle_session(id),
             SessionsCommand::DeleteSession(id) => self.delete_session(id),
-            SessionsCommand::Visit(id) => self.visit(id),
+            SessionsCommand::Visit(pane) => self.visit(pane),
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
             SessionsCommand::RemoveProject(id) => self.remove_project(id),

@@ -1205,7 +1205,7 @@ fn remembered_resume_shows_in_the_panes_entry() {
     );
 }
 
-/// A tall body for the `Cmd +` climb: in 80×24 the first step on a [1][4]
+/// A tall body for the `Alt +` climb: in 80×24 the first step on a [1][4]
 /// column already stacks.
 const TALL: Rect = Rect::new(0, 0, 80, 40);
 
@@ -1250,7 +1250,7 @@ fn climb() -> Layouts {
     layouts
 }
 
-/// Presses `Cmd +` until the stacks change, at most 30 times.
+/// Presses `Alt +` until the stacks change, at most 30 times.
 fn grow_until_the_stacks_change(layouts: &mut Layouts) {
     let before = stacked(layouts);
     for _ in 0..30 {
@@ -1261,7 +1261,7 @@ fn grow_until_the_stacks_change(layouts: &mut Layouts) {
     }
 }
 
-/// Presses `Cmd +` `times` times.
+/// Presses `Alt +` `times` times.
 fn grow_times(layouts: &mut Layouts, times: usize) {
     for _ in 0..times {
         layouts.resize_focused(OWNER, true);
@@ -1273,14 +1273,14 @@ fn cmd_plus_in_a_column_stacks_the_pane_above() {
     // Given a [1][4] tab focused on pane 9, 10 rows tall below pane 8.
     let mut layouts = climb();
 
-    // When pressing Cmd + once, 12 rows more than pane 8 can give.
+    // When pressing Alt + once, 12 rows more than pane 8 can give.
     layouts.resize_focused(OWNER, true);
 
     // Then panes 8 and 9 are one stack.
     assert_eq!(
         stacked(&layouts),
         vec![vec![PaneId(8), PaneId(9)]],
-        "the first Cmd + should stack pane 9 with the pane above"
+        "the first Alt + should stack pane 9 with the pane above"
     );
 }
 
@@ -1289,7 +1289,7 @@ fn cmd_plus_three_times_stacks_the_whole_column() {
     // Given a [1][4] tab focused on pane 9.
     let mut layouts = climb();
 
-    // When pressing Cmd + three times.
+    // When pressing Alt + three times.
     grow_times(&mut layouts, 3);
 
     // Then the whole right column is one stack.
@@ -1302,11 +1302,11 @@ fn cmd_plus_three_times_stacks_the_whole_column() {
 
 #[rstest::rstest]
 fn cmd_plus_on_a_stacked_column_grows_it_30_percent_left() {
-    // Given a [1][4] tab whose right column Cmd + stacked.
+    // Given a [1][4] tab whose right column Alt + stacked.
     let mut layouts = climb();
     grow_times(&mut layouts, 3);
 
-    // When pressing Cmd + once more.
+    // When pressing Alt + once more.
     layouts.resize_focused(OWNER, true);
 
     // Then pane 7 is 24 columns narrower: 30% of the 80-column tab.
@@ -1320,11 +1320,11 @@ fn cmd_plus_on_a_stacked_column_grows_it_30_percent_left() {
 
 #[rstest::rstest]
 fn cmd_plus_on_a_grown_column_stacks_the_whole_tab() {
-    // Given a [1][4] tab whose stacked right column Cmd + grew left.
+    // Given a [1][4] tab whose stacked right column Alt + grew left.
     let mut layouts = climb();
     grow_times(&mut layouts, 4);
 
-    // When pressing Cmd + once more.
+    // When pressing Alt + once more.
     layouts.resize_focused(OWNER, true);
 
     // Then every pane in the tab is one stack.
@@ -1343,17 +1343,17 @@ fn cmd_plus_on_a_grown_column_stacks_the_whole_tab() {
 
 #[rstest::rstest]
 fn cmd_plus_on_a_whole_tab_stack_zooms_it() {
-    // Given a [1][4] tab that Cmd + stacked whole.
+    // Given a [1][4] tab that Alt + stacked whole.
     let mut layouts = climb();
     grow_times(&mut layouts, 5);
 
-    // When pressing Cmd + once more.
+    // When pressing Alt + once more.
     layouts.resize_focused(OWNER, true);
 
     // Then the tab is zoomed.
     assert!(
         zoomed(&layouts),
-        "Cmd + on a whole-tab stack should zoom it"
+        "Alt + on a whole-tab stack should zoom it"
     );
 }
 
@@ -1511,7 +1511,7 @@ fn move_pane_never_changes_tab() {
 }
 
 /// A 10-column body: panes 7 and 8 side by side get 5 columns each, so a
-/// 1-column `Cmd +` on pane 8 would leave pane 7 4 columns wide and stacks
+/// 1-column `Alt +` on pane 8 would leave pane 7 4 columns wide and stacks
 /// them instead.
 const NARROW: Rect = Rect::new(0, 0, 10, 24);
 
@@ -1552,7 +1552,7 @@ fn cmd_plus_on_a_200_column_tab_moves_a_left_right_border_60_columns() {
     layouts.fit_to(HUGE);
     let before = huge_area(&layouts, 8).map(|area| area.width);
 
-    // When pressing Cmd +.
+    // When pressing Alt +.
     layouts.resize_focused(OWNER, true);
 
     // Then pane 8 is 60 columns wider: 30% of the tab.
@@ -1560,7 +1560,7 @@ fn cmd_plus_on_a_200_column_tab_moves_a_left_right_border_60_columns() {
     assert_eq!(
         after,
         before.map(|width| width + 60),
-        "Cmd + moves 30% of the tab's width"
+        "Alt + moves 30% of the tab's width"
     );
 }
 
@@ -1572,7 +1572,7 @@ fn cmd_plus_on_a_60_row_tab_moves_a_top_bottom_border_18_rows() {
     layouts.fit_to(HUGE);
     let before = huge_area(&layouts, 8).map(|area| area.height);
 
-    // When pressing Cmd +.
+    // When pressing Alt +.
     layouts.resize_focused(OWNER, true);
 
     // Then pane 8 is 18 rows taller: 30% of the tab.
@@ -1580,7 +1580,7 @@ fn cmd_plus_on_a_60_row_tab_moves_a_top_bottom_border_18_rows() {
     assert_eq!(
         after,
         before.map(|height| height + 18),
-        "Cmd + moves 30% of the tab's height"
+        "Alt + moves 30% of the tab's height"
     );
 }
 
@@ -1592,11 +1592,11 @@ fn cmd_minus_after_a_30_percent_cmd_plus_restores_the_tree() {
     let before = tree_json(&layouts);
     layouts.resize_focused(OWNER, true);
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
-    // Then the tree is the one from before the Cmd +.
-    assert_eq!(tree_json(&layouts), before, "Cmd - undoes the Cmd +");
+    // Then the tree is the one from before the Alt +.
+    assert_eq!(tree_json(&layouts), before, "Alt - undoes the Alt +");
 }
 
 #[rstest::rstest]
@@ -1606,32 +1606,32 @@ fn cmd_minus_on_a_zoomed_tab_only_unzooms_it() {
     layouts.toggle_zoom(OWNER);
     let before = tree_json(&layouts);
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
     // Then the tab is unzoomed and its tree is as it was.
     assert_eq!(
         (zoomed(&layouts), tree_json(&layouts)),
         (false, before),
-        "Cmd - on a zoomed tab should only leave the zoom"
+        "Alt - on a zoomed tab should only leave the zoom"
     );
 }
 
 #[rstest::rstest]
 fn cmd_minus_after_a_stacking_cmd_plus_restores_the_tree() {
-    // Given panes 7 and 8 over a narrow body, stacked by one Cmd +.
+    // Given panes 7 and 8 over a narrow body, stacked by one Alt +.
     let mut layouts = narrow();
     let before = tree_json(&layouts);
     layouts.resize_focused(OWNER, true);
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
-    // Then the tree is the one from before the Cmd +.
+    // Then the tree is the one from before the Alt +.
     assert_eq!(
         tree_json(&layouts),
         before,
-        "Cmd - should undo the Cmd + that stacked the split"
+        "Alt - should undo the Alt + that stacked the split"
     );
 }
 
@@ -1643,20 +1643,20 @@ fn cmd_plus_after_a_cmd_minus_restores_the_tree() {
     let before = tree_json(&layouts);
     layouts.resize_focused(OWNER, false);
 
-    // When pressing Cmd +.
+    // When pressing Alt +.
     layouts.resize_focused(OWNER, true);
 
-    // Then the tree is the one from before the second Cmd -.
+    // Then the tree is the one from before the second Alt -.
     assert_eq!(
         tree_json(&layouts),
         before,
-        "Cmd + should undo the last Cmd -"
+        "Alt + should undo the last Alt -"
     );
 }
 
 #[rstest::rstest]
 fn cmd_minus_replays_the_climb_back_to_the_original_tree() {
-    // Given a [1][4] tab that Cmd + climbed until it zoomed.
+    // Given a [1][4] tab that Alt + climbed until it zoomed.
     let mut layouts = climb();
     let original = tree_json(&layouts);
     let mut changes = 0;
@@ -1669,7 +1669,7 @@ fn cmd_minus_replays_the_climb_back_to_the_original_tree() {
         }
     }
 
-    // When pressing Cmd - once per change, plus once for the zoom.
+    // When pressing Alt - once per change, plus once for the zoom.
     for _ in 0..=changes {
         layouts.resize_focused(OWNER, false);
     }
@@ -1678,7 +1678,7 @@ fn cmd_minus_replays_the_climb_back_to_the_original_tree() {
     assert_eq!(
         (zoomed(&layouts), tree_json(&layouts)),
         (false, original),
-        "Cmd - should replay every Cmd + back to the original tree"
+        "Alt - should replay every Alt + back to the original tree"
     );
 }
 
@@ -1690,7 +1690,7 @@ fn cmd_minus_after_a_focus_move_shrinks_the_newly_focused_pane() {
     layouts.resize_focused(OWNER, true);
     layouts.focus_pane(OWNER, PaneId(7));
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
     // Then pane 7 shrank 5% (4 columns), since 30% doesn't fit, instead
@@ -1698,7 +1698,7 @@ fn cmd_minus_after_a_focus_move_shrinks_the_newly_focused_pane() {
     assert_eq!(
         width(&layouts, 7),
         Some(12),
-        "after a focus move Cmd - should shrink the focused pane"
+        "after a focus move Alt - should shrink the focused pane"
     );
 }
 
@@ -1709,13 +1709,13 @@ fn cmd_minus_after_an_added_pane_keeps_it() {
     layouts.resize_focused(OWNER, true);
     layouts.add_tiled(OWNER, entry(9));
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
     // Then pane 9 is still placed.
     assert!(
         placed(&layouts).iter().any(|place| place.pane == PaneId(9)),
-        "Cmd - after an add should not bring back the tree without pane 9"
+        "Alt - after an add should not bring back the tree without pane 9"
     );
 }
 
@@ -1724,20 +1724,20 @@ fn cmd_minus_without_history_shrinks_the_pane_a_step() {
     // Given panes 7 and 8 side by side, pane 8 40 columns wide.
     let mut layouts = split_right();
 
-    // When pressing Cmd -.
+    // When pressing Alt -.
     layouts.resize_focused(OWNER, false);
 
     // Then pane 8 is 24 columns narrower: 30% of the 80-column tab.
     assert_eq!(
         width(&layouts, 8),
         Some(16),
-        "Cmd - with no history should shrink the focused pane a step"
+        "Alt - with no history should shrink the focused pane a step"
     );
 }
 
 #[rstest::rstest]
 fn next_swap_layout_drops_a_stack_made_by_cmd_plus() {
-    // Given a [1][4] tab where Cmd + stacked part of the right column.
+    // Given a [1][4] tab where Alt + stacked part of the right column.
     let mut layouts = climb();
     grow_until_the_stacks_change(&mut layouts);
 
@@ -1748,7 +1748,7 @@ fn next_swap_layout_drops_a_stack_made_by_cmd_plus() {
     assert_eq!(
         stacked(&layouts),
         Vec::<Vec<PaneId>>::new(),
-        "re-applying the vertical layout drops the stack Cmd + made"
+        "re-applying the vertical layout drops the stack Alt + made"
     );
 }
 
@@ -1909,7 +1909,7 @@ fn closing_a_pane_in_a_split_tab_moves_no_other_pane() {
 
 #[rstest::rstest]
 fn closing_a_pane_keeps_a_stack_made_by_cmd_plus() {
-    // Given a [1][4] tab where Cmd + stacked panes 8 and 9.
+    // Given a [1][4] tab where Alt + stacked panes 8 and 9.
     let mut layouts = climb();
     grow_until_the_stacks_change(&mut layouts);
 
@@ -1920,7 +1920,7 @@ fn closing_a_pane_keeps_a_stack_made_by_cmd_plus() {
     assert_eq!(
         stacked(&layouts),
         vec![vec![PaneId(8), PaneId(9)]],
-        "a close in a marked tab keeps the stack Cmd + made"
+        "a close in a marked tab keeps the stack Alt + made"
     );
 }
 
@@ -2123,7 +2123,7 @@ fn second_previous_swap_layout_from_two_vertical_panes_is_horizontal() {
 
 #[rstest::rstest]
 fn next_swap_layout_on_a_changed_tab_reapplies_its_layout() {
-    // Given three tiled panes, vertical, resized by Cmd -.
+    // Given three tiled panes, vertical, resized by Alt -.
     let mut layouts = tiled(9);
     layouts.resize_focused(OWNER, false);
 
@@ -2140,7 +2140,7 @@ fn next_swap_layout_on_a_changed_tab_reapplies_its_layout() {
 
 #[rstest::rstest]
 fn second_next_swap_layout_on_a_changed_tab_steps() {
-    // Given three vertical panes resized by Cmd -, then re-applied.
+    // Given three vertical panes resized by Alt -, then re-applied.
     let mut layouts = tiled(9);
     layouts.resize_focused(OWNER, false);
     layouts.next_swap_layout(OWNER);

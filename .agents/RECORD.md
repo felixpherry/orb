@@ -32,17 +32,19 @@ Entries are added or amended **only with human approval**.
 ---
 
 - (keybinds) `<C-g> q` quits orb from the sidebar or a pane.
-- (keybinds) `Cmd h`/`Cmd l` move the focus to the pane on that side, and from the tab's left or right edge to the previous or next tab, wrapping from the last tab to the first and back.
-- (keybinds) A `Cmd h` or `Cmd l` that changes tabs focuses the new tab's pane on the edge it enters from, keeping the tab's own focused pane when it's on that edge, else the topmost one there.
-- (keybinds) `Cmd h/j/k/l` do nothing while the sidebar has the keys.
-- (keybinds) `<C-S-h>` moves the keys from a pane to the sidebar, showing the sidebar if it's hidden.
-- (keybinds) `<C-S-l>` moves the keys from the sidebar into the shown session's panes.
+- (keybinds) `Alt h`/`Alt l` move the focus to the pane on that side, and from the tab's left or right edge to the previous or next tab, wrapping from the last tab to the first and back.
+- (keybinds) An `Alt h` or `Alt l` that changes tabs focuses the new tab's pane on the edge it enters from, keeping the tab's own focused pane when it's on that edge, else the topmost one there.
+- (keybinds) `Alt h/j/k/l` do nothing while the sidebar has the keys.
+- (keybinds) `<C-g> h` in a pane moves the keys to the sidebar, showing the sidebar if it's hidden.
+- (keybinds) `<C-g> l` in the sidebar moves the keys into the shown session's panes.
+- (keybinds) orb's direct keys (h/j/k/l, the arrows, n, x, f, +, =, -, 1–9, [, ], i, o) take Alt on every OS, and a terminal that sends Cmd as Alt makes them Cmd keys.
+- (keybinds) orb reads no key with Super.
 - (keybinds) `<C-g> e` hides or shows the sidebar, and hiding it while it has the keys moves them into the shown session's panes.
 - (keybinds) `<C-g> t b` in a pane moves the focused pane to a new tab of its own after the last one and shows it; a tab's only pane stays put.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
 - (pane) orb redraws when input, pane output, a pane's exit, a worker's report, a pane's held update timing out or the message box hiding wakes the loop, and every 100 ms while an agent is working or a session is starting (the spinner's frame); there is no other tick.
-- (pane) While a pane has the keys, every key but orb's own (the Cmd keys, `<C-S-h>`/`<C-S-l>`, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
+- (pane) While a pane has the keys, every key but orb's own (the Alt keys, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
 - (identity) An agent is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
@@ -66,7 +68,7 @@ Entries are added or amended **only with human approval**.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (pane) The right-hand area shows the active session's panes while orb is attached to it; otherwise it shows the start screen.
 - (sidebar) Pinned sessions come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
-- (sidebar) An agent shows a green check and "done" when its latest turn ended after the user last selected its session.
+- (sidebar) An agent shows a green check and "done" when its latest turn ended after the keys were last in its pane.
 - (settle) A turn underway in any of a session's agent panes, including one waiting for approval or input, un-settles the session.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
@@ -105,10 +107,10 @@ Entries are added or amended **only with human approval**.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
-- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `p`/`s` only on a session card, and `r`/`d` on a card or an agent row.
+- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, and `r`/`d` on a card or an agent row.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
-- (keybinds) While the sidebar has the keys, `Cmd +`/`Cmd =` widen it and `Cmd -` narrows it, 4 columns a step, kept between 24 and 80 columns.
+- (keybinds) While the sidebar has the keys, `Alt +`/`Alt =` widen it and `Alt -` narrows it, 4 columns a step, kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
 - (keybinds) `<C-g> f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `<C-g> g r`/`<C-g> g l` has added them, then Incognito, then the projects in `<C-g> n` order.
 - (sidebar) While a project filter is set, the sidebar lists only that project's sessions, and its input box shows the project after the > prompt.
@@ -168,7 +170,7 @@ Entries are added or amended **only with human approval**.
 - (settle) Settling a session is refused with `Can't settle while a session is working` while any of its agent panes has a turn underway.
 - (picker) `d` on a session asks `Delete <name>?`, or `Delete <name> and its folder?` for a Research or Learn session, and on an agent row `Close <name>?`.
 - (keybinds) In the sidebar or a pane, `<C-[>`/`<C-]>` move back/forward through the jump list, as `<C-o>`/`<C-i>` do in neovim.
-- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-S-l>`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Cmd h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Cmd f), `gg`/`G`, a search ended by `⏎` or a click, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
+- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
 - (jumps) Each agent is its own jump target: entering a session or picking it records the agent in its focused pane (its card when that pane is a shell), a session picker pick records the picked agent, a move between panes records the agent left and the agent entered (a shell pane records nothing), and a jump pressed in a pane starts from its focused agent.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one, and landing on an agent shows that agent's own pane; it never attaches or clears the project filter.
 - (jumps) Deleted rows, closed agents, rows hidden by the project filter, and the Settled header are skipped, and a folded card opens when a jump lands on one of its agent rows.
@@ -250,31 +252,31 @@ Entries are added or amended **only with human approval**.
 - (sidebar) An agent row ends with its harness's mark: `✳` for Claude, `π` for pi.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `<C-g> /` searches pi session files alongside Claude transcripts.
-- (layout) Adding a pane with `Cmd n` or closing one in a tab not changed by hand re-tiles it in the tab's swap layout, where vertical is `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
+- (layout) Adding a pane with `Alt n` or closing one in a tab not changed by hand re-tiles it in the tab's swap layout, where vertical is `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
 - (layout) A tab not changed by hand whose pane count no longer fits its swap layout moves on to the next one that fits and stays there, so from 11 panes it is one stack (a list naming every pane at the top, `>` on the shown one, the shown pane's frame below) and stays stacked when closed back down to 2 panes.
 - (layout) `<C-g> p s` stacks a new pane with the focused one and shows it.
 - (layout) `<C-g> p s` on a pane outside every stack starts a new stack, so a tab can hold several, each with its own list.
 - (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
 - (layout) Moving the focus up into a stack from the pane below it lands on the stack's shown pane, the one drawn touching it.
-- (layout) Inside the focused stack, Cmd j and Cmd k step to the next and previous pane in the stack's list.
+- (layout) Inside the focused stack, Alt j and Alt k step to the next and previous pane in the stack's list.
 - (layout) Move mode's direction keys swap the focused tiled pane with the pane a focus move that way would reach inside its tab.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane, or its whole stack, and share the space evenly among the panes split in that direction.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
-- (layout) `Cmd +` grows the focused pane, or its stack, 30% of the tab towards the first neighbour above, below, left or right that lines up with its whole edge.
-- (layout) When that 30% would leave a pane there under 5 rows or 5 columns or 5% of the tab, `Cmd +` stacks the focused pane with the panes touching it on that side.
-- (layout) With no lined-up neighbour `Cmd +` grows 5% any way that fits, and zooms once nothing fits, unless it's the tab's only pane.
-- (layout) `Cmd -` on a zoomed tab leaves the zoom, and otherwise restores the tab's tree from before its last `Cmd +`.
-- (layout) `Cmd -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
-- (layout) `Cmd +` restores the tab's tree from before its last `Cmd -`.
+- (layout) `Alt +` grows the focused pane, or its stack, 30% of the tab towards the first neighbour above, below, left or right that lines up with its whole edge.
+- (layout) When that 30% would leave a pane there under 5 rows or 5 columns or 5% of the tab, `Alt +` stacks the focused pane with the panes touching it on that side.
+- (layout) With no lined-up neighbour `Alt +` grows 5% any way that fits, and zooms once nothing fits, unless it's the tab's only pane.
+- (layout) `Alt -` on a zoomed tab leaves the zoom, and otherwise restores the tab's tree from before its last `Alt +`.
+- (layout) `Alt -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
+- (layout) `Alt +` restores the tab's tree from before its last `Alt -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
-- (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Cmd ]` and `Cmd [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
-- (layout) Splitting, stacking, a resize-mode step, or a `Cmd +` or `Cmd -` that changes the panes (not a zoom alone) marks a tab as changed by hand until the next `Cmd [` or `Cmd ]`.
-- (layout) `Cmd n` in a tab changed by hand adds the pane to the focused pane's stack, else halves the focused pane top/bottom when it's tall and left/right when it's wide, leaving other panes their size, else stacks the two.
-- (layout) The tab bar ends, right-aligned, with `Cmd <[]>` and the shown tab's swap layout name in caps, lit while the tab is untouched and dim once it's changed by hand; it's hidden on a 1-pane tab and dropped when the tabs leave no room.
+- (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Alt ]` and `Alt [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
+- (layout) Splitting, stacking, a resize-mode step, or an `Alt +` or `Alt -` that changes the panes (not a zoom alone) marks a tab as changed by hand until the next `Alt [` or `Alt ]`.
+- (layout) `Alt n` in a tab changed by hand adds the pane to the focused pane's stack, else halves the focused pane top/bottom when it's tall and left/right when it's wide, leaving other panes their size, else stacks the two.
+- (layout) The tab bar ends, right-aligned, with `Alt <[]>` and the shown tab's swap layout name in caps, lit while the tab is untouched and dim once it's changed by hand; it's hidden on a 1-pane tab and dropped when the tabs leave no room.
 - (sessions) Each tab's swap layout and changed-by-hand mark persist to orb's database; tabs saved before then load as vertical and unmarked.
 - (layout) When a session's last tiled pane closes, by a close key or by its program exiting, orb opens a shell tab in the session's directory in its place, whatever floats it has.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab, or the session's floats when the agent is in one, with the keys in its pane.
@@ -288,26 +290,26 @@ Entries are added or amended **only with human approval**.
 - (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same error sent again does not bring it back until orb handles a key or click, a branch switch in a session's own directory succeeds or a project is added.
 - (projects) Adding a project from the projects screen shows `Added project <name>` in the message box, even when the project was already added or had been removed.
 - (projects) When adding a project from the projects screen fails, the message box shows the reason as an error.
-- (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Cmd +`/`Cmd -`.
+- (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Alt +`/`Alt -`.
 - (keybinds) In resize mode, pushing a border out toward the tab's edge (or past a neighbour's minimum size) pulls the opposite border in 5% instead; pulling a border in toward the tab's edge does nothing.
 - (keybinds) `<C-g> m` in a pane enters move mode, where `h/j/k/l` or the arrow keys swap the focused pane with its neighbour on that side and `n`/`Tab`/`p` swap it with the next or previous pane, wrapping, with the focus staying on the moved pane.
-- (keybinds) Resize and move mode last until `Esc` or `⏎`, until the keys leave the pane, or until a mouse action orb handles itself (a click on another pane, the sidebar or the tab bar, or a tab-bar scroll); clicks, scrolling and selecting inside the focused pane leave it on. While either is on, no key reaches the pane's program, and `Cmd` keys still work.
+- (keybinds) Resize and move mode last until `Esc` or `⏎`, until the keys leave the pane, or until a mouse action orb handles itself (a click on another pane, the sidebar or the tab bar, or a tab-bar scroll); clicks, scrolling and selecting inside the focused pane leave it on. While either is on, no key reaches the pane's program, and Alt keys still work.
 - (tui) The mode line reads `RESIZE` or `MOVE` while that mode is on, and a which-key style box lists the mode's keys.
 - (layout) Moving a pane swaps two panes without changing the tab's shape, so it doesn't mark the tab changed by hand.
 - (float) Each session has one layer of floating panes drawn over all of its tabs, so switching tabs keeps it shown and focused.
-- (keybinds) `Cmd f` shows or hides the session's floats, opening a shell float when it has none.
-- (keybinds) While a float has the keys, `Cmd n` opens a float, `Cmd x` closes the focused float, and `Cmd h/j/k/l` move between floats without switching tabs.
+- (keybinds) `Alt f` shows or hides the session's floats, opening a shell float when it has none.
+- (keybinds) While a float has the keys, `Alt n` opens a float, `Alt x` closes the focused float, and `Alt h/j/k/l` move between floats without switching tabs.
 - (float) Closing the last float hides the layer and gives the keys back to the shown tab's focused pane.
 - (keybinds) `<C-g> p w` shows or hides the floats, `<C-g> p e` turns the focused pane into a float or a float back into the shown tab, and `<C-g> p i` pins or unpins the focused float.
 - (float) A pinned float stays drawn over the tiled panes while the floats are hidden, and gets the keys only when clicked.
-- (float) Resize mode, move mode, `Cmd +` and `Cmd -` change the focused float in steps of 5% of the tab body, and a float never leaves the body.
+- (float) Resize mode, move mode, `Alt +` and `Alt -` change the focused float in steps of 5% of the tab body, and a float never leaves the body.
 - (float) The floats follow one of zellij's float layouts: staggered (half-size, centred, each new float 2 cells down and right of any taken spot), enlarged (90%, each a row lower, up to 10), or spread (side by side, up to 4).
-- (keybinds) While a float has the keys, `Cmd [` and `Cmd ]` move the floats to the previous or next layout that fits their count, wrapping.
-- (float) Moving or resizing a float marks the floats changed by hand, so adding or closing one doesn't re-lay them until the next `Cmd [` or `Cmd ]`.
+- (keybinds) While a float has the keys, `Alt [` and `Alt ]` move the floats to the previous or next layout that fits their count, wrapping.
+- (float) Moving or resizing a float marks the floats changed by hand, so adding or closing one doesn't re-lay them until the next `Alt [` or `Alt ]`.
 - (layout) While a float has the keys, the tab bar's layout name shows the float layout instead of the tab's.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
-- (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-S-l>`) makes it active.
+- (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell or the card is folded, and it follows every focus change inside the session.
 - (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.

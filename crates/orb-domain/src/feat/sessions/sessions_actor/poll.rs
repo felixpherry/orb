@@ -330,9 +330,12 @@ impl SessionsActor {
     /// harness orb doesn't know is Gone.
     fn apply(&mut self, listed: &HashMap<HarnessId, Vec<RunningAgent>>, live: &Live) {
         let now = now_ms();
-        let selected = match self.state.read().sessions.cursor {
-            Some(SidebarItem::Session(id) | SidebarItem::Agent { session: id, .. }) => Some(id),
-            _ => None,
+        let focused = {
+            let app = self.state.read();
+            match (app.focus, app.focused_agent()) {
+                (Focus::Pane, Some(SidebarItem::Agent { pane, .. })) => Some(pane),
+                _ => None,
+            }
         };
         let owners = self.row_pane_owners();
         let mut statuses = Vec::with_capacity(self.rows.len());
@@ -364,9 +367,8 @@ impl SessionsActor {
                     renamed.push((row.cwd.clone(), new));
                 }
             }
-            let in_selected = selected.is_some()
-                && row.pane_id.and_then(|pane| owners.get(&pane).copied()) == selected;
-            follow_activity(row, status, was_in_progress, in_selected, now);
+            let in_focus = focused.is_some() && row.pane_id == focused;
+            follow_activity(row, status, was_in_progress, in_focus, now);
             if *row != before
                 && let Err(report) = self.store.save_agent(row)
             {
@@ -534,20 +536,20 @@ fn status_now(
 /// Follows a polled row's activity, given its `status` now and whether a
 /// turn was underway before this poll:
 /// - a turn that ended is the agent's latest activity;
-/// - the latest turn of an agent in the selected session is seen.
+/// - the latest turn of the agent whose pane has the keys is seen.
 ///
 /// Settling and un-settling are its session's (see [`follow_session`]).
 fn follow_activity(
     row: &mut AgentRow,
     status: AgentStatus,
     was_in_progress: bool,
-    selected: bool,
+    in_focus: bool,
     now: i64,
 ) {
     if was_in_progress && !status.in_progress() {
         row.last_activity_at = now;
     }
-    if selected && row.last_activity_at > row.last_visited_at {
+    if in_focus && row.last_activity_at > row.last_visited_at {
         row.last_visited_at = now;
     }
 }

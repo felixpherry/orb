@@ -1417,13 +1417,10 @@ fn confirming_a_project_filter_returns_save_ui() {
     // When handling PickerConfirm.
     let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then the filter is saved and agent 21 visited.
+    // Then the filter is saved.
     assert_eq!(
         commands,
-        vec![
-            Command::Sessions(SessionsCommand::SaveUi),
-            Command::Sessions(SessionsCommand::Visit(SessionId(21)))
-        ],
+        vec![Command::Sessions(SessionsCommand::SaveUi)],
         "filtering should save the filter"
     );
 }
@@ -1510,7 +1507,6 @@ fn confirming_yes_returns_remove_project() {
         vec![
             Command::Sessions(SessionsCommand::RemoveProject(ProjectId(1))),
             Command::Sessions(SessionsCommand::SaveUi),
-            Command::Sessions(SessionsCommand::Visit(SessionId(21))),
         ],
         "Yes should remove the project"
     );
@@ -1936,18 +1932,18 @@ fn typing_in_the_search_selects_the_first_match() {
 }
 
 #[rstest::rstest]
-fn typing_in_the_search_visits_the_first_match() {
+fn typing_in_the_search_visits_nothing() {
     // Given an empty search begun on agent 2.
     let mut state = searching("", Some(2));
 
     // When typing `l`.
     let commands = IntentHandler::handle(&Intent::PickerInput('l'), &mut state);
 
-    // Then the match is visited.
+    // Then nothing is visited.
     assert_eq!(
         commands,
-        vec![Command::Sessions(SessionsCommand::Visit(SessionId(3)))],
-        "typing should visit the first match"
+        vec![],
+        "typing only moves the hover, so it should visit nothing"
     );
 }
 

@@ -20,7 +20,7 @@ const MIN_WIDTH: u16 = 10;
 /// Smallest float height, in cells (capped at the body).
 const MIN_HEIGHT: u16 = 4;
 
-/// Where the floats go, in the order `Cmd [` / `Cmd ]` cycle them.
+/// Where the floats go, in the order `Alt [` / `Alt ]` cycle them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FloatLayout {
     /// Each float in its own staggered spot.
@@ -268,7 +268,7 @@ impl Floats {
     /// Lays the floats out in the first layout that fits their count and
     /// clears the mark. `cycle` is `None` for an add, close or take-out (the
     /// search starts at the floats' own layout, forwards) and `Some(back)`
-    /// for `Cmd [` / `Cmd ]`, which first steps one layout that way unless
+    /// for `Alt [` / `Alt ]`, which first steps one layout that way unless
     /// the floats were changed by hand.
     fn relayout(&mut self, cycle: Option<bool>, body: Rect) {
         let step = cycle.is_some() && !self.hand_changed;
@@ -282,7 +282,7 @@ impl Floats {
         self.hand_changed = false;
     }
 
-    /// `Cmd ]` (or `Cmd [` when `back`): the floats go to the next layout
+    /// `Alt ]` (or `Alt [` when `back`): the floats go to the next layout
     /// that fits their count in `body`, wrapping; floats changed by hand get
     /// their own layout back first. Whether there were floats.
     pub fn cycle(&mut self, back: bool, body: Rect) -> bool {
@@ -393,7 +393,7 @@ impl Floats {
         true
     }
 
-    /// `Cmd +` (`grow`) or `Cmd -`: every side of the top float one step out
+    /// `Alt +` (`grow`) or `Alt -`: every side of the top float one step out
     /// or in, stopping at the body and the smallest float size. Whether it changed.
     pub fn resize(&mut self, body: Rect, grow: bool) -> bool {
         use NavDirection::{Down, Left, Right, Up};

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
 use crate::feat::sessions::state::FolderKind;
-use crate::ids::{AgentId, ProjectId, SessionId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,8 +110,8 @@ pub enum SessionsCommand {
     UnsettleSession(SessionId),
     /// Delete the session: its panes, tabs and agents.
     DeleteSession(SessionId),
-    /// The user is looking at the session now.
-    Visit(SessionId),
+    /// The keys are in this agent pane now.
+    Visit(PaneId),
     /// Save the sidebar's width and project filter as they now are in the
     /// app state.
     SaveUi,

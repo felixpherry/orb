@@ -4,7 +4,7 @@ A terminal multiplexer that is mission control for your coding agents. Each sess
 
 ## Quickstart
 
-You need macOS or Linux, a recent stable Rust toolchain, [kitty](https://sw.kovidgoyal.net/kitty/) (orb's Cmd keys come through the kitty keyboard protocol), zmx 0.8.1 or later on your `PATH`, a [Nerd Font](https://www.nerdfonts.com), and [Claude Code](https://docs.claude.com/en/docs/claude-code) or pi. Every pane runs under zmx: `brew install neurosnap/tap/zmx` on macOS, or on Linux `paru -S zmx` from the AUR (`paru -S zmx-bin` for the release build). The Claude hook needs `python3`. On macOS, [terminal-notifier](https://github.com/julienXX/terminal-notifier) is optional.
+You need macOS or Linux, a recent stable Rust toolchain, [kitty](https://sw.kovidgoyal.net/kitty/) (orb's keys need the kitty keyboard protocol), zmx 0.8.1 or later on your `PATH`, a [Nerd Font](https://www.nerdfonts.com), and [Claude Code](https://docs.claude.com/en/docs/claude-code) or pi. Every pane runs under zmx: `brew install neurosnap/tap/zmx` on macOS, or on Linux `paru -S zmx` from the AUR (`paru -S zmx-bin` for the release build). The Claude hook needs `python3`. On macOS, [terminal-notifier](https://github.com/julienXX/terminal-notifier) is optional.
 
 On Linux, notifications need a freedesktop notification server, which most desktops and shells run; without one, orb shows none. On niri, clicking a notification brings orb's window forward; on other compositors the click does nothing else.
 
@@ -19,16 +19,46 @@ Then:
 1. `<C-g> a` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
 2. `<C-g> n` picks a project, then a workspace (the checkout, a new worktree, or a worktree the project used before) and, for a new worktree, its base branch. The session opens with one shell.
 3. Type `claude` or `pi` in the shell. The pane becomes an agent row under the session's card.
-4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down and share the space evenly, and `<C-g> t n` opens a tab.
+4. `Alt n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down and share the space evenly, and `<C-g> t n` opens a tab.
 5. `<C-g> q` quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
 
-The Cmd keys reach orb only through kitty `map` lines, and `<C-S-h>`/`<C-S-l>` only once kitty stops using them itself (it opens its scrollback pager and switches layouts on them). From a checkout of this repo, write them with:
+### Setup
 
-```sh
-scripts/kitty-keys.sh
+orb's direct keys use Alt, like zellij's defaults: h, j, k, l, the arrows, n, x, f, +, =, -, 1–9, [, ], i and o. Inside orb these Alt keys go to orb rather than the pane's shell or agent.
+
+- **Linux:** nothing to set up.
+- **macOS, Option as Alt:** add `macos_option_as_alt yes` to `kitty.conf`, the same setting zellij needs.
+- **macOS, Cmd instead:** to leave Option alone, add this block to `kitty.conf` and reload kitty. kitty uses many of these Cmd keys itself, so the block hands them to orb.
+
+```conf
+map cmd+h send_key alt+h
+map cmd+j send_key alt+j
+map cmd+k send_key alt+k
+map cmd+l send_key alt+l
+map cmd+left send_key alt+left
+map cmd+down send_key alt+down
+map cmd+up send_key alt+up
+map cmd+right send_key alt+right
+map cmd+n send_key alt+n
+map cmd+x send_key alt+x
+map cmd+f send_key alt+f
+map cmd+plus send_key alt+plus
+map cmd+equal send_key alt+equal
+map cmd+minus send_key alt+minus
+map cmd+1 send_key alt+1
+map cmd+2 send_key alt+2
+map cmd+3 send_key alt+3
+map cmd+4 send_key alt+4
+map cmd+5 send_key alt+5
+map cmd+6 send_key alt+6
+map cmd+7 send_key alt+7
+map cmd+8 send_key alt+8
+map cmd+9 send_key alt+9
+map cmd+[ send_key alt+[
+map cmd+] send_key alt+]
+map cmd+i send_key alt+i
+map cmd+o send_key alt+o
 ```
-
-It writes `orb.conf` to kitty's config directory and adds `include orb.conf` to `kitty.conf`; running it again rewrites `orb.conf` and leaves the include alone. Reload kitty afterwards. On macOS it maps each Cmd key to Super (`map cmd+h send_key super+h`). On Linux the compositor usually owns Super (niri binds nearly all of orb's keys), so Alt stands in for Cmd: `Alt h` is orb's `Cmd h`. Those maps apply only while the focused kitty window's title starts with `orb`, which fish, and bash or zsh with kitty's shell integration, set while orb runs, so Alt and `<C-S-h>`/`<C-S-l>` keep working everywhere else. Inside orb, those Alt keys go to orb rather than the pane's shell or agent. The keys are h, j, k, l, the arrows, n, x, +, =, -, 1–9, [, ], i and o.
 
 ## Demo
 
@@ -40,7 +70,7 @@ The demo shows, in order:
 
 1. Session cards in the sidebar with their agents (`✳` Claude Code, `π` pi) and each one's status, then the which-key popup and its `+new` group.
 2. Approving a tool call in the agent that asked for it.
-3. Panes: moving focus with Cmd keys, a shell, a new pane with Claude started in it, the `+pane` menu and zoom, a new tab, and a click on the tab bar.
+3. Panes: moving focus with Alt keys, a shell, a new pane with Claude started in it, the `+pane` menu and zoom, a new tab, and a click on the tab bar.
 4. Searching the sidebar and answering an agent's question.
 5. Folding a card's agent rows and renaming a session.
 6. The session picker, the transcript search, and jumping back with `<C-[>`.
@@ -68,19 +98,20 @@ The recording comes from a scripted environment of dummy repos and stand-in agen
 
 ## Keys
 
-`<C-g>` is the leader in the sidebar and in panes; press it and wait for the which-key popup. While a pane has the keys, every key goes to its program except the Cmd keys, `<C-S-h>`, `<C-g>`, `<C-[>` and `<C-]>`.
+`<C-g>` is the leader in the sidebar and in panes; press it and wait for the which-key popup. While a pane has the keys, every key goes to its program except the Alt keys, `<C-g>`, `<C-[>` and `<C-]>`.
 
 | Key | Action |
 | --- | --- |
-| `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; at the tab's left or right edge, go to the previous or next tab (wrapping) and focus its pane on that edge. They do nothing in the sidebar |
-| `Cmd n` | Add a pane (re-tiles the tab) |
-| `Cmd x` | Close the pane |
-| `Cmd +` / `Cmd =`, `Cmd -` | Grow / shrink the focused pane or the sidebar |
-| `Cmd 1` to `Cmd 9` | Go to tab N |
-| `Cmd [` / `Cmd ]` | Previous / next swap layout for the shown tab (BASE, vertical, horizontal, stacked, half-stacked; skips ones that don't fit, wraps; a tab changed by hand first gets its own layout back) |
-| `Cmd i` / `Cmd o` | Move the tab left / right |
+| `Alt h/j/k/l`, Alt arrows | Move focus between panes; at the tab's left or right edge, go to the previous or next tab (wrapping) and focus its pane on that edge. They do nothing in the sidebar |
+| `Alt n` | Add a pane (re-tiles the tab) |
+| `Alt x` | Close the pane |
+| `Alt f` | Show / hide the session's floats; with none, open a shell float |
+| `Alt +` / `Alt =`, `Alt -` | Grow / shrink the focused pane or the sidebar |
+| `Alt 1` to `Alt 9` | Go to tab N |
+| `Alt [` / `Alt ]` | Previous / next swap layout for the shown tab (BASE, vertical, horizontal, stacked, half-stacked; skips ones that don't fit, wraps; a tab changed by hand first gets its own layout back) |
+| `Alt i` / `Alt o` | Move the tab left / right |
 | `<C-[>` / `<C-]>` | Jump back / forward through the jump list |
-| `<C-S-h>` / `<C-S-l>` | Move the keys to the sidebar (showing it if hidden) / into the shown session's panes |
+| `<C-g> h` / `<C-g> l` | In a pane, move the keys to the sidebar (showing it if hidden) / in the sidebar, move them into the shown session's panes |
 | `<C-g> e` | Hide or show the sidebar |
 | `<C-g> q` | Quit orb (every pane keeps running) |
 | `<C-g> p d/r/s/f/x/c` | In a pane: split down, split right, stack, zoom, close, rename |
@@ -109,7 +140,7 @@ In the sidebar:
 | `/` or `i` | Search |
 | `l` / `h` | Show / fold a card's agent rows (`h` on an agent row folds its card), or open / close the Settled shelf |
 
-`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-S-l>` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
+`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-g> l` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
 ## Mouse
 

@@ -3,7 +3,6 @@
 use crate::command::SessionsCommand;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::pane::intent::show_pane;
-use crate::feat::sessions::intent::with_visit;
 use crate::feat::sessions::state::SidebarItem;
 use crate::{AppState, Command, Focus};
 
@@ -70,7 +69,7 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
         }
         _ => commands.extend(pane),
     }
-    with_visit(state, commands)
+    commands
 }
 
 #[cfg(test)]
@@ -199,7 +198,7 @@ mod tests {
     #[rstest::rstest]
     fn re_entering_the_pane_jump_back_landed_in_keeps_jump_forward() {
         // Given a jump back from agent 2's pane into agent 1's, then a
-        // click on the sidebar and `<C-S-l>` back into agent 1's pane.
+        // click on the sidebar and `<C-g> l` back into agent 1's pane.
         let mut state = jumping(Focus::Pane, &[1, 2], &[on_agent(1), agent_row(2, 2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
@@ -240,13 +239,10 @@ mod tests {
         // When handling JumpBack.
         let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
 
-        // Then it only saves the list and visits agent 1.
+        // Then it only saves the list.
         assert_eq!(
             commands,
-            vec![
-                Command::Sessions(SessionsCommand::SaveJumps),
-                Command::Sessions(SessionsCommand::Visit(SessionId(1)))
-            ],
+            vec![Command::Sessions(SessionsCommand::SaveJumps)],
             "<C-[> must never attach"
         );
     }

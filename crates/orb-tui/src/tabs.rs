@@ -35,7 +35,7 @@ use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, P
 /// The trailing chevron's text.
 const PLUS: &str = " + ";
 /// The swap layout keys' hint, before the layout's name.
-const SWAP_KEYS: &str = " Cmd <[]> ";
+const SWAP_KEYS: &str = " Alt <[]> ";
 /// The powerline arrow each chevron starts and ends with.
 const ARROW: &str = "\u{e0b0}";
 
@@ -227,7 +227,7 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// The tab bar: the shown session's name, then a chevron per
 /// tab with the shown one bold on blue, then a ` + ` chevron. Tabs that
 /// don't fit are counted in `← +N` / `+N →` chips, keeping the shown tab.
-/// Then, right-aligned, the `Cmd <[]>` hint and the shown tab's swap layout
+/// Then, right-aligned, the `Alt <[]>` hint and the shown tab's swap layout
 /// name, lit while the tab is untouched and dim once it's changed by hand; a
 /// 1-pane tab has none, and it's dropped when the tabs leave no room for it.
 /// While a float has the keys (`keys_in_pane`), the name is the floats'

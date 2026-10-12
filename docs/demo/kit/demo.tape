@@ -11,8 +11,9 @@ Set Framerate 30
 Set TypingSpeed 70ms
 Set Theme { "name": "tokyonight-moon", "black": "#1b1d2b", "red": "#ff757f", "green": "#c3e88d", "yellow": "#ffc777", "blue": "#82aaff", "magenta": "#c099ff", "cyan": "#86e1fc", "white": "#828bb8", "brightBlack": "#444a73", "brightRed": "#ff757f", "brightGreen": "#c3e88d", "brightYellow": "#ffc777", "brightBlue": "#82aaff", "brightMagenta": "#c099ff", "brightCyan": "#86e1fc", "brightWhite": "#c8d3f5", "background": "#222436", "foreground": "#c8d3f5", "selection": "#2d3f76", "cursor": "#c8d3f5" }
 
-# Markers the keys.py wrapper turns into kitty keys: ⌘x is Cmd+x, ⌃H/⌃L are
-# Ctrl+Shift+h/l, ⌃[/⌃] are Ctrl+[/], and 🖱x,y; is a click at column x, row y.
+# Markers the keys.py wrapper turns into kitty keys: ⌘x is Alt+x (Cmd+x through
+# kitty's Cmd→Alt maps), ⌃H/⌃L are <C-g> h/l, ⌃[/⌃] are Ctrl+[/], and 🖱x,y;
+# is a click at column x, row y.
 
 Hide
 Type "source launch.sh"
