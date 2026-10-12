@@ -66,7 +66,7 @@ Entries are added or amended **only with human approval**.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (pane) The right-hand area shows the active session's panes while orb is attached to it; otherwise it shows the start screen.
 - (sidebar) Pinned sessions come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
-- (sidebar) An agent shows a green check and "done" when its latest turn ended after the user last selected its session.
+- (sidebar) An agent shows a green check and "done" when its latest turn ended after the keys were last in its pane.
 - (settle) A turn underway in any of a session's agent panes, including one waiting for approval or input, un-settles the session.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
