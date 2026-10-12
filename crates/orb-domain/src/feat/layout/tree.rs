@@ -340,37 +340,53 @@ impl TileLayout {
     /// the new pane `id` goes right after it and takes the focus, and the run
     /// of `split` splits the two join is re-divided into equal shares.
     pub fn split_focused(&mut self, split: Split, id: PaneId) {
-        if let Some(node) = find_holding_mut(&mut self.root, self.focus) {
-            let held = std::mem::replace(node, Node::Pane(id));
-            *node = split_node(held, split, id, 0.5);
-            even_run(&mut self.root, split, id);
+        if self.split_at(self.focus, split, id) {
             self.set_focus(id);
         }
+    }
+
+    /// Splits pane `at`, or its whole stack when it's stacked, `split`: the
+    /// new pane `id` goes right after it, the run is re-divided evenly, and
+    /// the focus stays where it was. Whether `at` is in this tree.
+    pub fn split_at(&mut self, at: PaneId, split: Split, id: PaneId) -> bool {
+        let Some(node) = find_holding_mut(&mut self.root, at) else {
+            return false;
+        };
+        let held = std::mem::replace(node, Node::Pane(id));
+        *node = split_node(held, split, id, 0.5);
+        even_run(&mut self.root, split, id);
+        true
     }
 
     /// Stacks the new pane `id` right after the focused pane and focuses it:
     /// in the focused pane's stack when it has one, else in a new stack of
     /// the two.
     pub fn stack_focused(&mut self, id: PaneId) {
-        let focus = self.focus;
-        match find_stack_holding_mut(&mut self.root, focus) {
-            Some(panes) => {
-                let at = panes
-                    .iter()
-                    .position(|pane| *pane == focus)
-                    .map_or(panes.len(), |index| index + 1);
-                panes.insert(at, id);
-            }
-            None => {
-                if let Some(node) = find_holding_mut(&mut self.root, focus) {
-                    *node = Node::Stack {
-                        panes: vec![focus, id],
-                        expanded: id,
-                    };
-                }
-            }
-        }
+        self.stack_at(self.focus, id);
         self.set_focus(id);
+    }
+
+    /// Stacks the new pane `id` right after pane `at`: in `at`'s stack when it
+    /// has one, which keeps showing the pane it showed, else in a new stack of
+    /// the two showing `at`. The focus stays where it was. Whether `at` is in
+    /// this tree.
+    pub fn stack_at(&mut self, at: PaneId, id: PaneId) -> bool {
+        if let Some(panes) = find_stack_holding_mut(&mut self.root, at) {
+            let index = panes
+                .iter()
+                .position(|pane| *pane == at)
+                .map_or(panes.len(), |index| index + 1);
+            panes.insert(index, id);
+            return true;
+        }
+        let Some(node) = find_holding_mut(&mut self.root, at) else {
+            return false;
+        };
+        *node = Node::Stack {
+            panes: vec![at, id],
+            expanded: at,
+        };
+        true
     }
 
     /// Adds pane `id`, focused, where a new pane goes in a tab changed by

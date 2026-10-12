@@ -18,23 +18,10 @@ impl SessionsActor {
         if first && !matches!(placement, Placement::Tab) {
             return;
         }
-        let id = match self.store.insert_pane(session, &dir) {
-            Ok(id) => id,
-            Err(report) => {
-                let error = save_failed(&self.services.log, &report);
-                return self.report.report(Outcome::Failed(error));
-            }
+        let entry = match self.shell_entry(session, dir) {
+            Ok(entry) => entry,
+            Err(error) => return self.report.report(Outcome::Failed(error)),
         };
-        let row = PaneRow {
-            id,
-            session_id: session,
-            cwd: dir,
-            zmx_name: None,
-            zmx_dir: None,
-            resume: None,
-            name: None,
-        };
-        let entry = pane_entry(&self.services, &self.orb_root, &row);
         {
             let mut app = self.state.write();
             match placement {
@@ -55,6 +42,64 @@ impl SessionsActor {
                 if_active: Some(session),
             });
         }
+    }
+
+    /// Adds a shell pane in `session`'s directory where an agent asked,
+    /// leaving the shown tab, the focus and whether the floats show as they
+    /// were, then saves the layout. Never reports the session ready. Replies
+    /// with the new pane, or why there is none: the session is gone or has no
+    /// layout, the pane to split or stack isn't in one of its tabs, or the
+    /// pane couldn't be saved.
+    pub(super) fn add_pane_at(&mut self, add: &ApiAdd) -> Result<PaneId, String> {
+        let &ApiAdd { session, place } = add;
+        let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
+            return Err(format!("no session {}", session.0));
+        };
+        if self.state.read().layouts.get(session).is_none() {
+            return Err(format!("session {} has no panes", session.0));
+        }
+        let entry = self.shell_entry(session, dir)?;
+        let id = entry.id;
+        let placed = {
+            let mut app = self.state.write();
+            match place {
+                ApiPlace::Split { at, split } => app.layouts.split_at(session, at, split, entry),
+                ApiPlace::Stack { at } => app.layouts.stack_at(session, at, entry),
+                ApiPlace::Tab => app.layouts.new_tab_keeping_shown(session, entry),
+                ApiPlace::Float => app.layouts.add_float_hidden(session, entry),
+            }
+        };
+        // An unplaced pane's row is dropped by the save: no tab or float holds it.
+        self.save_layout(session);
+        self.report.changed();
+        match (placed, place) {
+            (true, _) => Ok(id),
+            (false, ApiPlace::Split { at, .. } | ApiPlace::Stack { at }) => {
+                Err(format!("pane {} is gone", at.0))
+            }
+            (false, ApiPlace::Tab | ApiPlace::Float) => {
+                Err(format!("session {} has no panes", session.0))
+            }
+        }
+    }
+
+    /// Saves a new shell pane row for `session` running in `dir`, and how
+    /// it runs; on a store failure, the logged message for the user.
+    fn shell_entry(&self, session: SessionId, dir: PathBuf) -> Result<PaneEntry, String> {
+        let id = self
+            .store
+            .insert_pane(session, &dir)
+            .map_err(|report| save_failed(&self.services.log, &report))?;
+        let row = PaneRow {
+            id,
+            session_id: session,
+            cwd: dir,
+            zmx_name: None,
+            zmx_dir: None,
+            resume: None,
+            name: None,
+        };
+        Ok(pane_entry(&self.services, &self.orb_root, &row))
     }
 
     /// Saves `session`'s tabs, floats, active tab and pane names as the app

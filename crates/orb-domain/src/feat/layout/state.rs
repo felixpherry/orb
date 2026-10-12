@@ -730,6 +730,98 @@ impl Layouts {
         }
     }
 
+    /// Splits pane `at` of `owner`, or its whole stack when it's stacked,
+    /// `split` with `pane`, in whichever tab holds it, shown or not. The
+    /// focus and the shown tab stay; that tab shows every pane again and is
+    /// marked changed by hand. Whether `pane` was placed.
+    pub fn split_at(
+        &mut self,
+        owner: SessionId,
+        at: PaneId,
+        split: Split,
+        pane: PaneEntry,
+    ) -> bool {
+        self.place_in_tab_of(owner, at, pane, |tree, id| tree.split_at(at, split, id))
+    }
+
+    /// Stacks `pane` right after pane `at` of `owner`, in whichever tab holds
+    /// it, joining `at`'s stack when it has one. The focus, the shown tab and
+    /// the pane a stack shows stay; that tab shows every pane again and is
+    /// marked changed by hand. Whether `pane` was placed.
+    pub fn stack_at(&mut self, owner: SessionId, at: PaneId, pane: PaneEntry) -> bool {
+        self.place_in_tab_of(owner, at, pane, |tree, id| tree.stack_at(at, id))
+    }
+
+    /// Appends a tab of the one pane `pane` to `owner`'s layout and keeps
+    /// showing the tab that was shown. Whether `owner` has a layout.
+    pub fn new_tab_keeping_shown(&mut self, owner: SessionId, pane: PaneEntry) -> bool {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        layout.tabs.push(Tab::new(pane.id));
+        layout.panes.insert(pane.id, pane);
+        true
+    }
+
+    /// Puts `pane` among `owner`'s floats just under the top one. It never
+    /// shows the floats or takes the focus. Whether `owner` has a layout.
+    pub fn add_float_hidden(&mut self, owner: SessionId, pane: PaneEntry) -> bool {
+        let body = self.body;
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        layout.floats.add_under_top(pane.id, body);
+        layout.panes.insert(pane.id, pane);
+        true
+    }
+
+    /// Closes the tab holding `pane`, shown or not; when it was shown, the tab
+    /// before it is shown. A layout left without tabs or floats goes. False
+    /// for a float or a pane no layout holds.
+    pub fn close_tab_of(&mut self, pane: PaneId) -> bool {
+        let Some(owner) = self.owner_of(pane) else {
+            return false;
+        };
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        let Some(index) = layout.tabs.iter().position(|tab| tab.holds(pane)) else {
+            return false;
+        };
+        layout.remove_tab(index);
+        layout.drop_loose_entries();
+        self.drop_if_empty(owner);
+        true
+    }
+
+    /// Runs `place` on the tree of `owner`'s tab holding `at`; when it placed
+    /// `pane`, that tab shows every pane again, is marked changed by hand and
+    /// `pane` is recorded. Whether it was placed.
+    fn place_in_tab_of<F>(
+        &mut self,
+        owner: SessionId,
+        at: PaneId,
+        pane: PaneEntry,
+        place: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut TileLayout, PaneId) -> bool,
+    {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        let Some(tab) = layout.tabs.iter_mut().find(|tab| tab.holds(at)) else {
+            return false;
+        };
+        if !place(&mut tab.tree, pane.id) {
+            return false;
+        }
+        tab.zoomed = false;
+        tab.hand_changed = true;
+        layout.panes.insert(pane.id, pane);
+        true
+    }
+
     /// Turns the shown tab's focused pane into the top float in the staggered
     /// spot and shows the floats; the tab is re-tiled in its swap layout
     /// unless it was changed by hand. A tab's only pane, or a float having

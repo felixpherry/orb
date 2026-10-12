@@ -64,14 +64,70 @@ impl SessionsActor {
         name: Option<String>,
         if_active: Option<SessionId>,
     ) -> Option<WorktreeJob> {
+        self.start_new(id, workspace, name, Asker::User(if_active))
+    }
+
+    /// Makes a session for an agent, as [`Self::new_session`] does, in
+    /// project `msg.project`'s checkout or, with `msg.worktree`, in a new
+    /// worktree from the project's default branch. The session isn't
+    /// selected or opened; `reply` gets the session and its first pane once
+    /// it's made, or why it wasn't.
+    #[must_use]
+    pub(super) fn api_start(
+        &mut self,
+        msg: ApiStart,
+        reply: Option<ReplySender<ApiStarted>>,
+    ) -> Option<WorktreeJob> {
+        let ApiStart {
+            project,
+            worktree,
+            name,
+        } = msg;
+        let asker = Asker::Api(reply);
+        let workspace = if worktree {
+            let base = match self.project_of(project) {
+                None => Err("the project is gone".to_owned()),
+                Some((root, _)) => self.services.git.default_branch(&root).map_err(|report| {
+                    git_failed(
+                        &self.services.log,
+                        "default branch for a new session",
+                        &report,
+                    )
+                }),
+            };
+            match base {
+                Ok(base) => Workspace::NewWorktree { base },
+                Err(error) => {
+                    self.end_new(Err(error), asker);
+                    return None;
+                }
+            }
+        } else {
+            Workspace::Checkout
+        };
+        self.start_new(project, workspace, name, asker)
+    }
+
+    /// The work of a new session of project `id` in `workspace`, named
+    /// `name`, for `asker`; see [`Self::new_session`].
+    fn start_new(
+        &mut self,
+        id: ProjectId,
+        workspace: Workspace,
+        name: Option<String>,
+        asker: Asker,
+    ) -> Option<WorktreeJob> {
         let Some((root, kind)) = self.project_of(id) else {
-            self.end_start(Err("the project is gone".to_owned()), None);
+            self.end_new(Err("the project is gone".to_owned()), asker);
             return None;
         };
         if kind == ProjectKind::Incognito
             && let Err(error) = fs::create_dir_all(&root)
         {
-            self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)), None);
+            self.end_new(
+                Err(failed(&self.services.log, FOLDER_UNMADE, &error)),
+                asker,
+            );
             return None;
         }
         match workspace {
@@ -84,21 +140,49 @@ impl SessionsActor {
                     project: id,
                     kind,
                     name,
-                    if_active,
+                    asker,
                 };
                 Some(self.job(root, make, start))
             }
             to => {
+                let select = asker.selects();
                 let saved = reach(&root, to).and_then(|dir| {
                     let branch = current_branch(&self.services.git, &self.services.log, &dir);
-                    self.save_session(id, session_kind(kind), &dir, branch, name)
+                    self.save_session(id, session_kind(kind), &dir, branch, name, select)
                 });
+                self.end_new(saved, asker);
+                None
+            }
+        }
+    }
+
+    /// Ends a new session's start, `saved` being the session it made or why
+    /// not. The user's start shows the error, else reports the session ready
+    /// to open (see [`Self::end_start`]); an agent's opens nothing, shows
+    /// nothing, and answers the agent with the session and its first pane.
+    fn end_new(&mut self, saved: Result<SessionId, String>, asker: Asker) {
+        match asker {
+            Asker::User(if_active) => {
                 let opens = saved
                     .as_ref()
                     .ok()
                     .map(|&session| Opens { session, if_active });
                 self.end_start(saved.map(drop), opens);
-                None
+            }
+            Asker::Api(reply) => {
+                self.end_start(Ok(()), None);
+                let started = saved.and_then(|session| {
+                    self.state
+                        .read()
+                        .layouts
+                        .get(session)
+                        .and_then(SessionLayout::focused)
+                        .map(|pane| (session, pane))
+                        .ok_or_else(|| "the new session has no pane".to_owned())
+                });
+                if let Some(reply) = reply {
+                    reply.send(started);
+                }
             }
         }
     }
@@ -133,8 +217,9 @@ impl SessionsActor {
                 project,
                 kind,
                 name,
-                if_active,
+                asker,
             } => {
+                let select = asker.selects();
                 let saved = made.and_then(|made| {
                     let live = self
                         .state
@@ -147,18 +232,20 @@ impl SessionsActor {
                         return Err("the project is gone".to_owned());
                     }
                     let branch = Some(made.branch.clone());
-                    let saved =
-                        self.save_session(project, session_kind(kind), &made.path, branch, name);
+                    let saved = self.save_session(
+                        project,
+                        session_kind(kind),
+                        &made.path,
+                        branch,
+                        name,
+                        select,
+                    );
                     if saved.is_err() {
                         self.remove_made(&made, "new session couldn't be saved");
                     }
                     saved
                 });
-                let opens = saved
-                    .as_ref()
-                    .ok()
-                    .map(|&session| Opens { session, if_active });
-                self.end_start(saved.map(drop), opens);
+                self.end_new(saved, asker);
             }
             Start::Move {
                 session,
@@ -199,8 +286,8 @@ impl SessionsActor {
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
     /// on `branch` with one tab of one shell pane, saved through the layout
-    /// save, shows it and selects it. Returns its id; the error is the
-    /// message box text.
+    /// save, shows it and, when `select`, selects it. Returns its id; the
+    /// error is the message box text.
     pub(super) fn save_session(
         &mut self,
         project: ProjectId,
@@ -208,6 +295,7 @@ impl SessionsActor {
         dir: &Path,
         branch: Option<String>,
         name: Option<String>,
+        select: bool,
     ) -> Result<SessionId, String> {
         let now = now_ms();
         let (id, pane) = self
@@ -246,7 +334,9 @@ impl SessionsActor {
             app.layouts.insert(id, SessionLayout::of(entry));
             let sessions = &mut app.sessions;
             sessions.sessions.push(show_session(&row));
-            sessions.cursor = Some(SidebarItem::Session(id));
+            if select {
+                sessions.cursor = Some(SidebarItem::Session(id));
+            }
         }
         self.sessions.insert(id, row);
         self.save_layout(id);

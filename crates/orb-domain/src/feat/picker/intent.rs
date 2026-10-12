@@ -620,7 +620,7 @@ fn back_to_list(state: &mut AppState, drop_row: bool) {
 /// Puts the cursor on `cursor`, records the move from `from` (where a jump
 /// starts, read before the pick changes anything) as a jump to `jump_to` and
 /// attaches its session. Staying on the same row isn't a jump.
-fn pick(
+pub(crate) fn pick(
     state: &mut AppState,
     from: Option<SidebarItem>,
     cursor: SidebarItem,

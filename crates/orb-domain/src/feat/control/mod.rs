@@ -6,7 +6,10 @@
 //! `orb tab`, `orb pane` and `orb agent` commands send it one request each and
 //! print its JSON reply.
 
+pub mod change;
 pub mod client;
+pub mod pane_control;
 pub mod protocol;
 pub mod server;
 pub(crate) mod target;
+pub(crate) mod validator;

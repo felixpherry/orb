@@ -62,6 +62,11 @@
 //! selects its text, and the release copies it to the clipboard through
 //! OSC 52.
 //!
+//! Agents' changes through the control socket (closing, renaming, settling
+//! or focusing a named pane, tab or session) are applied here too, and their
+//! refusals go back to the agent, never to the message box. Only `focus`
+//! moves the keys.
+//!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, the attached
 //! program's own shape while attached.
@@ -79,6 +84,7 @@ use std::time::{Duration, Instant, SystemTime};
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
+use orb_domain::feat::control::pane_control::{PaneControl, PaneReply, PaneRequest};
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
@@ -114,6 +120,7 @@ use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::toast::Toasts;
 use crate::{outer_terminal, render, tabs};
 
+mod control;
 mod panes;
 mod report;
 
@@ -166,6 +173,14 @@ impl Frontend {
         move || {
             let _ = tx.send(LoopEvent::Quit);
         }
+    }
+
+    /// Hands agents' requests to the loop, which applies each and answers.
+    pub fn controller(&self) -> PaneControl {
+        let tx = self.tx.clone();
+        PaneControl::new(move |request, reply| {
+            let _ = tx.send(LoopEvent::Control(request, reply));
+        })
     }
 
     /// Runs orb's TUI until the user quits or [`Frontend::quitter`] is called.
@@ -235,6 +250,8 @@ enum LoopEvent {
     Reported(Outcome),
     /// orb was asked to quit from outside (a signal).
     Quit,
+    /// An agent's request through the control socket, answered on its sender.
+    Control(PaneRequest, Sender<PaneReply>),
 }
 
 /// Handles a mouse event's intents in order after ending any pane mode;
@@ -702,6 +719,7 @@ impl App {
             LoopEvent::Pane(_, PaneEvent::Clipboard(text)) => {
                 outer_terminal::copy_to_clipboard(out, &text)?;
             }
+            LoopEvent::Control(request, reply) => self.control(request, &reply),
         }
         Ok(())
     }

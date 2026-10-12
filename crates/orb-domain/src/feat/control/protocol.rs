@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::feat::layout::tree::Split;
 use crate::feat::sessions::state::AgentStatus;
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
@@ -50,6 +51,101 @@ pub enum Op {
     /// Every live agent in every session.
     #[serde(rename = "agent.list")]
     AgentList,
+    /// A new shell beside a pane (or its whole stack).
+    #[serde(rename = "pane.split")]
+    PaneSplit {
+        /// The pane, else the caller's.
+        #[serde(default)]
+        pane: Option<PaneId>,
+        /// Which side the new pane goes.
+        direction: Direction,
+    },
+    /// A new shell stacked right after a pane.
+    #[serde(rename = "pane.stack")]
+    PaneStack {
+        /// The pane, else the caller's.
+        #[serde(default)]
+        pane: Option<PaneId>,
+    },
+    /// A new floating shell in a session.
+    #[serde(rename = "pane.float")]
+    PaneFloat {
+        /// The session, else the caller's.
+        #[serde(default)]
+        session: Option<SessionId>,
+    },
+    /// A new tab with one shell at the end of a session's tabs.
+    #[serde(rename = "tab.create")]
+    TabCreate {
+        /// The session, else the caller's.
+        #[serde(default)]
+        session: Option<SessionId>,
+    },
+    /// A new session.
+    #[serde(rename = "session.create")]
+    SessionCreate {
+        /// The project, else the caller's session's.
+        #[serde(default)]
+        project: Option<ProjectId>,
+        /// In a new worktree from the project's default branch, else in its
+        /// checkout.
+        #[serde(default)]
+        worktree: bool,
+        /// Its name, else the usual one.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Closes a pane.
+    #[serde(rename = "pane.close")]
+    PaneClose { pane: PaneId },
+    /// Names a pane; an empty name goes back to the usual one.
+    #[serde(rename = "pane.rename")]
+    PaneRename { pane: PaneId, name: String },
+    /// Shows a pane and moves the keys into it.
+    #[serde(rename = "pane.focus")]
+    PaneFocus { pane: PaneId },
+    /// Closes the tab holding a pane.
+    #[serde(rename = "tab.close")]
+    TabClose {
+        /// The pane, else the caller's.
+        #[serde(default)]
+        pane: Option<PaneId>,
+    },
+    /// Names a session; an empty name goes back to the usual one.
+    #[serde(rename = "session.rename")]
+    SessionRename {
+        /// The session, else the caller's.
+        #[serde(default)]
+        session: Option<SessionId>,
+        name: String,
+    },
+    /// Moves a session to the Settled shelf.
+    #[serde(rename = "session.settle")]
+    SessionSettle {
+        /// The session, else the caller's.
+        #[serde(default)]
+        session: Option<SessionId>,
+    },
+    /// Shows a session's focused pane and moves the keys into it.
+    #[serde(rename = "session.focus")]
+    SessionFocus { session: SessionId },
+}
+
+/// Which side of a pane `pane split` puts the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Right,
+    Down,
+}
+
+impl From<Direction> for Split {
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::Right => Self::Right,
+            Direction::Down => Self::Down,
+        }
+    }
 }
 
 /// Why a request failed.
@@ -214,6 +310,27 @@ pub struct AgentRow {
     pub cwd: String,
     pub branch: Option<String>,
 }
+
+/// What an add replies: the new pane.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaneResult {
+    pub pane: PaneId,
+}
+
+/// `session create`'s result: the new session and its first pane.
+#[derive(Debug, Clone, Serialize)]
+pub struct StartResult {
+    pub session: SessionId,
+    pub pane: PaneId,
+}
+
+/// What a change replies once done: nothing (`{}`).
+#[derive(Debug, Clone, Serialize)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "a unit struct would go on the wire as null, not {}"
+)]
+pub struct Done {}
 
 /// `agent list`'s result.
 #[derive(Debug, Clone, Serialize)]

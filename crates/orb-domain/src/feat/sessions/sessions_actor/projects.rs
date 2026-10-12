@@ -75,7 +75,7 @@ impl SessionsActor {
         }
         let made = project.and_then(|id| {
             let dir = self.make_folder(kind, kind_dir, &root, name)?;
-            let saved = self.save_session(id, session_kind(project_kind), &dir, None, None);
+            let saved = self.save_session(id, session_kind(project_kind), &dir, None, None, true);
             if saved.is_err() {
                 remove_unstarted(&self.services.log, &dir);
             }

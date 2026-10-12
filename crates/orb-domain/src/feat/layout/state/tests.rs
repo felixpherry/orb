@@ -3135,3 +3135,48 @@ fn closing_loses_only_the_closed_panes(#[case] op: fn(&mut Layouts), #[case] clo
     // Then only the closed panes are gone.
     assert_no_pane_lost(&before, &layouts, &closed);
 }
+
+#[rstest::rstest]
+fn split_at_in_a_hidden_tab_changes_that_tab() {
+    // Given session 1 with tabs of pane 7 and pane 8, the second shown.
+    let mut layouts = opened();
+    layouts.new_tab(OWNER, entry(8));
+
+    // When splitting pane 7 right with pane 9.
+    layouts.split_at(OWNER, PaneId(7), Split::Right, entry(9));
+
+    // Then the first tab holds pane 9, the shown second tab doesn't, and it
+    // stays shown.
+    let holds = |index: usize| {
+        layouts
+            .get(OWNER)
+            .and_then(|layout| layout.tabs().get(index))
+            .is_some_and(|tab| tab.holds(PaneId(9)))
+    };
+    assert_eq!(
+        (holds(0), holds(1), active(&layouts)),
+        (true, false, Some(1)),
+        "the split lands in the hidden tab holding pane 7"
+    );
+}
+
+#[rstest::rstest]
+#[case::split_at(|layouts: &mut Layouts| layouts.split_at(OWNER, PaneId(7), Split::Down, entry(9)))]
+#[case::stack_at(|layouts: &mut Layouts| layouts.stack_at(OWNER, PaneId(7), entry(9)))]
+#[case::new_tab_keeping_shown(|layouts: &mut Layouts| layouts.new_tab_keeping_shown(OWNER, entry(9)))]
+#[case::add_float_hidden(|layouts: &mut Layouts| layouts.add_float_hidden(OWNER, entry(9)))]
+fn api_adds_keep_the_pane_with_the_keys(#[case] add: fn(&mut Layouts) -> bool) {
+    // Given pane 7 beside pane 8, pane 8 focused.
+    let mut layouts = split_right();
+    let before = (active(&layouts), focused(&layouts));
+
+    // When adding pane 9 by name.
+    add(&mut layouts);
+
+    // Then the shown tab and its focused pane stay.
+    assert_eq!(
+        (active(&layouts), focused(&layouts)),
+        before,
+        "an API add leaves the keys where they were"
+    );
+}

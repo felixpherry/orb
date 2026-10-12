@@ -11,8 +11,8 @@ use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
-    FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob,
-    WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
+    ApiAdd, ApiPlace, ApiStart, FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor,
+    SessionsActorDeps, WorktreeJob, WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -8538,6 +8538,146 @@ fn failed_save_logs_the_cause_behind_the_message() -> Result<(), Report<StoreErr
     assert!(
         content.contains("couldn't save orb's state") && content.contains("no such table: jumps"),
         "expected the message and its cause in the log, got {content:?}"
+    );
+    Ok(())
+}
+
+/// Asks `actor` for an agent's new shell `add` and waits, at most
+/// [`LIMIT`], for the new pane.
+async fn api_add(
+    actor: &ActorRef<SessionsActor>,
+    add: ApiAdd,
+) -> Result<PaneId, Report<StoreError>> {
+    tokio::time::timeout(LIMIT, actor.ask(add))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't answer in time")?
+        .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
+}
+
+/// Asks `actor` for an agent's new session of `project` (in a new
+/// worktree when `worktree`) and waits, at most [`LIMIT`], for the
+/// session and its first pane.
+async fn api_start(
+    actor: &ActorRef<SessionsActor>,
+    project: ProjectId,
+    worktree: bool,
+) -> Result<(SessionId, PaneId), Report<StoreError>> {
+    let start = ApiStart {
+        project,
+        worktree,
+        name: None,
+    };
+    tokio::time::timeout(LIMIT, actor.ask(start))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't answer in time")?
+        .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_add_split_replies_with_the_saved_pane() -> Result<(), Report<StoreError>> {
+    // Given a store file with agent aa and the actor started through its
+    // mailbox.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    let store = Store::open(&path)?;
+    let inserted = insert_agent(&store, "aa")?;
+    let zmx = zmx_running(&store);
+    let (actor, _state) = spawned(store, &listing(Vec::new()), zmx).await?;
+
+    // When an agent asks to split aa's pane right.
+    let add = ApiAdd {
+        session: inserted.session,
+        place: ApiPlace::Split {
+            at: inserted.pane,
+            split: Split::Right,
+        },
+    };
+    let pane = api_add(&actor, add).await?;
+
+    // Then the pane it replies with is saved in the store file.
+    let saved: Vec<PaneId> = Store::open(&path)?
+        .layouts()?
+        .panes
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert!(
+        saved.contains(&pane),
+        "the new pane {pane:?} should be saved, got {saved:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_in_the_checkout_opens_nothing() -> Result<(), Report<StoreError>> {
+    // Given the orb project and the actor started through its mailbox.
+    let (store, project) = store_with_project()?;
+    let zmx = zmx_running(&store);
+    let (actor, _state, report) =
+        spawned_reporting(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
+
+    // When an agent asks for a session in its checkout.
+    let started = api_start(&actor, project, false).await;
+
+    // Then it gets the session, and nothing is reported ready to open.
+    let opened = report
+        .outcomes()
+        .iter()
+        .any(|outcome| matches!(outcome, Outcome::Ready { .. }));
+    assert_eq!(
+        (started.is_ok(), opened),
+        (true, false),
+        "an agent's new session is made but not opened"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_leaves_the_sidebar_cursor() -> Result<(), Report<StoreError>> {
+    // Given the orb project and the actor started through its mailbox.
+    let (store, project) = store_with_project()?;
+    let zmx = zmx_running(&store);
+    let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
+    let before = state.read().sessions.cursor;
+
+    // When an agent asks for a session in its checkout.
+    api_start(&actor, project, false).await?;
+
+    // Then the sidebar's cursor stays where it was.
+    assert_eq!(
+        state.read().sessions.cursor,
+        before,
+        "an agent's new session isn't selected"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_in_a_new_worktree_replies_with_its_session() -> Result<(), Report<StoreError>> {
+    // Given the orb project and the actor started through its mailbox.
+    let (store, project) = store_with_project()?;
+    let zmx = zmx_running(&store);
+    let git = FakeGit::local();
+    let (actor, state) = spawned_with(store, &listing(Vec::new()), git.clone(), zmx).await?;
+
+    // When an agent asks for a session in a new worktree.
+    let (session, _pane) = api_start(&actor, project, true).await?;
+
+    // Then the session it gets runs in the worktree orb made.
+    let dir = sessions_of(&state)
+        .into_iter()
+        .find(|shown| shown.id == session)
+        .map(|shown| shown.dir);
+    assert_eq!(
+        dir,
+        git.added().map(|(path, _)| path),
+        "the replied session runs in the new worktree"
     );
     Ok(())
 }

@@ -2,13 +2,14 @@
 //! request, send it to the running orb, print its reply and pick the exit code
 //! (0 done, 1 refused or orb not running, 2 typed wrong).
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-use crate::feat::control::protocol::{ApiError, ErrorCode, Op, Reply, Request};
-use crate::ids::{PaneId, SessionId};
+use crate::feat::control::protocol::{ApiError, Direction, ErrorCode, Op, Reply, Request};
+use crate::ids::{PaneId, ProjectId, SessionId};
 
 /// The first arguments that make `orb` a client.
 pub const NOUNS: [&str; 4] = ["session", "tab", "pane", "agent"];
@@ -18,7 +19,19 @@ const USAGE: &str = "usage:
   orb session list
   orb tab list [--session <id>]
   orb pane list [--session <id>]
-  orb agent list";
+  orb agent list
+  orb session create [--project <id>] [--worktree] [--name <text>]
+  orb tab create [--session <id>]
+  orb pane split [<pane>] --direction right|down
+  orb pane stack [<pane>]
+  orb pane float [--session <id>]
+  orb pane close <pane>
+  orb pane rename <pane> <name>
+  orb pane focus <pane>
+  orb tab close [--pane <id>]
+  orb session rename [<session>] <name>
+  orb session settle [<session>]
+  orb session focus <session>";
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
 /// pane `caller` when it runs inside orb. The reply's result goes to `out`, an
@@ -69,23 +82,155 @@ fn parse(args: &[OsString]) -> Option<Op> {
         ("session", "list", []) => Some(Op::SessionList),
         ("agent", "list", []) => Some(Op::AgentList),
         ("tab", "list", rest) => Some(Op::TabList {
-            session: session_flag(rest).ok()?,
+            session: session_only(rest).ok()?,
         }),
         ("pane", "list", rest) => Some(Op::PaneList {
-            session: session_flag(rest).ok()?,
+            session: session_only(rest).ok()?,
+        }),
+        ("pane", "float", rest) => Some(Op::PaneFloat {
+            session: session_only(rest).ok()?,
+        }),
+        ("tab", "create", rest) => Some(Op::TabCreate {
+            session: session_only(rest).ok()?,
+        }),
+        ("pane", "split", rest) => {
+            let words = Words::split(rest, &[("--direction", true)])?;
+            let direction = match words.value("--direction")? {
+                "right" => Direction::Right,
+                "down" => Direction::Down,
+                _ => return None,
+            };
+            Some(Op::PaneSplit {
+                pane: words.target().ok()?.map(PaneId),
+                direction,
+            })
+        }
+        ("pane", "stack", rest) => Some(Op::PaneStack {
+            pane: Words::split(rest, &[])?.target().ok()?.map(PaneId),
+        }),
+        ("session", "create", rest) => {
+            let words = Words::split(
+                rest,
+                &[("--project", true), ("--worktree", false), ("--name", true)],
+            )?;
+            if !words.positional.is_empty() {
+                return None;
+            }
+            Some(Op::SessionCreate {
+                project: words.id("--project").ok()?.map(ProjectId),
+                worktree: words.flags.contains_key("--worktree"),
+                name: words.value("--name").map(str::to_owned),
+            })
+        }
+        ("pane", "close", rest) => Some(Op::PaneClose {
+            pane: PaneId(one_id(rest)?),
+        }),
+        ("pane", "focus", rest) => Some(Op::PaneFocus {
+            pane: PaneId(one_id(rest)?),
+        }),
+        ("pane", "rename", [pane, name]) => Some(Op::PaneRename {
+            pane: PaneId(number(pane).ok()?),
+            name: (*name).to_owned(),
+        }),
+        ("tab", "close", rest) => {
+            let words = Words::split(rest, &[("--pane", true)])?;
+            if !words.positional.is_empty() {
+                return None;
+            }
+            Some(Op::TabClose {
+                pane: words.id("--pane").ok()?.map(PaneId),
+            })
+        }
+        ("session", "rename", [name]) => Some(Op::SessionRename {
+            session: None,
+            name: (*name).to_owned(),
+        }),
+        ("session", "rename", [session, name]) => Some(Op::SessionRename {
+            session: Some(SessionId(number(session).ok()?)),
+            name: (*name).to_owned(),
+        }),
+        ("session", "settle", rest) => Some(Op::SessionSettle {
+            session: Words::split(rest, &[])?.target().ok()?.map(SessionId),
+        }),
+        ("session", "focus", rest) => Some(Op::SessionFocus {
+            session: SessionId(one_id(rest)?),
         }),
         _ => None,
     }
 }
 
-/// The optional `--session <id>`: `Ok(None)` when absent, `Err` when the
-/// words are anything else.
-fn session_flag(rest: &[&str]) -> Result<Option<SessionId>, ()> {
-    match rest {
-        [] => Ok(None),
-        ["--session", id] => id.parse().map(|id| Some(SessionId(id))).map_err(drop),
-        _ => Err(()),
+/// Words that must be exactly one ID.
+fn one_id(rest: &[&str]) -> Option<i64> {
+    Words::split(rest, &[])?.target().ok().flatten()
+}
+
+/// Words that may only hold `--session <id>`: the ID, or `Ok(None)` when
+/// it's absent; `Err` when they hold anything else.
+fn session_only(rest: &[&str]) -> Result<Option<SessionId>, ()> {
+    let words = Words::split(rest, &[("--session", true)]).ok_or(())?;
+    if !words.positional.is_empty() {
+        return Err(());
     }
+    Ok(words.id("--session")?.map(SessionId))
+}
+
+/// The words after a command's verb: its positionals and its `--flag`s.
+#[derive(Debug, Default)]
+struct Words<'a> {
+    positional: Vec<&'a str>,
+    /// Each flag given, with its value when it takes one.
+    flags: HashMap<&'a str, Option<&'a str>>,
+}
+
+impl<'a> Words<'a> {
+    /// Splits `rest` given the `known` flags, each marked as taking a value or
+    /// not; `None` for an unknown flag, a repeat or a missing value.
+    fn split(rest: &[&'a str], known: &[(&str, bool)]) -> Option<Self> {
+        let mut words = Self::default();
+        let mut rest = rest.iter().copied();
+        while let Some(word) = rest.next() {
+            if !word.starts_with("--") {
+                words.positional.push(word);
+                continue;
+            }
+            let &(_, takes_value) = known.iter().find(|&&(flag, _)| flag == word)?;
+            let value = if takes_value {
+                Some(rest.next()?)
+            } else {
+                None
+            };
+            if words.flags.insert(word, value).is_some() {
+                return None;
+            }
+        }
+        Some(words)
+    }
+
+    /// Flag `flag`'s value, if it was given one.
+    fn value(&self, flag: &str) -> Option<&'a str> {
+        self.flags.get(flag).copied().flatten()
+    }
+
+    /// Flag `flag`'s value as an ID: `Ok(None)` when absent, `Err` when it
+    /// isn't a number.
+    fn id(&self, flag: &str) -> Result<Option<i64>, ()> {
+        self.value(flag).map(number).transpose()
+    }
+
+    /// The one optional positional, as an ID: `Ok(None)` when there is none,
+    /// `Err` when it isn't a number or there are more.
+    fn target(&self) -> Result<Option<i64>, ()> {
+        match self.positional.as_slice() {
+            [] => Ok(None),
+            [id] => number(id).map(Some),
+            _ => Err(()),
+        }
+    }
+}
+
+/// `word` as an ID number.
+fn number(word: &str) -> Result<i64, ()> {
+    word.parse().map_err(drop)
 }
 
 /// Sends `request` over one connection and reads the one reply line.
@@ -127,7 +272,9 @@ mod tests {
     use std::error::Error;
     use std::ffi::OsString;
 
-    use super::run;
+    use super::{parse, run};
+    use crate::feat::control::protocol::{Direction, Op};
+    use crate::ids::PaneId;
 
     /// `words` as command-line arguments.
     fn args(words: &[&str]) -> Vec<OsString> {
@@ -178,5 +325,21 @@ mod tests {
             "an unknown verb prints the usage and exits 2, got {code}: {err}"
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn split_words_name_the_pane_and_direction() {
+        // Given / When parsing `pane split 3 --direction down`.
+        let op = parse(&args(&["pane", "split", "3", "--direction", "down"]));
+
+        // Then it asks to split pane 3 down.
+        assert_eq!(
+            op,
+            Some(Op::PaneSplit {
+                pane: Some(PaneId(3)),
+                direction: Direction::Down,
+            }),
+            "the pane and direction come from the words"
+        );
     }
 }

@@ -1706,3 +1706,15 @@ fn grow_focused_keeps_unstacked_panes_at_least_five_by_five(
         "a grow step left panes under 5×5: {violations:?}"
     );
 }
+
+#[rstest::rstest]
+fn split_at_keeps_the_focused_pane() {
+    // Given panes 1 and 2 side by side, pane 2 focused.
+    let mut layout = halves(2);
+
+    // When splitting pane 1 down with pane 3.
+    layout.split_at(pane(1), Split::Down, pane(3));
+
+    // Then pane 2 keeps the focus.
+    assert_eq!(layout.focused(), pane(2), "a named split leaves the focus");
+}

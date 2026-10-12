@@ -186,6 +186,20 @@ impl Floats {
     /// Puts `pane` on top in the staggered spot for `body` and shows the
     /// floats; lays them out again unless they were changed by hand.
     pub fn add(&mut self, pane: PaneId, body: Rect) {
+        self.insert(self.panes.len(), pane, body);
+        self.shown = true;
+    }
+
+    /// Puts `pane` just under the top float, so the float with the keys keeps
+    /// them, and leaves the floats shown or hidden as they were; lays them out
+    /// again unless they were changed by hand.
+    pub fn add_under_top(&mut self, pane: PaneId, body: Rect) {
+        self.insert(self.panes.len().saturating_sub(1), pane, body);
+    }
+
+    /// Puts `pane` at `index`, bottom first, in the staggered spot for `body`
+    /// and lays the floats out again unless they were changed by hand.
+    fn insert(&mut self, index: usize, pane: PaneId, body: Rect) {
         let spot = {
             let taken: Vec<Rect> = self
                 .panes
@@ -194,12 +208,14 @@ impl Floats {
                 .collect();
             staggered_spot(body, &taken)
         };
-        self.panes.push(Float {
-            pane,
-            rect: FloatRect::from_cells(spot, body),
-            pinned: false,
-        });
-        self.shown = true;
+        self.panes.insert(
+            index,
+            Float {
+                pane,
+                rect: FloatRect::from_cells(spot, body),
+                pinned: false,
+            },
+        );
         if !self.hand_changed {
             self.relayout(None, body);
         }

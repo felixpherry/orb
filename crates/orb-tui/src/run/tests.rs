@@ -6,6 +6,9 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use orb_domain::feat::control::change::Change;
+use orb_domain::feat::control::pane_control::PaneRequest;
+use orb_domain::feat::control::protocol::ErrorCode;
 use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
 use orb_domain::feat::layout::tree::Split;
 use orb_domain::feat::picker::list::PickerItem;
@@ -1931,6 +1934,34 @@ fn a_failed_desktop_notification_is_logged() -> io::Result<()> {
     assert!(
         content.contains("couldn't send a desktop notification"),
         "the failed notification should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()> {
+    // Given the loop, and an agent asking it to close pane 99, which no
+    // session holds.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let (tx, rx) = mpsc::channel();
+    let close = PaneRequest::Change(Change::ClosePane(PaneId(99)));
+
+    // When the loop handles the request and ends its turn.
+    test.app
+        .handle(LoopEvent::Control(close, tx), &mut io::sink())?;
+    test.app.take_error();
+
+    // Then the agent hears not_found and the message box shows nothing.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        (
+            answer.map_err(|error| error.code),
+            test.app.toasts.shown(Instant::now()).is_none(),
+        ),
+        (Err(ErrorCode::NotFound), true),
+        "a refusal goes back to the agent, not to the user"
     );
     Ok(())
 }

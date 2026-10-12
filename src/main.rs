@@ -195,13 +195,16 @@ fn run(
         log: log.clone(),
     });
     let workers = (sessions.clone(), worktrees.clone(), search.clone());
-    let control = ControlDeps {
-        state: state.clone(),
-        log: log.clone(),
-    };
-    if let Err(report) = server::listen(&socket, control) {
-        log.error("couldn't open the agent control socket", &report);
-    }
+    listen_for_agents(
+        &socket,
+        ControlDeps {
+            state: state.clone(),
+            log: log.clone(),
+            sessions: sessions.clone(),
+            runtime: runtime.handle().clone(),
+            panes: frontend.controller(),
+        },
+    );
     let ended = frontend
         .run(
             state,
@@ -233,6 +236,15 @@ fn run(
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
     drop(store_lock);
     ended
+}
+
+/// Opens the agent control socket; when it can't, orb runs without it and
+/// says so in the log.
+fn listen_for_agents(socket: &Path, deps: ControlDeps) {
+    let log = deps.log.clone();
+    if let Err(report) = server::listen(socket, deps) {
+        log.error("couldn't open the agent control socket", &report);
+    }
 }
 
 /// The outside services the actors use: git, the agent harnesses, zmx and the

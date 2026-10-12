@@ -1,22 +1,29 @@
 //! The running orb's side of the control socket: reads each request, answers
-//! it from orb's state, and writes the reply.
+//! it from orb's state, asks the sessions actor for what it adds or the screen
+//! loop for what it changes, and writes the reply.
 
 use std::fs::{self, Permissions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 
 use error_stack::{Report, ResultExt};
+use kameo::actor::ActorRef;
 use wherror::Error;
 
+use crate::feat::control::change::Change;
+use crate::feat::control::pane_control::{PaneControl, PaneRequest};
 use crate::feat::control::protocol::{
-    AgentRow, AgentsResult, ApiError, ErrorCode, Op, PaneRow, PanesResult, Reply, Request,
-    SessionRow, SessionsResult, TabRow, TabsResult,
+    AgentRow, AgentsResult, ApiError, Done, ErrorCode, Op, PaneResult, PaneRow, PanesResult, Reply,
+    Request, SessionRow, SessionsResult, StartResult, TabRow, TabsResult,
 };
 use crate::feat::control::target::{self, Resolved, Target};
-use crate::ids::{PaneId, SessionId};
+use crate::feat::control::validator;
+use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace, ApiStart, SessionsActor};
+use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
 
 /// The control socket couldn't be opened.
@@ -24,13 +31,19 @@ use crate::{AppState, Log, State};
 #[error(debug)]
 pub struct ControlServerError;
 
-/// What the control server reads and where it logs.
+/// What the control server reads, who it asks, and where it logs.
 #[derive(Debug, Clone)]
 pub struct ControlDeps {
     /// orb's shared state, read to answer requests.
     pub state: State,
     /// Where failures go.
     pub log: Log,
+    /// Makes panes and sessions.
+    pub sessions: ActorRef<SessionsActor>,
+    /// Runs the sessions actor's asks from the request threads.
+    pub runtime: tokio::runtime::Handle,
+    /// The screen loop, which applies changes to what it owns.
+    pub panes: PaneControl,
 }
 
 /// Opens the control socket at `path`, only for the user, and answers each
@@ -42,7 +55,18 @@ pub struct ControlDeps {
 /// Returns an error if the socket can't be bound, made private, or its
 /// thread can't start.
 pub fn listen(path: &Path, deps: ControlDeps) -> Result<(), Report<ControlServerError>> {
-    remove_socket(path, &deps.log);
+    open(path, deps.log.clone(), move |request| {
+        answer(&deps, request)
+    })
+}
+
+/// Opens the socket at `path` as [`listen`] does, answering each request with
+/// `answer`.
+fn open<F>(path: &Path, log: Log, answer: F) -> Result<(), Report<ControlServerError>>
+where
+    F: Fn(&Request) -> Reply + Send + Sync + 'static,
+{
+    remove_socket(path, &log);
     let listener = UnixListener::bind(path)
         .change_context(ControlServerError)
         .attach_with(|| format!("couldn't bind {}", path.display()))?;
@@ -51,7 +75,7 @@ pub fn listen(path: &Path, deps: ControlDeps) -> Result<(), Report<ControlServer
         .attach("couldn't make the socket private")?;
     thread::Builder::new()
         .name("orb-control".into())
-        .spawn(move || accept(&listener, &deps))
+        .spawn(move || accept(&listener, &log, &Arc::new(answer)))
         .map(drop)
         .change_context(ControlServerError)
         .attach("couldn't start the control thread")
@@ -70,22 +94,23 @@ pub fn remove_socket(path: &Path, log: &Log) {
 }
 
 /// Hands each connection to its own thread, for as long as orb runs.
-fn accept(listener: &UnixListener, deps: &ControlDeps) {
+fn accept<F>(listener: &UnixListener, log: &Log, answer: &Arc<F>)
+where
+    F: Fn(&Request) -> Reply + Send + Sync + 'static,
+{
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let state = deps.state.clone();
+                let answer = Arc::clone(answer);
                 let spawned = thread::Builder::new()
                     .name("orb-control-request".into())
-                    .spawn(move || serve(stream, &state));
+                    .spawn(move || serve(stream, &*answer));
                 if let Err(error) = spawned {
-                    deps.log
-                        .error_on_change("control-spawn", "couldn't answer a request", &error);
+                    log.error_on_change("control-spawn", "couldn't answer a request", &error);
                 }
             }
             Err(error) => {
-                deps.log
-                    .error_on_change("control-accept", "couldn't accept a request", &error);
+                log.error_on_change("control-accept", "couldn't accept a request", &error);
             }
         }
     }
@@ -93,13 +118,16 @@ fn accept(listener: &UnixListener, deps: &ControlDeps) {
 
 /// Reads one request line, answers it, and writes one reply line. A client
 /// that hangs up early gets nothing.
-fn serve(stream: UnixStream, state: &State) {
+fn serve<F>(stream: UnixStream, answer: &F)
+where
+    F: Fn(&Request) -> Reply,
+{
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() {
         return;
     }
     let reply = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => route(&state.read(), &request),
+        Ok(request) => answer(&request),
         Err(error) => Reply::err(ApiError::new(ErrorCode::BadRequest, error.to_string())),
     };
     if let Ok(text) = serde_json::to_string(&reply) {
@@ -108,7 +136,237 @@ fn serve(stream: UnixStream, state: &State) {
     }
 }
 
-/// The reply to `request`, read from `app`.
+/// What a request comes to once read against the state.
+#[derive(Debug)]
+enum Action {
+    /// Answered from the state alone.
+    Answered(Reply),
+    /// A new shell the sessions actor adds.
+    Add(ApiAdd),
+    /// A new session the sessions actor starts.
+    Start(ApiStart),
+    /// A change the screen loop applies.
+    Change(Change),
+}
+
+/// The reply to `request`: worked out from the state (with no lock held
+/// after), then carried out. Each change writes one `api` log line.
+fn answer(deps: &ControlDeps, request: &Request) -> Reply {
+    let planned = plan(&deps.state.read(), request);
+    let reply = match planned {
+        Ok(Action::Answered(reply)) => return reply,
+        Ok(Action::Add(add)) => add_pane(deps, add),
+        Ok(Action::Start(start)) => start_session(deps, start),
+        Ok(Action::Change(change)) => match deps.panes.ask(PaneRequest::Change(change)) {
+            Ok(()) => Reply::ok(&Done {}),
+            Err(error) => Reply::err(error),
+        },
+        Err(error) => Reply::err(error),
+    };
+    deps.log.line("api", &log_text(request, &reply));
+    reply
+}
+
+/// `<op> caller=<id> pane=<id> session=<id> project=<id> -> ok|<code>`, with
+/// only the IDs `request` carries: never a name, a prompt or pasted text.
+fn log_text(request: &Request, reply: &Reply) -> String {
+    let fields = serde_json::to_value(request).unwrap_or_default();
+    let text = |key| match fields.get(key) {
+        Some(serde_json::Value::String(op)) if key == "op" => Some(op.clone()),
+        Some(serde_json::Value::Number(id)) => Some(format!("{key}={id}")),
+        _ => None,
+    };
+    let result = match &reply.error {
+        None => "ok".to_owned(),
+        Some(error) => serde_json::to_value(error.code)
+            .ok()
+            .and_then(|code| code.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+    };
+    ["op", "caller", "pane", "session", "project"]
+        .into_iter()
+        .filter_map(text)
+        .chain([format!("-> {result}")])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `request` comes to, read from `app`, or why it's refused.
+fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
+    let caller = request.caller;
+    let add = |session, place| Ok(Action::Add(ApiAdd { session, place }));
+    match &request.op {
+        Op::SessionList | Op::TabList { .. } | Op::PaneList { .. } | Op::AgentList => {
+            Ok(Action::Answered(route(app, request)))
+        }
+        Op::PaneSplit { pane, direction } => {
+            let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
+            add(
+                session,
+                ApiPlace::Split {
+                    at,
+                    split: (*direction).into(),
+                },
+            )
+        }
+        Op::PaneStack { pane } => {
+            let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
+            add(session, ApiPlace::Stack { at })
+        }
+        Op::PaneFloat { session } => add(changing_session(app, *session, caller)?, ApiPlace::Float),
+        Op::TabCreate { session } => add(changing_session(app, *session, caller)?, ApiPlace::Tab),
+        Op::SessionCreate {
+            project,
+            worktree,
+            name,
+        } => Ok(Action::Start(ApiStart {
+            project: project_for(app, *project, caller)?,
+            worktree: *worktree,
+            name: name.clone(),
+        })),
+        Op::PaneClose { pane } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            Ok(Action::Change(Change::ClosePane(*pane)))
+        }
+        Op::PaneRename { pane, name } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            Ok(Action::Change(Change::RenamePane {
+                pane: *pane,
+                name: name.clone(),
+            }))
+        }
+        Op::PaneFocus { pane } => {
+            let session = changing(app, Some(Target::Pane(*pane)), caller)?.session;
+            Ok(Action::Change(Change::Focus {
+                session,
+                pane: Some(*pane),
+            }))
+        }
+        Op::TabClose { pane } => {
+            let (_, pane) = tiled(app, *pane, caller, "a float isn't in a tab")?;
+            Ok(Action::Change(Change::CloseTab(pane)))
+        }
+        Op::SessionRename { session, name } => Ok(Action::Change(Change::RenameSession {
+            session: changing_session(app, *session, caller)?,
+            name: name.clone(),
+        })),
+        Op::SessionSettle { session } => Ok(Action::Change(Change::SettleSession(
+            changing_session(app, *session, caller)?,
+        ))),
+        Op::SessionFocus { session } => Ok(Action::Change(Change::Focus {
+            session: changing_session(app, Some(*session), caller)?,
+            pane: None,
+        })),
+    }
+}
+
+/// What a change is about, as [`target::resolve`] finds it; `settled` when
+/// its session is settled.
+fn changing(
+    app: &AppState,
+    target: Option<Target>,
+    caller: Option<PaneId>,
+) -> Result<Resolved, ApiError> {
+    let resolved = target::resolve(app, target, caller)?;
+    validator::not_settled(app, resolved.session)?;
+    Ok(resolved)
+}
+
+/// The session a change names, else the caller's; `settled` when it is.
+fn changing_session(
+    app: &AppState,
+    session: Option<SessionId>,
+    caller: Option<PaneId>,
+) -> Result<SessionId, ApiError> {
+    changing(app, session.map(Target::Session), caller).map(|resolved| resolved.session)
+}
+
+/// Project `project`, else the caller's session's; `not_found` when it's gone
+/// or removed.
+fn project_for(
+    app: &AppState,
+    project: Option<ProjectId>,
+    caller: Option<PaneId>,
+) -> Result<ProjectId, ApiError> {
+    let id = match project {
+        Some(id) => Some(id),
+        None => {
+            let session = target::resolve(app, None, caller)?.session;
+            app.sessions.session(session).map(|session| session.project)
+        }
+    };
+    id.and_then(|id| app.sessions.project(id))
+        .filter(|project| !project.removed)
+        .map(|project| project.id)
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such project"))
+}
+
+/// Pane `pane` (else the caller's) and its session; `bad_request` saying
+/// `why` when it's a float.
+fn tiled(
+    app: &AppState,
+    pane: Option<PaneId>,
+    caller: Option<PaneId>,
+    why: &str,
+) -> Result<(SessionId, PaneId), ApiError> {
+    match changing(app, pane.map(Target::Pane), caller)? {
+        Resolved {
+            session,
+            pane: Some(at),
+        } if !app
+            .layouts
+            .get(session)
+            .is_some_and(|layout| layout.floats().holds(at)) =>
+        {
+            Ok((session, at))
+        }
+        _ => Err(ApiError::new(ErrorCode::BadRequest, why)),
+    }
+}
+
+/// Why a float can't be split or stacked.
+const SPLIT_FLOAT: &str = "floats can't be split or stacked";
+
+/// Asks the sessions actor for the shell `add` describes and replies with it.
+fn add_pane(deps: &ControlDeps, add: ApiAdd) -> Reply {
+    match deps
+        .runtime
+        .block_on(async { deps.sessions.ask(add).await })
+    {
+        Ok(pane) => Reply::ok(&PaneResult { pane }),
+        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+    }
+}
+
+/// Marks a session as starting (refused with `starting` while one already
+/// is), then asks the sessions actor to start `start` and replies with the new
+/// session and its first pane. The actor clears the mark however it ends.
+fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
+    let claimed = {
+        let mut app = deps.state.write();
+        validator::not_starting(&app).map(|()| app.sessions.starting = true)
+    };
+    if let Err(error) = claimed {
+        return Reply::err(error);
+    }
+    match deps
+        .runtime
+        .block_on(async { deps.sessions.ask(start).await })
+    {
+        Ok((session, pane)) => {
+            if let Err(error) = deps.panes.ask(PaneRequest::Change(Change::Attach(session))) {
+                deps.log.line(
+                    "control",
+                    &format!("couldn't run session {}: {}", session.0, error.message),
+                );
+            }
+            Reply::ok(&StartResult { session, pane })
+        }
+        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+    }
+}
+
+/// The reply to a list `request`, read from `app`.
 fn route(app: &AppState, request: &Request) -> Reply {
     match request.op {
         Op::SessionList => Reply::ok(&sessions(app)),
@@ -121,6 +379,7 @@ fn route(app: &AppState, request: &Request) -> Reply {
             Err(error) => Reply::err(error),
         },
         Op::AgentList => Reply::ok(&agents(app)),
+        _ => Reply::err(ApiError::new(ErrorCode::BadRequest, "not a list")),
     }
 }
 
@@ -251,22 +510,25 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{ControlDeps, ControlServerError, listen};
+    use super::{ControlServerError, log_text, open, plan, route};
     use crate::feat::control::client;
+    use crate::feat::control::protocol::{
+        ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
+    };
+    use crate::feat::layout::state::test_entry;
     use crate::feat::sessions::state::AgentStatus;
-    use crate::ids::PaneId;
-    use crate::intent_handler::test_support::{agent, state_with};
+    use crate::ids::{PaneId, SessionId};
+    use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
     use crate::{AppState, Log, State};
 
     /// Listens on a socket in a fresh temp dir, answering from `app`.
     fn listening(app: AppState) -> Result<(TempDir, PathBuf), Report<ControlServerError>> {
         let dir = tempfile::tempdir().change_context(ControlServerError)?;
         let socket = dir.path().join("orb.sock");
-        let deps = ControlDeps {
-            state: State::new(app),
-            log: Log::default(),
-        };
-        listen(&socket, deps)?;
+        let state = State::new(app);
+        open(&socket, Log::default(), move |request| {
+            route(&state.read(), request)
+        })?;
         Ok((dir, socket))
     }
 
@@ -319,5 +581,99 @@ mod tests {
             String::from_utf8_lossy(&err)
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn split_of_a_float_is_a_bad_request() {
+        // Given session 1 with float pane 2.
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        app.layouts.add_float_hidden(SessionId(1), test_entry(2));
+
+        // When planning a split of pane 2.
+        let request = Request {
+            caller: None,
+            op: Op::PaneSplit {
+                pane: Some(PaneId(2)),
+                direction: Direction::Right,
+            },
+        };
+        let planned = plan(&app, &request);
+
+        // Then it is refused with bad_request.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "a float can't be split"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::pane_split(Op::PaneSplit { pane: None, direction: Direction::Right })]
+    #[case::pane_stack(Op::PaneStack { pane: None })]
+    #[case::pane_float(Op::PaneFloat { session: None })]
+    #[case::tab_create(Op::TabCreate { session: None })]
+    #[case::tab_close(Op::TabClose { pane: None })]
+    #[case::pane_close(Op::PaneClose { pane: PaneId(1) })]
+    #[case::pane_rename(Op::PaneRename { pane: PaneId(1), name: "x".into() })]
+    #[case::pane_focus(Op::PaneFocus { pane: PaneId(1) })]
+    #[case::session_rename(Op::SessionRename { session: None, name: "x".into() })]
+    #[case::session_settle(Op::SessionSettle { session: None })]
+    #[case::session_focus(Op::SessionFocus { session: SessionId(1) })]
+    fn change_on_a_settled_session_is_refused(#[case] op: Op) {
+        // Given session 1, settled, with pane 1.
+        let app = settle(state_with(vec![stopped(1)], 1), &[1]);
+
+        // When planning the change from pane 1.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: Some(PaneId(1)),
+                op,
+            },
+        );
+
+        // Then it is refused with settled.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::Settled),
+            "nothing in a settled session changes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn log_line_names_ids_and_never_the_name() {
+        // Given pane 4 renaming session 2 to a private name, refused.
+        let request = Request {
+            caller: Some(PaneId(4)),
+            op: Op::SessionRename {
+                session: Some(SessionId(2)),
+                name: "secret plan".into(),
+            },
+        };
+        let reply = Reply::err(ApiError::new(ErrorCode::Settled, "session is settled"));
+
+        // When writing its log line.
+        let text = log_text(&request, &reply);
+
+        // Then it has the op, the IDs and the code, and not the name.
+        assert_eq!(
+            text, "session.rename caller=4 session=2 -> settled",
+            "the log line carries IDs only"
+        );
+    }
+
+    #[rstest::rstest]
+    fn log_line_of_a_success_ends_in_ok() {
+        // Given a pane close from outside orb that worked.
+        let request = Request {
+            caller: None,
+            op: Op::PaneClose { pane: PaneId(3) },
+        };
+
+        // When writing its log line.
+        let text = log_text(&request, &Reply::ok(&Done {}));
+
+        // Then it ends in ok.
+        assert_eq!(text, "pane.close pane=3 -> ok", "a success logs ok");
     }
 }

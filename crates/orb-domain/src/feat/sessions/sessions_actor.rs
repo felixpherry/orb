@@ -17,7 +17,10 @@
 //! project's checkout, a worktree it already has, a new worktree made from a
 //! base branch, or orb's Incognito folder (made first when missing). The new
 //! session is selected and reported ready to open. A failure shows
-//! the reason and removes the worktree and branch orb made for it. A new
+//! the reason and removes the worktree and branch orb made for it. A session
+//! an agent asks for is neither selected nor opened, and the agent is told
+//! the new session and its pane, or why not, instead of the user. It also
+//! adds shell panes where an agent asks without moving the keys. A new
 //! worktree (for a new session, a move, or a restore) is made beside the
 //! actor's queue, so the actor keeps handling other requests meanwhile; its
 //! result is checked again when it arrives. A worktree made for a new
@@ -93,7 +96,9 @@ use std::time::{Duration, SystemTime};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
 use kameo::mailbox;
-use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
+use kameo::prelude::{
+    Actor, ActorRef, Context, DelegatedReply, Message, Reply, ReplySender, Spawn,
+};
 use tokio::sync::Notify;
 
 use super::pane_status::{PaneReport, match_records, pane_status};
@@ -248,6 +253,59 @@ pub struct KillSettled;
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
+/// An agent's request for a new shell pane in `session` that leaves the keys
+/// alone. Only ever `ask`ed: an `Err` reply to a `tell` would stop the actor.
+#[derive(Debug)]
+pub struct ApiAdd {
+    pub session: SessionId,
+    pub place: ApiPlace,
+}
+
+/// Where an [`ApiAdd`] puts its shell.
+#[derive(Debug, Clone, Copy)]
+pub enum ApiPlace {
+    /// Splitting pane `at`, or its whole stack, in whichever tab holds it.
+    Split { at: PaneId, split: Split },
+    /// Stacked right after pane `at`.
+    Stack { at: PaneId },
+    /// In a new tab that isn't shown.
+    Tab,
+    /// Under the top float, the floats left shown or hidden.
+    Float,
+}
+
+/// An agent's request for a new session in project `project`'s checkout, or
+/// in a new worktree from its default branch, named `name`. Never selected or
+/// opened. Only ever `ask`ed.
+#[derive(Debug)]
+pub struct ApiStart {
+    pub project: ProjectId,
+    pub worktree: bool,
+    pub name: Option<String>,
+}
+
+/// What an [`ApiStart`] answers: the new session and its first pane, or why
+/// there is none.
+pub type ApiStarted = Result<(SessionId, PaneId), String>;
+
+/// Who asked for a new session, which decides how its start ends.
+#[derive(Debug)]
+enum Asker {
+    /// The user, while the given session was active: the new session is
+    /// selected and opens while that one still is active.
+    User(Option<SessionId>),
+    /// An agent: the new session isn't selected or opened, and how the start
+    /// ended goes back on the reply.
+    Api(Option<ReplySender<ApiStarted>>),
+}
+
+impl Asker {
+    /// Whether the new session is selected in the sidebar.
+    fn selects(&self) -> bool {
+        matches!(self, Self::User(_))
+    }
+}
+
 /// A worktree orb made, on its new branch.
 #[derive(Debug)]
 struct MadeWorktree {
@@ -261,14 +319,15 @@ const WORKTREE_UNMADE: &str = "couldn't make the worktree";
 
 /// Which start a worktree job belongs to, with what applying its result
 /// needs. `if_active` is the session that was active when the user asked; a
-/// restore's is the restored session itself.
+/// restore's is the restored session itself. A new session's `asker` says
+/// who asked for it.
 #[derive(Debug)]
 enum Start {
     New {
         project: ProjectId,
         kind: ProjectKind,
         name: Option<String>,
-        if_active: Option<SessionId>,
+        asker: Asker,
     },
     Move {
         session: SessionId,
@@ -439,6 +498,34 @@ impl Message<SessionsCommand> for SessionsActor {
             }
         }
         std::future::ready(())
+    }
+}
+
+impl Message<ApiAdd> for SessionsActor {
+    type Reply = Result<PaneId, String>;
+
+    fn handle(
+        &mut self,
+        msg: ApiAdd,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        std::future::ready(self.add_pane_at(&msg))
+    }
+}
+
+impl Message<ApiStart> for SessionsActor {
+    type Reply = DelegatedReply<ApiStarted>;
+
+    fn handle(
+        &mut self,
+        msg: ApiStart,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        let (delegated, reply) = ctx.reply_sender();
+        if let Some(job) = self.api_start(msg, reply) {
+            job.spawn(ctx.actor_ref().clone());
+        }
+        std::future::ready(delegated)
     }
 }
 
