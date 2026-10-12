@@ -798,9 +798,10 @@ mod tests {
         let commands = IntentHandler::handle(&Intent::ClosePane, &mut state);
 
         // Then session 1's layout is saved.
-        assert_eq!(
-            commands,
-            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
+        assert!(
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "a closed pane should be saved"
         );
     }

@@ -22,6 +22,7 @@ impl IntentHandler {
     /// A focus key, tab switch, pane click or float toggle that moves the
     /// keys from one pane to another records the agent left and the agent
     /// entered, each only if its pane runs an agent.
+    /// An intent that lands the keys in a different agent's pane visits it.
     /// Every intent but `PickerG` also ends a `gg` in progress.
     /// When an intent moves the keys from a pane to the sidebar, the cursor
     /// starts on the active row while it's listed; a row click or a jump
@@ -146,6 +147,7 @@ impl IntentHandler {
         {
             commands = record_focus_move(state, left, commands);
         }
+        visit_entered_pane(state, left.flatten(), &mut commands);
         if let Some(SidebarItem::Agent { session, .. }) = state.sessions.cursor
             && !state.sessions.searching()
         {
@@ -203,6 +205,19 @@ fn quit(state: &mut AppState) -> Vec<Command> {
     vec![]
 }
 
+/// Visits the focused agent's pane when the keys are in it and it isn't
+/// `left`, the agent whose pane had them before the intent.
+fn visit_entered_pane(state: &AppState, left: Option<SidebarItem>, commands: &mut Vec<Command>) {
+    let entered = (state.focus == Focus::Pane)
+        .then(|| state.focused_agent())
+        .flatten();
+    if let Some(SidebarItem::Agent { pane, .. }) = entered
+        && entered != left
+    {
+        commands.push(Command::Sessions(SessionsCommand::Visit(pane)));
+    }
+}
+
 /// Records leaving agent row `left` for the focused agent, each only if it
 /// runs an agent; nothing when the focus stayed on the same agent.
 fn record_focus_move(
@@ -225,15 +240,17 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {
+    use crate::command::SessionsCommand;
     use crate::feat::layout::tree::NavDirection;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::{PickerKind, PickerState};
-    use crate::feat::sessions::state::AgentStatus;
+    use crate::feat::sessions::state::{AgentStatus, SidebarItem};
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
         ORPHAN, agent, agent_row, choosing_workspace, highlight, in_root, jumping,
         left_pane_showing_1, managing, on_agent, picked_worktree, project_row, removing_alpha,
-        split_layout, state_with, two_agents, workspace_labels, worktree_picker_after,
+        split_layout, state_with, two_agents, two_agents_from_sidebar, workspace_labels,
+        worktree_picker_after,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
     use std::path::PathBuf;
@@ -405,6 +422,76 @@ mod tests {
             [agent_row(1, 2), agent_row(1, 1)],
             "a focus move between agents should record both"
         );
+    }
+
+    /// Whether `commands` hold a visit to `pane`.
+    fn visits(commands: &[Command], pane: i64) -> bool {
+        commands.contains(&Command::Sessions(SessionsCommand::Visit(PaneId(pane))))
+    }
+
+    /// Whether `commands` hold any visit.
+    fn visits_any(commands: &[Command]) -> bool {
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::Sessions(SessionsCommand::Visit(_))))
+    }
+
+    #[rstest::rstest]
+    fn entering_a_session_visits_its_focused_agent_pane() {
+        // Given the sidebar on session 1, whose focused pane runs agent 2.
+        let mut state = two_agents_from_sidebar(SidebarItem::Session(SessionId(1)), &[]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then agent 2's pane is visited.
+        assert!(
+            visits(&commands, 2),
+            "entering a session should visit the agent its keys land on"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_focus_to_another_agent_pane_visits_it() {
+        // Given the keys in agent 2's pane, agent 1's pane to its left.
+        let mut state = two_agents();
+
+        // When moving the focus left.
+        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then agent 1's pane is visited.
+        assert!(
+            visits(&commands, 1),
+            "a focus move into an agent's pane should visit it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_that_keeps_focus_sends_no_visit() {
+        // Given the keys in agent 2's pane.
+        let mut state = two_agents();
+
+        // When growing the focused pane.
+        let commands = IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // Then nothing is visited.
+        assert!(
+            !visits_any(&commands),
+            "a key that keeps the keys in the same pane should visit nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn entering_a_shell_pane_sends_no_visit() {
+        // Given the keys in agent 1's pane, shell pane 50 to its right.
+        let mut state = split_layout();
+        state.layouts.focus_pane(SessionId(1), PaneId(1));
+
+        // When moving the focus right.
+        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+
+        // Then nothing is visited.
+        assert!(!visits_any(&commands), "a shell pane has no agent to visit");
     }
 
     #[rstest::rstest]
