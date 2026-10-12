@@ -1,7 +1,8 @@
 //! orb's integrations with Claude Code and pi: a Claude hook and a pi
 //! extension that report, through a file per pane under `~/.orb/panes/`,
-//! which conversation runs in which pane. `orb integration install` puts
-//! them in place.
+//! which conversation runs in which pane, and an `orb` skill in Claude's and
+//! pi's skills folders that teaches agents to drive orb. `orb integration
+//! install` puts them in place.
 
 pub mod claude_settings;
 pub mod pane_file;
@@ -21,6 +22,9 @@ pub const SCRIPT_NAME: &str = "orb-agent-state.sh";
 const EXTENSION_NAME: &str = "orb-agent-state.ts";
 const SCRIPT: &str = include_str!("assets/orb-agent-state.sh");
 const EXTENSION: &str = include_str!("assets/orb-agent-state.ts");
+/// The `orb` skill, where Claude and pi look for it under their own folders.
+const SKILL_FILE: &str = "skills/orb/SKILL.md";
+const SKILL: &str = include_str!("assets/orb-skill.md");
 /// What the mode line shows at start when neither integration is installed.
 pub const NUDGE: &str = "run orb integration install";
 
@@ -76,9 +80,9 @@ impl IntegrationPaths {
     }
 }
 
-/// Writes the hook script, adds orb's hooks to Claude's `settings.json`, and
-/// writes the pi extension. Returns one line per file for the user, `~` for
-/// `home`.
+/// Writes the hook script, adds orb's hooks to Claude's `settings.json`,
+/// writes the pi extension, and writes the `orb` skill for both. Returns one
+/// line per file for the user, `~` for `home`.
 ///
 /// # Errors
 ///
@@ -121,11 +125,23 @@ pub fn install(
     };
     let extension = paths.pi_extension();
     write_atomic(&extension, EXTENSION)?;
-    Ok(vec![
+    let skills = [&paths.claude_dir, &paths.pi_dir].map(|dir| dir.join(SKILL_FILE));
+    for skill in &skills {
+        write_atomic(skill, SKILL)?;
+    }
+    let lines = [
         format!("wrote {}", tilde(&script, home)),
         settings_line,
         format!("wrote {}", tilde(&extension, home)),
-    ])
+    ];
+    Ok(lines
+        .into_iter()
+        .chain(
+            skills
+                .iter()
+                .map(|skill| format!("wrote {}", tilde(skill, home))),
+        )
+        .collect())
 }
 
 /// Writes `text` to `path` through a temp file beside it and a rename, making
@@ -172,7 +188,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        IntegrationError, IntegrationPaths, SCRIPT, claude_dir, claude_settings, install,
+        IntegrationError, IntegrationPaths, SCRIPT, SKILL, claude_dir, claude_settings, install,
         pi_agent_dir,
     };
 
@@ -383,6 +399,25 @@ mod tests {
         // Then the extension is in pi's extensions folder.
         let extension = home.path().join(".pi/agent/extensions/orb-agent-state.ts");
         assert!(extension.is_file(), "the pi extension should be written");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::claude(".claude/skills/orb/SKILL.md")]
+    #[case::pi(".pi/agent/skills/orb/SKILL.md")]
+    fn install_writes_the_orb_skill(#[case] file: &str) -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When installing.
+        home.install()?;
+
+        // Then the agent's skills folder holds orb's skill.
+        assert_eq!(
+            read(&home.path().join(file))?,
+            SKILL,
+            "the orb skill should be written"
+        );
         Ok(())
     }
 

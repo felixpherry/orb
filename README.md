@@ -10,7 +10,7 @@ On Linux, notifications need a freedesktop notification server, which most deskt
 
 ```sh
 cargo install --git https://github.com/felixpherry/orb --locked
-orb integration install   # Claude Code hook and pi extension
+orb integration install   # Claude Code hook, pi extension and orb skill
 orb
 ```
 

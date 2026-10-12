@@ -32,7 +32,7 @@ Deliberately **not** built, because native Claude already does them inside its p
 - Leader is `<C-g>`.
 - Installed tools: nvim, lazygit, yazi, gh, python3 (for the Claude hook), terminal-notifier 3.1.0 (Homebrew; clickable notifications), pi 1.0.0 (`~/.local/bin/pi`) and zmx 0.8.1 (Homebrew tap `neurosnap/tap`; it hosts every pane). Doesn't use VS Code.
 - Setup orb needs:
-  - `orb integration install`, once, for the Claude hook and the pi extension.
+  - `orb integration install`, once, for the Claude hook, the pi extension and the `orb` skill.
   - The kitty `map` lines for the Cmd keys: `map cmd+X send_key super+X` for `h`, `j`, `k`, `l`, the four arrows, `n`, `x`, `plus`, `equal`, `minus`, `1` to `9`, `[`, `]`, `i` and `o`, plus `map ctrl+shift+h no_op` and `map ctrl+shift+l no_op` so kitty's own `show_scrollback` and `next_layout` let `<C-S-h>`/`<C-S-l>` through (README lists them).
   - terminal-notifier allowed in System Settings → Notifications. Until then, it prints `Notifications are not allowed for this application` and exits 3, and orb re-sends each notice through `osascript`, whose click opens Script Editor instead of going back to orb.
   - kitty's remote control on a socket (`allow_remote_control` and `listen_on` in `kitty.conf`, which set `KITTY_LISTEN_ON`), so that a notification click can bring kitty forward.
@@ -178,13 +178,59 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 - Each pane keeps 10 000 lines of history, from what orb saw after it attached (zmx sends the screen on reattach, not the history). The wheel over a pane goes to its program while it tracks the mouse, sends arrow keys on the alternate screen, and otherwise scrolls the history.
 - Copy on select follows zellij: a left drag in a pane whose program doesn't track the mouse selects text, and the release copies it through OSC 52. A double-click selects a word, a triple-click a line, and dragging past the top or bottom edge scrolls. A press on another pane starts a selection only when its program doesn't track the mouse; otherwise it only focuses.
 
+### Agents controlling orb
+
+- **Agents in orb's panes can drive orb.** `orb session|tab|pane|agent <verb>` sends one request to the running orb over `~/.orb/orb.sock` and prints its JSON reply (exit 0). A refusal prints `{"code","message"}` on stderr and exits 1; a mistyped command prints the usage and exits 2. With no orb running, every command says `orb is not running` and exits 1.
+- **Commands name their target by ID.** Panes, sessions and projects by number; a tab by any pane in it. Left out, the target is the calling pane (from `ORB_PANE_ID`) or its session. Tab indexes count from 1, as the tab bar does; a floating pane has no tab.
+- **Only `focus` moves the user's keys or changes the shown session.** New panes, tabs and sessions appear without taking the keys. Two exceptions come from orb's own rules: closing the last pane of the shown session opens a fresh shell there with the keys, and settling the shown session moves the keys off it. While the user types in a picker, the rename box or search, `focus` leaves the keys there.
+- **A settled session refuses everything with `session is settled`,** except the lists, `agent get` and `agent reply`. That includes `pane read` and `agent wait`.
+- **Nothing deletes a session or worktree, removes a project or quits orb.** Closing panes and tabs and settling sessions are the only destructive commands.
+- **Agent answers come from the transcript,** not the screen. `pane read` is for plain commands.
+- **`agent start` types `claude` or `pi` into a shell pane** and waits up to 30 s for orb's hook or extension to report it, so it needs `orb integration install`. A Claude "trust this folder?" prompt comes before the hook, so in a folder Claude doesn't trust yet the start times out.
+- **`orb integration install` also installs an `orb` skill** for Claude Code and pi, which teaches agents these commands.
+
+| Command | What it does |
+| --- | --- |
+| **Read** | |
+| `orb session list` | Every session, settled ones included: `{sessions: [{id, project, name, dir, branch, settled}]}`. |
+| `orb tab list [--session <id>]` | One session's tabs (the caller's by default): `{session, tabs: [{index, panes}]}`. |
+| `orb pane list [--session <id>]` | One session's panes (the caller's by default): `{panes: [{id, session, tab, float, name, cwd, agent, caller}]}`; `caller: true` marks the calling pane, `agent` is the agent live in it or null. |
+| `orb agent list` | Every agent: `{agents: [{id, pane, session, harness, name, title, status, cwd, branch}]}`; status is `unknown`, `working`, `needs_approval`, `needs_input`, `idle`, `failed`, `stopped` or `gone`. |
+| **Layout** | |
+| `orb session create [--project <id>] [--worktree] [--name <text>]` | Starts a session in the caller's project and its checkout by default; `--worktree` makes a new worktree from the default branch (can take ~15 s). It shows in the sidebar but doesn't open. Replies `{session, pane}`; `starting` while another start runs. |
+| `orb tab create [--session <id>]` | Adds a tab with a shell. Replies `{pane}`. |
+| `orb pane split [<pane>] --direction right\|down` | Splits a pane with a new shell. Replies `{pane}`. Refused on a floating pane. |
+| `orb pane stack [<pane>]` | Stacks a new shell with a pane. Replies `{pane}`. Refused on a floating pane. |
+| `orb pane float [--session <id>]` | Adds a floating shell. Replies `{pane}`. |
+| `orb pane close <pane>` | Closes a pane. Replies `{}`. |
+| `orb pane rename <pane> <name>` | Names a pane; an empty name goes back to the usual one. Replies `{}`. |
+| `orb pane focus <pane>` | Shows the pane's session and tab and puts the keys in the pane. Replies `{}`. |
+| `orb tab close [--pane <id>]` | Closes the tab holding the pane, the caller's own tab by default. Refused on a floating pane. Replies `{}`. |
+| `orb session rename [<session>] <name>` | Names a session, the caller's by default; an empty name goes back to the usual one. Replies `{}`. |
+| `orb session settle [<session>]` | Settles a session, the caller's own by default. Replies `{}`. |
+| `orb session focus <session>` | Shows the session and puts the keys in it. Replies `{}`. |
+| **Pane input and output** | |
+| `orb pane send <pane> <text>` | Pastes the text, without Enter. Replies `{}`. |
+| `orb pane keys <pane> <key>...` | Presses named keys: `enter esc tab backspace up down left right home end pageup pagedown`, `ctrl+<a-z>`, `alt+<a-z>`, `shift+tab`, any case. An unknown name is `bad_request` and nothing is sent. Replies `{}`. |
+| `orb pane run <pane> <command>` | Types the line and Enter; into a pane that hasn't printed yet, once it first does. Replies `{}`. |
+| `orb pane read [<pane>] [--lines <n>]` | The screen as text, soft wraps joined: `{text}`. `--lines` defaults to 0, the screen only; N adds up to N history lines above it. A snapshot: poll it. |
+| **Agents** | |
+| `orb agent start --kind claude\|pi [--pane <id>] [--name <text>] [-- <args>...]` | Types `claude` or `pi` (words after `--` each shell-quoted after it) into a shell pane, names the pane with `--name`, and replies `{pane, agent, harness, status}` once orb sees the agent idle or working. `pane_busy` while an agent is live there, `agent_blocked` if it waits for approval or input, `timeout` after 30 s. |
+| `orb agent prompt <pane> <text> [--wait [--timeout <ms>]]` | Types the prompt and Enter. Allowed while the agent works (the text is queued); refused with `no_agent` or `agent_blocked`, typing nothing. Replies `{submitted: true}`; with `--wait`, `{status: "idle"}` at the end of the current turn or `{status: "blocked"}`, `prompt_stalled` when no work shows within 5 s, `timeout` when `--timeout` (only with `--wait`) runs out. `--` before the text lets it start with `--`. |
+| `orb agent wait <pane> [--timeout <ms>]` | Waits for the agent to be idle or blocked: `{status}`. With no timeout it waits as long as work goes on; a stopped or gone agent ends it with `no_agent`. |
+| `orb agent get <pane>` | The pane's agent row, also for a stopped agent. |
+| `orb agent reply <pane>` | The last text block of the last exchange that has one, from the transcript: `{text, at}`, `at` in unix ms or null. `no_reply` before any finished reply. |
+
+- **Refusal codes:** `not_running`, `bad_request`, `no_target`, `not_found`, `settled`, `starting`, `agent_blocked`, `pane_busy`, `no_agent`, `no_reply`, `timeout`, `prompt_stalled`, `failed`.
+
 ### Storage & paths (T3 layout)
 
 - orb state: `~/.orb/userdata/state.sqlite` (SQLite, plain migrations, jinn's `jinn-session-schema` pattern; no event sourcing). Since v11 it holds `sessions`, `tabs` and `panes`, and each row of the `threads` table (one per agent) points at the pane it runs in. Before every upgrade orb copies the file to `state.sqlite.bak-v<old version>` and keeps the 3 newest copies; a database from a newer orb is refused with the name of the copy to put back; a test build (not run from `~/.cargo/bin`) refuses to upgrade unless started with `--upgrade-data`. Since v14 the pre-session leftovers are gone: the `groups` and `drafts` tables, the old columns of the `projects` and `threads` tables, and the panes' old `--bg` mark.
-- Log: `~/.orb/orb.log`, one line per start, error, kill, worktree prune, branch delete, session delete, dropped pane row, database upgrade copy and pruned old copy; at 5 MB it moves to `orb.log.1`, replacing the old one.
+- Log: `~/.orb/orb.log`, one line per start, error, kill, worktree prune, branch delete, session delete, dropped pane row, database upgrade copy, pruned old copy, and API request that changes something or is refused (its op, IDs and outcome, never a name or typed text); the API commands themselves write no `start` line; at 5 MB it moves to `orb.log.1`, replacing the old one.
 - Search index: `~/.orb/userdata/search.sqlite` (Global search), an FTS5 `trigram` index of the prompts and text replies in the agent panes' transcripts (Claude's transcripts and pi's session files), owned by the `SearchActor` through its own connection. It's a projection: orb builds a fresh one when it's missing, and deletes and rebuilds it when it can't be read or holds another schema version, and `state.sqlite` never refers to it. Rows are keyed by the agent and leave the index once its session is deleted; a pane's transcripts from before a `/clear` stay.
 - zmx: new panes' sockets are in `~/.orb/zmx`, named `orb-p<id>`. Panes migrated from pi agents keep their `orb-<32 hex>` session under `~/.orb/pi`.
-- Integrations: the Claude hook script is `~/.orb/hooks/orb-agent-state.sh`, registered in Claude's `settings.json`, and the pi extension is `~/.pi/agent/extensions/orb-agent-state.ts`. Both write `~/.orb/panes/<pane id>.json` (research §21).
+- Integrations: the Claude hook script is `~/.orb/hooks/orb-agent-state.sh`, registered in Claude's `settings.json`, and the pi extension is `~/.pi/agent/extensions/orb-agent-state.ts`. Both write `~/.orb/panes/<pane id>.json` (research §21). `orb integration install` also writes the `orb` skill to `~/.claude/skills/orb/SKILL.md` and `~/.pi/agent/skills/orb/SKILL.md`.
+- Control socket: `~/.orb/orb.sock`, only the user can open it (mode 0600); a running orb removes a stale one at start and its own at quit.
 - Worktrees: `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`. After the first agent turn ends, the branch is renamed `orb/<slug>` from the session's title; the directory keeps its name (T3 does the same).
 - Pruning: orb's `WorktreesActor` sweeps `~/.orb/worktrees/<repo>/` at start and then every hour. With a non-forced `git worktree remove`, which keeps the branch, it removes each worktree nothing uses, and each one whose sessions are all settled, the latest at least 3 days ago. It keeps a worktree with an attached session, an agent mid-turn, or an unsettled session, one with uncommitted or untracked files, and a directory git can't read as a linked worktree. Ignored files (`target/`, `node_modules/`) go with the worktree. When it removes any, the mode line shows `pruned N worktrees` (`pruned 1 worktree`) until the next key. Resuming a session whose worktree is gone recreates it at the same path on the session's branch, made with `-b` from the fetched default branch when that branch is gone; Claude keys its transcripts by the path, so the conversation resumes.
 - Research and Learn: a session's folder is `~/.orb/research/<slug>/` or `~/.orb/learn/<slug>/`, made by copying `~/.orb/templates/<kind>/` (symlinks kept), which orb first writes from its built-in default when it's missing (Research: the research kit, an orchestrator `AGENTS.md`, `.claude/agents/{investigator,falsifier,simulator}.md`, `.pi/agents/{investigator,falsifier,simulator}.md`, `.research/{CONVENTIONS,REPORT_TEMPLATE}.md`, `SOURCES.md`, `.gitignore` and `.claude/settings.json`; Learn: the learn kit, an orchestrator `AGENTS.md`, `.claude/agents/saboteur.md`, `.pi/agents/saboteur.md`, `.learn/{STORYTELLER,CHALLENGES,TUTOR,CONVENTIONS}.md`, `.learn/ingest_epub.py` and `.gitignore`; both with `CLAUDE.md -> AGENTS.md`); an existing folder is refused, never overwritten. Those sessions belong to orb's `Research` and `Learn` projects (roots `~/.orb/research`, `~/.orb/learn`), added by the first `<C-g> g r`/`<C-g> g l`: `<C-g> n` doesn't list them, and `<C-g> f` lists them right after `All projects`.
@@ -203,7 +249,6 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 
 **To plan** (scope decided in the planning session):
 - Arena: one prompt run across several models and harnesses (Claude Code, pi), each in its own worktree, with the runs compared side by side. Dashboard round 3's `arena` variant (branch `dashboard-rework-opus-cc`) is a stub of the comparison view.
-- Agents controlling orb: CLI subcommands or a socket for splitting panes, sending keys and reading output.
 - A keyboard copy mode, like zellij's scroll and search modes.
 - Opening several tabs automatically when a session starts.
 - Agents started before `orb integration install` ran: they never report, so their panes read as shells until the agent is restarted.
