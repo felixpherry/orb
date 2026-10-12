@@ -47,6 +47,12 @@ jiff = "0.2.37"
 notify-rust = "4.18"
 rustix = { version = "1.1", features = ["event"] }
 
+# crossterm reads a pixel mouse report at pixel 0 as 0 - 1 (kitty counts
+# pixels from 0). Let it wrap in debug builds as it does in release builds,
+# so orb can add the 1 back instead of the input thread panicking.
+[profile.dev.package.crossterm]
+overflow-checks = false
+
 [lints]
 workspace = true
 

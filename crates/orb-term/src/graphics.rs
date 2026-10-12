@@ -171,6 +171,12 @@ impl PaneGraphics {
         self.answering = on;
     }
 
+    /// Whether the child is told that images work: orb is in kitty and the
+    /// pane answers image questions. Pixel mouse is offered on the same terms.
+    pub(crate) fn answers(&self) -> bool {
+        matches!(self.support, GraphicsSupport::Kitty { .. }) && self.answering
+    }
+
     /// Applies one command (the bytes between `ESC _ G` and `ESC \`) sent
     /// with the child's cursor at `line`, `col` on the alternate screen when
     /// `alt`; what the child should hear back goes to `replies`.

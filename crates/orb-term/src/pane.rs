@@ -250,8 +250,9 @@ impl Pane {
         self.has_exited() && self.started.elapsed() < within
     }
 
-    /// Sends `key` to the child, encoded for its current keyboard modes,
-    /// after returning the view to the bottom and clearing the selection.
+    /// Sends `key` to the child, encoded for its current keyboard modes. A
+    /// press or repeat first returns the view to the bottom and clears the
+    /// selection; a release leaves both alone.
     pub fn key(&self, key: &KeyEvent) {
         lock(&self.emulator).key(key);
     }
@@ -268,10 +269,12 @@ impl Pane {
     }
 
     /// Sends a mouse event to the child if it asked for mouse reports and the
-    /// event happened over the pane drawn at `area`. A press clears the
-    /// selection.
-    pub fn mouse(&self, event: MouseEvent, area: Rect) {
-        lock(&self.emulator).mouse(event, area);
+    /// event happened over the pane drawn at `area`. `pixel` is where it
+    /// happened in the outer terminal's pixels, when the outer terminal
+    /// reports them; a child that turned pixel reports on gets them relative
+    /// to the pane. A press clears the selection.
+    pub fn mouse(&self, event: MouseEvent, area: Rect, pixel: Option<Position>) {
+        lock(&self.emulator).mouse(event, area, pixel);
     }
 
     /// Whether the child asked for mouse reports.
@@ -281,9 +284,9 @@ impl Pane {
 
     /// A wheel notch over the pane drawn at `area`: to the child while it
     /// reads the mouse, as arrow keys on the alternate screen, else a
-    /// scroll of the pane's history.
-    pub fn wheel(&self, event: MouseEvent, area: Rect) {
-        lock(&self.emulator).wheel(event, area);
+    /// scroll of the pane's history. `pixel` is as [`Pane::mouse`] takes it.
+    pub fn wheel(&self, event: MouseEvent, area: Rect, pixel: Option<Position>) {
+        lock(&self.emulator).wheel(event, area, pixel);
     }
 
     /// Starts a selection at `at` in the pane drawn at `area`: a word on the

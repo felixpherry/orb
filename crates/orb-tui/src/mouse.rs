@@ -28,14 +28,17 @@
 //! press decides who gets the drag and the release that follow it.
 //!
 //! Each frame records where it drew what a click can land on, and a mouse
-//! event is mapped back through that record.
+//! event is mapped back through that record. In kitty the mouse arrives in
+//! pixels; it's mapped to cells first, and the pixels go on with it to a
+//! pane's program.
 
 use std::time::{Duration, Instant};
 
 use orb_domain::feat::sessions::state::SidebarItem;
 use orb_domain::ids::PaneId;
 use orb_domain::{Focus, Intent};
-use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use orb_term::CellSize;
+use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use crate::picker::grapheme_at;
@@ -295,6 +298,8 @@ pub(crate) enum Click {
 pub(crate) struct Clicks {
     last: Option<(Instant, ClickTarget)>,
     gesture: Option<Gesture>,
+    /// The cell of the last mouse event, so motion within one cell acts once.
+    at: Option<Position>,
 }
 
 /// Who owns a left-button drag: decided at its press, kept until release.
@@ -331,6 +336,23 @@ impl Clicks {
             Click::Single
         }
     }
+
+    /// The left release a drag under way never got, for when input shows
+    /// the button is up anyway: at the drag's last cell, moved inside `area`
+    /// (the pane holding the keys, when there is one) the way kitty keeps a
+    /// release inside its window. `None` while no drag is under way.
+    pub(crate) fn lost_release(&self, area: Option<Rect>) -> Option<MouseEvent> {
+        let at = self.at.filter(|_| self.gesture.is_some())?;
+        let at = area.map_or(at, |area| {
+            Rect::new(at.x, at.y, 1, 1).clamp(area).as_position()
+        });
+        Some(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
 }
 
 /// What the frontend loop does with a mouse event.
@@ -366,7 +388,9 @@ enum Action {
 /// `focused` pane. The left press decides who gets the drag and release
 /// after it; the wheel over a pane goes to that pane. Other events over the
 /// focused pane while the keys are in it go to it; other than that, only
-/// left clicks and the vertical wheel act.
+/// left clicks and the vertical wheel act. Motion within the cell of the
+/// event before it (which the outer terminal reports when it reports
+/// pixels) only goes on to the focused pane's program.
 pub(crate) fn route(
     event: MouseEvent,
     hits: &HitMap,
@@ -376,6 +400,25 @@ pub(crate) fn route(
     now: Instant,
 ) -> MouseRoute {
     let at = Position::new(event.column, event.row);
+    let same_cell = clicks.at.replace(at) == Some(at)
+        && matches!(event.kind, MouseEventKind::Moved | MouseEventKind::Drag(_));
+    match route_event(event, at, hits, focus, focused, clicks, now) {
+        MouseRoute::Forward => MouseRoute::Forward,
+        _ if same_cell => MouseRoute::Nothing,
+        routed => routed,
+    }
+}
+
+/// [`route`] for an event at `at`, whatever came before it.
+fn route_event(
+    event: MouseEvent,
+    at: Position,
+    hits: &HitMap,
+    focus: Focus,
+    focused: Option<PaneId>,
+    clicks: &mut Clicks,
+    now: Instant,
+) -> MouseRoute {
     if let Some(routed) = follow_gesture(event.kind, at, clicks) {
         return routed;
     }
@@ -686,6 +729,24 @@ where
     MouseRoute::Intents(list.into_iter().flatten().collect())
 }
 
+/// A mouse event the outer terminal reported in pixels, in cells of `cell`
+/// pixels, and its pixel position (0-based, as kitty counts). crossterm takes
+/// one off each coordinate as it does for cells, wrapping at pixel 0, so the
+/// one goes back on. `None` while the cell size is unknown.
+pub(crate) fn from_pixels(event: MouseEvent, cell: CellSize) -> Option<(MouseEvent, Position)> {
+    let pixel = Position::new(event.column.wrapping_add(1), event.row.wrapping_add(1));
+    let column = pixel.x.checked_div(cell.width)?;
+    let row = pixel.y.checked_div(cell.height)?;
+    Some((
+        MouseEvent {
+            column,
+            row,
+            ..event
+        },
+        pixel,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -693,10 +754,11 @@ mod tests {
     use orb_domain::feat::sessions::state::SidebarItem;
     use orb_domain::ids::{PaneId, SessionId};
     use orb_domain::{Focus, Intent};
+    use orb_term::CellSize;
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
 
-    use super::{Click, ClickTarget, Clicks, HitMap, MouseRoute, route};
+    use super::{Click, ClickTarget, Clicks, HitMap, MouseRoute, from_pixels, route};
 
     const AGENT_1: SidebarItem = SidebarItem::Session(SessionId(1));
 
@@ -1530,6 +1592,43 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn drag_within_one_cell_extends_the_selection_once() {
+        // Given a selection in agent 1's shell pane dragged to (45, 6).
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+        route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // When the drag moves again within that cell, as pixel reports do.
+        let routed = route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then orb does nothing more.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "motion within a cell should act once"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_within_one_cell_still_reaches_a_mouse_tracking_program() {
+        // Given a drag forwarded to agent 1's mouse-reading program at
+        // (45, 6).
+        let (hits, mut clicks) = (hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+        route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // When the drag moves again within that cell.
+        let routed = route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then the program gets it, to read its pixels.
+        assert_eq!(
+            routed,
+            MouseRoute::Forward,
+            "the program decides what motion within a cell means"
+        );
+    }
+
+    #[rstest::rstest]
     fn release_after_a_selecting_press_copies() {
         // Given a press that started a selection in agent 1's shell pane.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
@@ -1887,6 +1986,27 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn lost_release_after_a_float_drag_saves() {
+        // Given float 9's border pressed and dragged to the top line, then
+        // released above the window, where the release was lost.
+        let (hits, mut clicks) = (float_hits(), Clicks::default());
+        route_with(left_click(45, 7), &hits, Focus::Pane, &mut clicks);
+        route_with(left_drag(50, 0), &hits, Focus::Pane, &mut clicks);
+
+        // When the release that never came is routed.
+        let routed = clicks
+            .lost_release(hits.pane_area(PaneId(9)))
+            .map(|release| route_with(release, &hits, Focus::Pane, &mut clicks));
+
+        // Then the dragged float is saved.
+        assert_eq!(
+            routed,
+            Some(MouseRoute::Intents(vec![Intent::DropFloat])),
+            "a lost release still saves the drag"
+        );
+    }
+
+    #[rstest::rstest]
     fn press_on_a_float_over_the_focused_pane_focuses_the_float() {
         // Given float 9 drawn over agent 1's focused pane, which has the keys.
         let (hits, mut clicks) = (float_hits(), Clicks::default());
@@ -1948,5 +2068,49 @@ mod tests {
             MouseRoute::Wheel(PaneId(9)),
             "the wheel over a float skips the list beneath it"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::inside_a_cell((34, 46), (3, 2), (35, 47))]
+    #[case::first_pixel((u16::MAX, u16::MAX), (0, 0), (0, 0))]
+    #[case::last_pixel_of_the_first_cell((8, 18), (0, 0), (9, 19))]
+    #[case::first_pixel_of_the_next_cell((9, 19), (1, 1), (10, 20))]
+    fn pixel_report_maps_to_its_cell(
+        #[case] reported: (u16, u16),
+        #[case] cell: (u16, u16),
+        #[case] pixel: (u16, u16),
+    ) {
+        // Given 10 by 20 pixel cells and a click crossterm read in pixels,
+        // one less than kitty's 0-based pixel (wrapped at pixel 0).
+        let size = CellSize {
+            width: 10,
+            height: 20,
+        };
+        let click = left_click(reported.0, reported.1);
+
+        // When mapping it to cells.
+        let mapped = from_pixels(click, size);
+
+        // Then it lands on the cell holding kitty's pixel, and keeps that
+        // pixel.
+        assert_eq!(
+            mapped,
+            Some((left_click(cell.0, cell.1), Position::new(pixel.0, pixel.1))),
+            "the pixel should map to its cell"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::unknown(CellSize::default())]
+    #[case::no_width(CellSize { width: 0, height: 20 })]
+    #[case::no_height(CellSize { width: 10, height: 0 })]
+    fn pixel_report_without_a_cell_size_is_dropped(#[case] size: CellSize) {
+        // Given a cell size that isn't known.
+
+        // When mapping a pixel click to cells.
+        let mapped = from_pixels(left_click(34, 46), size);
+
+        // Then there is nothing to route.
+        assert_eq!(mapped, None, "a pixel report needs a cell size");
     }
 }

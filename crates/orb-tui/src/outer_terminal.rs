@@ -1,10 +1,11 @@
 //! The terminal orb runs in: the modes orb switches on for itself, and what it
 //! passes through from the pane's child.
 //!
-//! orb asks for kitty key reports (so every key reaches the child
-//! unambiguously), bracketed paste, and focus changes. The mouse is captured
-//! from startup until orb exits, and the child's cursor shape and clipboard
-//! copies are passed through to the outer terminal. Everything is switched back
+//! orb asks for kitty key reports, with key repeats and releases (so every
+//! key reaches the child unambiguously), bracketed paste, and focus changes.
+//! The mouse is captured from startup until orb exits, and, in kitty, read in
+//! pixels, and the child's cursor shape and clipboard copies are passed
+//! through to the outer terminal. Everything is switched back
 //! off on exit and on panic, except when only one pane's output handling
 //! crashed.
 //!
@@ -160,6 +161,15 @@ pub(crate) struct OuterTerminal {
     /// The colours a pane's ANSI colours 0–15 show in (OSC 4); `None` for each
     /// one it didn't answer.
     pub palette: [Option<Color>; 16],
+}
+
+impl OuterTerminal {
+    /// Whether orb asks for the mouse in pixels: only from kitty, which
+    /// always reports them along with its cell size.
+    // ponytail: kitty only; ask DECRQM `?1016` at start-up if another terminal ever runs browsers.
+    pub(crate) fn pixel_mouse(&self) -> bool {
+        matches!(self.graphics, GraphicsSupport::Kitty { .. })
+    }
 }
 
 /// Asks the outer terminal for its name and version (XTVERSION), its default
@@ -325,12 +335,13 @@ fn channel(hex: &str) -> Option<u8> {
     u8::try_from(value * 255 / max).ok()
 }
 
-/// Switches on the modes orb needs from the outer terminal.
+/// Switches on the modes orb needs from the outer terminal; with
+/// `pixel_mouse`, the mouse in pixels.
 ///
 /// # Errors
 ///
 /// Returns an error if writing to the terminal fails.
-pub(crate) fn enable<W>(out: &mut W) -> io::Result<()>
+pub(crate) fn enable<W>(out: &mut W, pixel_mouse: bool) -> io::Result<()>
 where
     W: Write,
 {
@@ -338,12 +349,18 @@ where
         out,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
         ),
         EnableBracketedPaste,
         EnableFocusChange,
         EnableMouseCapture,
-    )
+    )?;
+    if pixel_mouse {
+        out.write_all(b"\x1b[?1016h")?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 /// Switches off everything orb changed in the outer terminal. Must run while
@@ -356,6 +373,7 @@ pub(crate) fn disable<W>(out: &mut W) -> io::Result<()>
 where
     W: Write,
 {
+    out.write_all(b"\x1b[?1016l")?;
     execute!(
         out,
         DisableMouseCapture,
@@ -416,7 +434,7 @@ mod tests {
     use ratatui::backend::{Backend, ClearType, CrosstermBackend};
     use ratatui::style::Color;
 
-    use super::{KeepImages, ask, copy_to_clipboard, enable, has_fence, parse_probe};
+    use super::{KeepImages, ask, copy_to_clipboard, disable, enable, has_fence, parse_probe};
 
     /// An output whose bytes stay readable after a backend takes it.
     #[derive(Clone, Default)]
@@ -484,7 +502,7 @@ mod tests {
         let mut out = Vec::new();
 
         // When switching on orb's terminal modes.
-        let _ = enable(&mut out);
+        let _ = enable(&mut out, false);
 
         // Then the output turns on SGR mouse reporting.
         assert!(
@@ -494,17 +512,51 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::asked(true)]
+    #[case::not_asked(false)]
+    fn enable_turns_pixel_mouse_on_only_when_asked(#[case] pixel_mouse: bool) {
+        // Given an empty output.
+        let mut out = Vec::new();
+
+        // When switching on orb's terminal modes.
+        let _ = enable(&mut out, pixel_mouse);
+
+        // Then pixel mouse reports are turned on exactly when asked.
+        assert_eq!(
+            String::from_utf8_lossy(&out).contains("\x1b[?1016h"),
+            pixel_mouse,
+            "pixel mouse should follow the argument"
+        );
+    }
+
+    #[rstest::rstest]
+    fn disable_turns_pixel_mouse_off() {
+        // Given an empty output.
+        let mut out = Vec::new();
+
+        // When switching off orb's terminal modes.
+        let _ = disable(&mut out);
+
+        // Then pixel mouse reports are turned off.
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[?1016l"),
+            "disable should turn pixel mouse off"
+        );
+    }
+
+    #[rstest::rstest]
     fn enable_asks_for_disambiguated_keys() {
         // Given an empty output.
         let mut out = Vec::new();
 
         // When switching on orb's terminal modes.
-        let _ = enable(&mut out);
+        let _ = enable(&mut out, false);
 
-        // Then it pushes kitty's disambiguate and alternate-key flags (1 | 4).
+        // Then it pushes kitty flags 7 (disambiguate, event types, alternate keys).
         assert!(
-            String::from_utf8_lossy(&out).contains("\x1b[>5u"),
-            "enable should push kitty flags 5, so Ctrl+[ and Alt+[ arrive distinct"
+            String::from_utf8_lossy(&out).contains("\x1b[>7u"),
+            "enable should push kitty flags 7 (disambiguate, event types, alternate keys), \
+             so Ctrl+[ and Alt+[ arrive distinct and held keys report their releases"
         );
     }
 

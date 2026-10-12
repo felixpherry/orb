@@ -4,9 +4,10 @@
 //! The child's output arrives in reads that can cut any sequence in two, so
 //! the start of a cut sequence is carried into the next read. What comes out
 //! keeps the child's byte order: runs of text for the emulator, kitty graphics
-//! commands, and markers for the synchronized-update brackets, the cell-size
-//! and version queries, screen clears and resets. Only the exact forms below are picked out;
-//! everything else stays text.
+//! commands, and markers for the synchronized-update brackets, the cell-size,
+//! version and pixel-mouse queries, pixel-mouse switches, screen clears and
+//! resets. Only the exact forms below are picked out; everything else stays
+//! text.
 
 use std::borrow::Cow;
 use std::mem;
@@ -40,6 +41,12 @@ pub(crate) enum Piece<'a> {
     /// A question for the terminal's name and version (`CSI > q` or
     /// `CSI > 0 q`), taken out of the text.
     VersionQuery,
+    /// Follows a private mode set or reset whose parameters include 1016
+    /// (pixel mouse reports), left in the text before it; `true` for set.
+    PixelMouse(bool),
+    /// A question for the pixel mouse mode (`CSI ? 1016 $ p`), taken out of
+    /// the text.
+    PixelMouseQuery,
     /// Follows a screen clear (`CSI 2 J` or `CSI 3 J`) left in the text before
     /// it.
     ClearedScreen,
@@ -57,6 +64,8 @@ impl Piece<'_> {
             Piece::SyncEnd => Piece::SyncEnd,
             Piece::CellSizeQuery => Piece::CellSizeQuery,
             Piece::VersionQuery => Piece::VersionQuery,
+            Piece::PixelMouse(on) => Piece::PixelMouse(on),
+            Piece::PixelMouseQuery => Piece::PixelMouseQuery,
             Piece::ClearedScreen => Piece::ClearedScreen,
             Piece::Reset => Piece::Reset,
         }
@@ -273,6 +282,14 @@ fn csi(body: &[u8]) -> Seq {
         b"16t" => Seq::TakenOut(Piece::CellSizeQuery, len),
         b">q" | b">0q" => Seq::TakenOut(Piece::VersionQuery, len),
         b"2J" | b"3J" => Seq::Marked(Piece::ClearedScreen, len),
+        b"?1016$p" => Seq::TakenOut(Piece::PixelMouseQuery, len),
+        [b'?', params @ .., end @ (b'h' | b'l')]
+            if params
+                .split(|byte| *byte == b';')
+                .any(|param| param == b"1016") =>
+        {
+            Seq::Marked(Piece::PixelMouse(*end == b'h'), len)
+        }
         [.., 0x40..=0x7e] => Seq::Text(len),
         _ => Seq::Text(2 + last),
     }
@@ -445,6 +462,40 @@ mod tests {
             split,
             [text(b"a\x1bc"), Piece::Reset, text(b"b")],
             "the reset is text, then marked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pixel_mouse_query_is_taken_out_of_the_text() {
+        // Given text around a pixel mouse mode query.
+        let output = b"ab\x1b[?1016$pcd";
+
+        // When splitting it.
+        let split = pieces(&[output]);
+
+        // Then the query comes out on its own.
+        assert_eq!(
+            split,
+            [text(b"ab"), Piece::PixelMouseQuery, text(b"cd")],
+            "the query is taken out of the text"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::set(b"\x1b[?1016h", true)]
+    #[case::reset(b"\x1b[?1016l", false)]
+    #[case::among_others(b"\x1b[?1003;1006;1016h", true)]
+    fn pixel_mouse_switch_stays_in_the_text(#[case] switch: &[u8], #[case] on: bool) {
+        // Given a mode switch naming pixel mouse reports.
+
+        // When splitting it.
+        let split = pieces(&[switch]);
+
+        // Then it stays text and a marker follows.
+        assert_eq!(
+            split,
+            [text(switch), Piece::PixelMouse(on)],
+            "the switch is text, then marked"
         );
     }
 

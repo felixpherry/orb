@@ -109,7 +109,8 @@ use orb_term::{CellSize, GraphicsSupport, Pane, PaneColors, PaneCommand, PaneEve
 use ratatui::backend::Backend;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::layout::{Margin, Position, Rect};
@@ -198,8 +199,8 @@ impl Frontend {
     /// through `notifier` while orb's terminal isn't focused;
     /// problems are written to `log`. The first frame is drawn before the
     /// panes of open sessions reconnect. Before anything reads input, the
-    /// outer terminal is asked what it is. The terminal is restored on exit
-    /// and on panic.
+    /// outer terminal is asked what it is; in kitty the mouse is read in
+    /// pixels. The terminal is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -222,7 +223,7 @@ impl Frontend {
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
         outer_terminal::run(|terminal, outer| {
-            outer_terminal::enable(terminal.backend_mut())?;
+            outer_terminal::enable(terminal.backend_mut(), outer.pixel_mouse())?;
             outer_terminal::install_panic_hook(log.clone());
             let env = [
                 env,
@@ -371,6 +372,9 @@ struct App {
     hits: HitMap,
     /// The last click, for telling a double-click.
     clicks: Clicks,
+    /// Keys whose last press went to a pane, and which pane, so each one's
+    /// release reaches that pane and no other.
+    held: HashMap<KeyCode, PaneId>,
     /// orb's pane has the outer terminal's focus, as its last focus event
     /// said; `true` until one arrives.
     focused: bool,
@@ -439,6 +443,7 @@ impl App {
             picker_scroll: PickerScroll::default(),
             hits: HitMap::default(),
             clicks: Clicks::default(),
+            held: HashMap::new(),
             focused: true,
             last_preview: None,
             outer,
@@ -592,8 +597,14 @@ impl App {
     /// intents it maps to (ending any key sequence in progress), scrolls the
     /// sidebar's view, sends a wheel notch to a pane, or starts, extends or
     /// copies a pane's selection, writing the copy to the clipboard through
-    /// `out`.
-    fn mouse<W>(&mut self, mouse: MouseEvent, out: &mut W) -> io::Result<()>
+    /// `out`. `pixel` is where it happened in pixels, when the outer terminal
+    /// reports them; only a pane's program gets it.
+    fn mouse<W>(
+        &mut self,
+        mouse: MouseEvent,
+        pixel: Option<Position>,
+        out: &mut W,
+    ) -> io::Result<()>
     where
         W: Write,
     {
@@ -612,7 +623,7 @@ impl App {
             MouseRoute::Forward => {
                 if let Some((pane, area)) = self.attached_id().and_then(|id| self.pane_and_area(id))
                 {
-                    pane.mouse(mouse, area);
+                    pane.mouse(mouse, area, pixel);
                 }
             }
             MouseRoute::Intents(intents) => self.run_mouse_intents(&intents),
@@ -635,7 +646,7 @@ impl App {
             }
             MouseRoute::Wheel(id) => {
                 if let Some((pane, area)) = self.pane_and_area(id) {
-                    pane.wheel(mouse, area);
+                    pane.wheel(mouse, area, pixel);
                 }
             }
             MouseRoute::ScrollSidebar(lines) => {
@@ -644,6 +655,30 @@ impl App {
             MouseRoute::Nothing => {}
         }
         Ok(())
+    }
+
+    /// Ends the left drag under way as its release would have (copying a
+    /// selection, saving a dragged float, telling the pane's program), once
+    /// input shows the button is up although no release came. kitty reports
+    /// a release above or left of its window in negative pixels, which
+    /// crossterm drops; with the mouse in cells nothing changes.
+    // ponytail: no drag reaches orb while the pointer is above or left of the window, so a selection doesn't scroll into the history there and its copy waits for the pointer to come back, a click or orb losing focus; read kitty's raw reports before crossterm if that matters.
+    fn end_lost_release<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let area = self.attached_id().and_then(|id| self.hits.pane_area(id));
+        match self.clicks.lost_release(area) {
+            Some(release) if self.outer.pixel_mouse() => {
+                // The release cell's top-left pixel, inside the pane as well.
+                let pixel = Position::new(
+                    release.column.saturating_mul(self.cell.width),
+                    release.row.saturating_mul(self.cell.height),
+                );
+                self.mouse(release, Some(pixel), out)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Pane `id` and where the last frame drew it.
@@ -663,70 +698,113 @@ impl App {
         self.toasts.dismiss();
     }
 
+    /// Acts on a key: a release reaches the pane that got that key's last
+    /// press, if it did, and nothing else; a press or repeat goes through
+    /// orb's keys, and only what they hand on reaches the pane.
+    fn key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            if let Some(pane) = self
+                .held
+                .remove(&key.code)
+                .and_then(|id| self.panes.get(&id))
+            {
+                pane.key(&key);
+            }
+            return;
+        }
+        let (focus, mode, list_intent) = {
+            let state = self.state.read();
+            let list_intent = state
+                .picker
+                .as_ref()
+                .filter(|picker| picker.listing())
+                .map(|picker| keymap::picker_list_route(picker.kind(), key));
+            (state.focus, state.pane_mode(), list_intent)
+        };
+        let mut forwarded = None;
+        let intent = match (focus, mode) {
+            // A list-mode picker takes letters as commands until `/`.
+            (Focus::Picker, _) if list_intent.is_some() => list_intent.flatten(),
+            // The rename box and the search take the picker's keys.
+            (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
+            (Focus::Pane, Some(mode)) => {
+                // A pane mode takes every key; none reaches the pane's program.
+                self.keys.dismiss();
+                keymap::mode_route(mode, key)
+            }
+            (Focus::Sidebar | Focus::Pane, _) => {
+                match keymap::route(key, focus == Focus::Pane, self.keys.is_pending()) {
+                    Route::Intent(intent) => {
+                        // An Alt key or a jump ends any key sequence in progress.
+                        self.keys.dismiss();
+                        Some(intent)
+                    }
+                    Route::Keymap => {
+                        // Focus and the selection also change outside
+                        // intents (the pane exits, a new session attaches).
+                        let scope = Scope::of(focus, &self.state.read());
+                        if *self.keys.scope() != scope {
+                            self.keys.set_scope(scope);
+                        }
+                        keymap::press(&mut self.keys, key)
+                    }
+                    Route::Forward => {
+                        forwarded = self.attached_id().filter(|id| self.panes.contains_key(id));
+                        if let Some(pane) = forwarded.and_then(|id| self.panes.get(&id)) {
+                            pane.key(&key);
+                        }
+                        None
+                    }
+                }
+            }
+        };
+        // ponytail: keyed by key code alone, so a release whose case differs from its press (Shift pressed mid-hold) is dropped; key by the unshifted key if that ever shows.
+        match (forwarded, key.kind) {
+            (Some(id), _) => {
+                self.held.insert(key.code, id);
+            }
+            // orb took this press: its release must not reach any pane.
+            (None, KeyEventKind::Press) => {
+                self.held.remove(&key.code);
+            }
+            // A repeat orb took (the keys moved off the pane mid-hold) leaves
+            // the release with the pane that got the press.
+            (None, _) => {}
+        }
+        if let Some(intent) = intent {
+            let commands = IntentHandler::handle(&intent, &mut self.state.write());
+            self.toasts.dismiss();
+            for command in &commands {
+                self.execute(command);
+            }
+        }
+    }
+
     fn handle<W>(&mut self, event: LoopEvent, out: &mut W) -> io::Result<()>
     where
         W: Write,
     {
         match event {
-            LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                let (focus, mode, list_intent) = {
-                    let state = self.state.read();
-                    let list_intent = state
-                        .picker
-                        .as_ref()
-                        .filter(|picker| picker.listing())
-                        .map(|picker| keymap::picker_list_route(picker.kind(), key));
-                    (state.focus, state.pane_mode(), list_intent)
-                };
-                let intent = match (focus, mode) {
-                    // A list-mode picker takes letters as commands until `/`.
-                    (Focus::Picker, _) if list_intent.is_some() => list_intent.flatten(),
-                    // The rename box and the search take the picker's keys.
-                    (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
-                    (Focus::Pane, Some(mode)) => {
-                        // A pane mode takes every key; none reaches the pane's program.
-                        self.keys.dismiss();
-                        keymap::mode_route(mode, key)
-                    }
-                    (Focus::Sidebar | Focus::Pane, _) => {
-                        match keymap::route(key, focus == Focus::Pane, self.keys.is_pending()) {
-                            Route::Intent(intent) => {
-                                // An Alt key or a jump ends any key sequence in progress.
-                                self.keys.dismiss();
-                                Some(intent)
-                            }
-                            Route::Keymap => {
-                                // Focus and the selection also change outside
-                                // intents (the pane exits, a new session attaches).
-                                let scope = Scope::of(focus, &self.state.read());
-                                if *self.keys.scope() != scope {
-                                    self.keys.set_scope(scope);
-                                }
-                                keymap::press(&mut self.keys, key)
-                            }
-                            Route::Forward => {
-                                if let Some(pane) = self.attached_pane() {
-                                    pane.key(&key);
-                                }
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some(intent) = intent {
-                    let commands = IntentHandler::handle(&intent, &mut self.state.write());
-                    self.toasts.dismiss();
-                    for command in &commands {
-                        self.execute(command);
-                    }
-                }
-            }
+            LoopEvent::Input(Event::Key(key)) => self.key(key),
             LoopEvent::Input(Event::Paste(text)) => {
                 if let Some(pane) = self.attached_pane() {
                     pane.paste(&text);
                 }
             }
-            LoopEvent::Input(Event::Mouse(mouse)) => self.mouse(mouse, out)?,
+            LoopEvent::Input(Event::Mouse(mouse)) if self.outer.pixel_mouse() => {
+                if let Some((mouse, pixel)) = mouse::from_pixels(mouse, self.cell) {
+                    // Motion with no button held, or a new left press: the
+                    // left button is up.
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)
+                    ) {
+                        self.end_lost_release(out)?;
+                    }
+                    self.mouse(mouse, Some(pixel), out)?;
+                }
+            }
+            LoopEvent::Input(Event::Mouse(mouse)) => self.mouse(mouse, None, out)?,
             LoopEvent::Input(Event::FocusGained) => {
                 self.focused = true;
                 if let Some(pane) = self.attached_pane() {
@@ -734,6 +812,7 @@ impl App {
                 }
             }
             LoopEvent::Input(Event::FocusLost) => {
+                self.end_lost_release(out)?;
                 self.focused = false;
                 if let Some(pane) = self.attached_pane() {
                     pane.focus(false);

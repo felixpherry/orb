@@ -1136,6 +1136,23 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn repeated_alt_key_still_runs_its_intent() {
+        // Given a held Alt+h as the kitty protocol reports its repeats.
+        let held =
+            KeyEvent::new_with_kind(KeyCode::Char('h'), KeyModifiers::ALT, KeyEventKind::Repeat);
+
+        // When routing it in a pane.
+        let route = route(held, true, false);
+
+        // Then it still moves the focus left.
+        assert_eq!(
+            route,
+            Route::Intent(Intent::MoveFocus(NavDirection::Left)),
+            "a repeated Alt key should run its intent"
+        );
+    }
+
+    #[rstest::rstest]
     #[case(KeyCode::Char('h'), Intent::MoveFocus(NavDirection::Left))]
     #[case(KeyCode::Char('j'), Intent::MoveFocus(NavDirection::Down))]
     #[case(KeyCode::Char('k'), Intent::MoveFocus(NavDirection::Up))]

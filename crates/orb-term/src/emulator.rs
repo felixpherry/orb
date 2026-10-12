@@ -12,12 +12,14 @@
 //! deadline passes and the caller flushes it. Kitty graphics commands are
 //! kept out of the screen and handed to the pane's own image model, at the
 //! cursor the text before them left; its answers go straight back to the
-//! child. User input is encoded for the modes the child currently has on.
+//! child. User input is encoded for the modes the child currently has on;
+//! pixel mouse reports, and whether they work, are answered and sent as the
+//! child asked.
 //!
 //! The screen keeps a history the wheel scrolls back through, and a text
-//! selection the mouse drags out and copies. Keys and pastes bring the view
-//! back to the live screen and drop the selection. The screen and its history
-//! can also be read out as plain text.
+//! selection the mouse drags out and copies. Key presses and pastes bring the
+//! view back to the live screen and drop the selection. The screen and its
+//! history can also be read out as plain text.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -31,7 +33,9 @@ use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode, viewport_t
 use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
@@ -145,6 +149,11 @@ pub(crate) struct Emulator {
     hold: Option<Hold>,
     /// The child's kitty images.
     graphics: PaneGraphics,
+    /// Whether the child turned pixel mouse reports (1016) on.
+    pixel_mouse: bool,
+    /// The cell of the last mouse event sent on to the child, so motion
+    /// within one cell reaches a child reporting cells once.
+    last_cell: Option<Position>,
 }
 
 /// A synchronized update being held: the child's output in order, how much
@@ -219,6 +228,8 @@ impl Emulator {
             splitter: Splitter::default(),
             hold: None,
             graphics: PaneGraphics::new(graphics),
+            pixel_mouse: false,
+            last_cell: None,
         }
     }
 
@@ -278,7 +289,22 @@ impl Emulator {
                 self.write(&replies);
             }
             Piece::ClearedScreen => self.graphics.cleared_screen(self.alt_screen()),
-            Piece::Reset => self.graphics.reset(),
+            Piece::Reset => {
+                self.graphics.reset();
+                self.pixel_mouse = false;
+            }
+            // ponytail: the last 1016 set or reset wins; kitty also goes back to cells on a later 1006 set, which no known child sends after 1016.
+            Piece::PixelMouse(on) => self.pixel_mouse = on,
+            // Not recognised where images aren't offered (an agent's pane,
+            // or orb outside kitty), the same answer the child got before.
+            Piece::PixelMouseQuery => {
+                let state = match (self.graphics.answers(), self.pixel_mouse) {
+                    (false, _) => 0,
+                    (true, true) => 1,
+                    (true, false) => 2,
+                };
+                self.write(format!("\x1b[?1016;{state}$y").as_bytes());
+            }
             Piece::CellSizeQuery => {
                 let cell = lock(&self.size).cell;
                 if cell.width > 0 && cell.height > 0 {
@@ -354,10 +380,12 @@ impl Emulator {
         }
     }
 
-    /// Sends `key` to the child, after returning the view to the bottom and
-    /// clearing the selection.
+    /// Sends `key` to the child. A press or repeat first returns the view to
+    /// the bottom and clears the selection; a release leaves both alone.
     pub(crate) fn key(&mut self, key: &KeyEvent) {
-        self.settle_view();
+        if key.kind != KeyEventKind::Release {
+            self.settle_view();
+        }
         self.write(&encode_key(key, *self.term.mode()));
     }
 
@@ -380,13 +408,31 @@ impl Emulator {
         self.write(format!("{line}\r").as_bytes());
     }
 
-    /// Sends a mouse event over the pane drawn at `area` to the child. A
-    /// press clears the selection.
-    pub(crate) fn mouse(&mut self, event: MouseEvent, area: Rect) {
+    /// Sends a mouse event over the pane drawn at `area` to the child;
+    /// `pixel` is where it happened in the outer terminal's pixels, when it
+    /// reports them. A child with pixel mouse on gets pane pixels, others get
+    /// cells, and motion within one cell only once. A press clears the
+    /// selection.
+    pub(crate) fn mouse(&mut self, event: MouseEvent, area: Rect, pixel: Option<Position>) {
         if matches!(event.kind, MouseEventKind::Down(_)) {
             self.term.selection = None;
         }
-        self.write(&encode_mouse(event, area, *self.term.mode()));
+        let pixel = {
+            let cell = lock(&self.size).cell;
+            pixel.filter(|_| self.pixel_mouse).map(|at| {
+                Position::new(
+                    at.x.saturating_sub(area.x.saturating_mul(cell.width)),
+                    at.y.saturating_sub(area.y.saturating_mul(cell.height)),
+                )
+            })
+        };
+        let at = Position::new(event.column, event.row);
+        let moved = matches!(event.kind, MouseEventKind::Moved | MouseEventKind::Drag(_));
+        if moved && pixel.is_none() && self.last_cell == Some(at) {
+            return;
+        }
+        self.last_cell = Some(at);
+        self.write(&encode_mouse(event, area, *self.term.mode(), pixel));
     }
 
     /// Tells the child the pane gained or lost focus.
@@ -400,16 +446,17 @@ impl Emulator {
     }
 
     /// A wheel notch over the pane drawn at `area`: a wheel report while
-    /// the child reads the mouse, else arrow keys on the alternate screen,
-    /// else a scroll of the history.
-    pub(crate) fn wheel(&mut self, event: MouseEvent, area: Rect) {
+    /// the child reads the mouse (at `pixel`, as [`Emulator::mouse`] takes
+    /// it), else arrow keys on the alternate screen, else a scroll of the
+    /// history.
+    pub(crate) fn wheel(&mut self, event: MouseEvent, area: Rect, pixel: Option<Position>) {
         let up = match event.kind {
             MouseEventKind::ScrollUp => true,
             MouseEventKind::ScrollDown => false,
             _ => return,
         };
         if self.reads_mouse() {
-            self.mouse(event, area);
+            self.mouse(event, area, pixel);
         } else if self.alt_screen() {
             let code = if up { KeyCode::Up } else { KeyCode::Down };
             let arrow = KeyEvent::new(code, KeyModifiers::NONE);
@@ -578,7 +625,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use ratatui::buffer::{Buffer, Cell};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::layout::{Position, Rect};
     use ratatui::style::{Color, Modifier};
 
@@ -744,7 +793,7 @@ mod tests {
 
     /// One wheel notch up over the pane drawn at [`AREA`].
     fn wheel_up(emulator: &mut Emulator) {
-        emulator.wheel(wheel(MouseEventKind::ScrollUp), AREA);
+        emulator.wheel(wheel(MouseEventKind::ScrollUp), AREA, None);
     }
 
     /// A drag from `from` to `to` in the pane drawn at [`AREA`].
@@ -825,6 +874,24 @@ mod tests {
         assert!(
             input.contents().ends_with(b"\x1b[13;2u"),
             "Shift+Enter should be kitty-encoded, got {:?}",
+            String::from_utf8_lossy(&input.contents())
+        );
+    }
+
+    #[rstest::rstest]
+    fn child_with_terminal_browsers_flags_gets_typed_text() {
+        // Given a child that pushed kitty flags 27 (disambiguate, event types,
+        // every key as an escape code, associated text).
+        let (mut emulator, input, _) = emulator();
+        emulator.feed(b"\x1b[>27u");
+
+        // When the user types `a`.
+        emulator.key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        // Then the child receives the key with the text it types.
+        assert!(
+            input.contents().ends_with(b"\x1b[97;1;97u"),
+            "`a` should carry its text, got {:?}",
             String::from_utf8_lossy(&input.contents())
         );
     }
@@ -1138,7 +1205,7 @@ mod tests {
     fn dragging_below_the_bottom_edge_scrolls_toward_the_live_screen() {
         // Given a pane scrolled back three lines, selecting from its last row.
         let (mut emulator, _) = nine_lines();
-        emulator.wheel(wheel(MouseEventKind::ScrollUp), LOWERED);
+        emulator.wheel(wheel(MouseEventKind::ScrollUp), LOWERED, None);
         let now = Instant::now();
         emulator.select_start(Position::new(0, 5), LOWERED, now);
 
@@ -1178,6 +1245,27 @@ mod tests {
         assert!(
             !reversed(&emulator, 0..3, 0),
             "the key should clear the selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_release_keeps_the_selection() {
+        // Given a selection over `one`.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"one");
+        drag(&mut emulator, (0, 0), (3, 0));
+
+        // When a key is released.
+        emulator.key(&KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+
+        // Then `one` is still highlighted.
+        assert!(
+            reversed(&emulator, 0..3, 0),
+            "a release should leave the selection"
         );
     }
 
@@ -1678,6 +1766,153 @@ mod tests {
             "first {:?}, second {:?}",
             String::from_utf8_lossy(&first),
             String::from_utf8_lossy(&second)
+        );
+    }
+
+    /// Where the pixel-mouse tests draw the pane: a cell in from the left, a
+    /// row down.
+    const OFFSET: Rect = Rect::new(2, 1, 20, 5);
+
+    /// A mouse event of `kind` at screen cell (3, 2).
+    fn at_three_two(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 3,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// A left press at screen cell (3, 2), screen pixel (35, 47).
+    fn press_at_three_two(emulator: &mut Emulator) {
+        emulator.mouse(
+            at_three_two(MouseEventKind::Down(MouseButton::Left)),
+            OFFSET,
+            Some(Position::new(35, 47)),
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::off(b"", "\x1b[?1016;2$y")]
+    #[case::on(b"\x1b[?1016h", "\x1b[?1016;1$y")]
+    fn pixel_mouse_query_follows_the_childs_setting(#[case] before: &[u8], #[case] expected: &str) {
+        // Given a pane in kitty whose child sent `before`.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.feed(before);
+
+        // When the child asks about pixel mouse reports.
+        emulator.feed(b"\x1b[?1016$p");
+
+        // Then it hears its own setting.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            expected,
+            "pixel mouse mode reply"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::answers_off(true)]
+    #[case::outside_kitty(false)]
+    fn pixel_mouse_query_is_not_recognised_where_images_are_off(#[case] in_kitty: bool) {
+        // Given a pane in kitty that stopped answering image questions, or a
+        // pane outside kitty.
+        let (mut emulator, input) = if in_kitty {
+            let (mut emulator, input) = kitty_emulator();
+            emulator.answer_graphics(false);
+            (emulator, input)
+        } else {
+            let (emulator, input, _) = emulator();
+            (emulator, input)
+        };
+
+        // When the child asks about pixel mouse reports.
+        emulator.feed(b"\x1b[?1016$p");
+
+        // Then it hears the mode isn't recognised.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[?1016;0$y",
+            "pixel mouse mode reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_reaches_a_pixel_mouse_child_in_pane_pixels() {
+        // Given a pane in kitty whose child asked for pixel mouse reports.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.feed(b"\x1b[?1000h\x1b[?1006h\x1b[?1016h");
+
+        // When the left button goes down at screen pixel (35, 47).
+        press_at_three_two(&mut emulator);
+
+        // Then the child gets the pixel within its pane.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[<0;15;27M",
+            "pixel mouse report"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_reaches_a_cell_mouse_child_in_cells() {
+        // Given a pane in kitty whose child asked for cell mouse reports.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+
+        // When the left button goes down at screen cell (3, 2).
+        press_at_three_two(&mut emulator);
+
+        // Then the child gets the cell within its pane.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[<0;2;2M",
+            "cell mouse report"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reset_turns_pixel_mouse_off() {
+        // Given a child that asked for pixel mouse reports, reset the
+        // terminal, then asked for cell reports.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.feed(b"\x1b[?1016h\x1bc\x1b[?1000h\x1b[?1006h");
+
+        // When the left button goes down at screen cell (3, 2).
+        press_at_three_two(&mut emulator);
+
+        // Then the child gets the cell within its pane.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[<0;2;2M",
+            "cell mouse report after a reset"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::cells(b"\x1b[?1003h\x1b[?1006h", 1)]
+    #[case::pixels(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h", 2)]
+    fn motion_within_a_cell_reaches_the_child_as_it_asked(
+        #[case] modes: &[u8],
+        #[case] reports: usize,
+    ) {
+        // Given a child tracking motion in `modes`.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.feed(modes);
+
+        // When the mouse moves twice within screen cell (3, 2).
+        for pixel in [Position::new(31, 41), Position::new(35, 47)] {
+            emulator.mouse(at_three_two(MouseEventKind::Moved), OFFSET, Some(pixel));
+        }
+
+        // Then a cell child hears it once and a pixel child each time.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents())
+                .matches("\x1b[<")
+                .count(),
+            reports,
+            "motion reports in {:?}",
+            String::from_utf8_lossy(&input.contents())
         );
     }
 }

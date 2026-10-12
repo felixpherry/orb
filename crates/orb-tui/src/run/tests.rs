@@ -15,6 +15,7 @@ use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items, worktree_items};
 use orb_domain::feat::sessions::state::{
     Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
+    SidebarItem,
 };
 use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
 use std::ffi::OsString;
@@ -40,12 +41,16 @@ use orb_domain::{
     AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter, Services,
     SessionsCommand, State,
 };
-use orb_term::{CellSize, PaneEvent};
+use orb_term::{CellSize, GraphicsSupport, PaneEvent};
 use ratatui::crossterm::cursor::SetCursorStyle;
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
+use crate::mouse::HitMap;
 use crate::outer_terminal::OuterTerminal;
 use crate::test_support::{FakeZmx, NoGit, layouts_for, pane, session as session_id, sessions_for};
 
@@ -2439,6 +2444,292 @@ fn agent_launch_into_a_pane_with_a_waiting_line_is_pane_busy() -> io::Result<()>
         answer.map_err(|error| error.code),
         Err(ErrorCode::PaneBusy),
         "a pane with a line waiting can't start an agent"
+    );
+    Ok(())
+}
+
+/// A client that asks for kitty flags 3 (disambiguate, event types), then
+/// writes the raw bytes typed into it to `typed`.
+fn records_raw_with_event_types(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "/bin/stty raw -echo; printf '\\033[>3u'; exec /bin/cat > typed",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// A loop with attached pane 1 running [`records_raw_with_event_types`],
+/// its flags set, and the keys in it.
+fn keys_in_a_raw_pane() -> io::Result<LoopTest> {
+    let mut test = loop_app(FakeZmx::listing(""), records_raw_with_event_types)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    {
+        let mut state = test.state.write();
+        state.sessions.enter(session_id(1));
+        state.focus = Focus::Pane;
+    }
+    Ok(test)
+}
+
+/// `code` with `modifiers` as the outer terminal reports its `kind`.
+fn key_input(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> LoopEvent {
+    LoopEvent::Input(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)))
+}
+
+#[rstest::rstest]
+fn release_of_a_forwarded_key_reaches_its_pane() -> io::Result<()> {
+    // Given the keys in a pane whose program asked for event types.
+    let mut test = keys_in_a_raw_pane()?;
+
+    // When Ctrl+x is pressed and released.
+    for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+        test.app.handle(
+            key_input(KeyCode::Char('x'), KeyModifiers::CONTROL, kind),
+            &mut io::sink(),
+        )?;
+    }
+
+    // Then the program gets the press and the release.
+    let typed = log_holding(&test.dir.path().join("typed"), "\x1b[120;5:3u");
+    assert_eq!(
+        typed, "\x1b[120;5u\x1b[120;5:3u",
+        "a forwarded key's release follows its press"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn release_of_a_key_orb_took_never_reaches_the_pane() -> io::Result<()> {
+    // Given the keys in a pane whose program asked for event types.
+    let mut test = keys_in_a_raw_pane()?;
+
+    // When `<C-]>` (a jump, orb's own) is pressed and released, then `z`
+    // is pressed.
+    for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+        test.app.handle(
+            key_input(KeyCode::Char(']'), KeyModifiers::CONTROL, kind),
+            &mut io::sink(),
+        )?;
+    }
+    test.app.handle(
+        key_input(KeyCode::Char('z'), KeyModifiers::NONE, KeyEventKind::Press),
+        &mut io::sink(),
+    )?;
+
+    // Then the program gets only `z`.
+    let typed = log_holding(&test.dir.path().join("typed"), "z");
+    assert_eq!(typed, "z", "the release of orb's key stays with orb");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn release_in_the_sidebar_moves_nothing() -> io::Result<()> {
+    // Given the sidebar's cursor on the first of two session cards.
+    let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+    {
+        let mut state = test.state.write();
+        state.sessions.projects = vec![project_active_at(1, "alpha", 20)];
+        state.sessions.sessions = vec![session(1, false), session(2, false)];
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(2)));
+        state.focus = Focus::Sidebar;
+    }
+
+    // When a release of `j` arrives.
+    test.app.handle(
+        key_input(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+        &mut io::sink(),
+    )?;
+
+    // Then the cursor stays where it was.
+    assert_eq!(
+        test.state.read().sessions.cursor,
+        Some(SidebarItem::Session(SessionId(2))),
+        "a release runs none of orb's keys"
+    );
+    Ok(())
+}
+
+/// Where [`pixel_mouse_pane`] has pane 1 drawn: right of a 30-column
+/// sidebar, below the tab bar's line.
+const PIXEL_PANE: Rect = Rect::new(30, 1, 90, 39);
+
+/// A loop in kitty with 10 by 20 pixel cells and the keys in attached pane
+/// 1, which runs `attach` and was drawn at [`PIXEL_PANE`], its program
+/// reading the mouse or not.
+fn pixel_mouse_pane(
+    attach: fn(&ZmxSession) -> Vec<OsString>,
+    reads_mouse: bool,
+) -> io::Result<LoopTest> {
+    let mut test = loop_app(FakeZmx::listing(""), attach)?;
+    test.app.outer = OuterTerminal {
+        graphics: GraphicsSupport::Kitty { transient: true },
+        ..OuterTerminal::default()
+    };
+    test.app.measure(
+        Rect::new(0, 0, 120, 40),
+        CellSize {
+            width: 10,
+            height: 20,
+        },
+    );
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    {
+        let mut state = test.state.write();
+        state.sessions.enter(session_id(1));
+        state.focus = Focus::Pane;
+    }
+    test.app.hits = {
+        let mut hits = HitMap::new(Rect::new(0, 0, 30, 40), Rect::new(30, 0, 90, 40));
+        hits.record_pane(PIXEL_PANE, PaneId(1), reads_mouse);
+        hits
+    };
+    Ok(test)
+}
+
+/// A mouse `kind` at kitty's pixel (`x`, `y`), as crossterm reads it: one
+/// less on each coordinate.
+fn pixel_mouse(kind: MouseEventKind, x: u16, y: u16) -> LoopEvent {
+    LoopEvent::Input(Event::Mouse(MouseEvent {
+        kind,
+        column: x - 1,
+        row: y - 1,
+        modifiers: KeyModifiers::NONE,
+    }))
+}
+
+/// A client that prints `hello world` and keeps running.
+fn says_hello(_: &ZmxSession) -> Vec<OsString> {
+    ["/bin/sh", "-c", "printf 'hello world'; exec /bin/sleep 30"]
+        .map(OsString::from)
+        .to_vec()
+}
+
+/// `hello` going to the clipboard.
+const HELLO_COPIED: &str = "\x1b]52;c;aGVsbG8=\x07";
+
+/// [`pixel_mouse_pane`] over [`says_hello`], with `hello` selected by a
+/// press on the pane's first cell and a drag up onto the tab bar's line,
+/// which left the window's top: kitty's release there can't be read.
+fn hello_dragged_out_of_the_top(out: &mut Vec<u8>) -> io::Result<LoopTest> {
+    let mut test = pixel_mouse_pane(says_hello, false)?;
+    test.app.handle(
+        pixel_mouse(MouseEventKind::Down(MouseButton::Left), 305, 25),
+        out,
+    )?;
+    test.app.handle(
+        pixel_mouse(MouseEventKind::Drag(MouseButton::Left), 355, 5),
+        out,
+    )?;
+    Ok(test)
+}
+
+#[rstest::rstest]
+fn selection_whose_release_was_lost_is_copied_once_the_mouse_moves() -> io::Result<()> {
+    // Given `hello` selected by a drag out of the window's top.
+    let mut out = Vec::new();
+    let mut test = hello_dragged_out_of_the_top(&mut out)?;
+
+    // When the mouse moves back in with no button held.
+    test.app
+        .handle(pixel_mouse(MouseEventKind::Moved, 605, 405), &mut out)?;
+
+    // Then `hello` goes to the clipboard.
+    assert!(
+        String::from_utf8_lossy(&out).contains(HELLO_COPIED),
+        "a lost release should still copy the selection"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn selection_whose_release_was_lost_is_copied_once_orb_loses_focus() -> io::Result<()> {
+    // Given `hello` selected by a drag out of the window's top.
+    let mut out = Vec::new();
+    let mut test = hello_dragged_out_of_the_top(&mut out)?;
+
+    // When another window takes the focus.
+    test.app
+        .handle(LoopEvent::Input(Event::FocusLost), &mut out)?;
+
+    // Then `hello` goes to the clipboard.
+    assert!(
+        String::from_utf8_lossy(&out).contains(HELLO_COPIED),
+        "a lost release should copy the selection before the focus leaves"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn selection_released_in_the_window_is_copied_once() -> io::Result<()> {
+    // Given `hello` selected by a drag within the pane and released there.
+    let mut out = Vec::new();
+    let mut test = pixel_mouse_pane(says_hello, false)?;
+    for (kind, x) in [
+        (MouseEventKind::Down(MouseButton::Left), 305),
+        (MouseEventKind::Drag(MouseButton::Left), 355),
+        (MouseEventKind::Up(MouseButton::Left), 355),
+    ] {
+        test.app.handle(pixel_mouse(kind, x, 25), &mut out)?;
+    }
+
+    // When the mouse then moves with no button held.
+    test.app
+        .handle(pixel_mouse(MouseEventKind::Moved, 605, 405), &mut out)?;
+
+    // Then only the release copied it.
+    assert_eq!(
+        String::from_utf8_lossy(&out).matches("\x1b]52;").count(),
+        1,
+        "a drag ends once"
+    );
+    Ok(())
+}
+
+/// A client that asks for mouse clicks in SGR cells, then writes the raw
+/// bytes it gets to `typed`.
+fn records_clicks(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "/bin/stty raw -echo; printf '\\033[?1000h\\033[?1006h'; exec /bin/cat > typed",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+#[rstest::rstest]
+fn program_gets_a_release_lost_above_the_window_on_its_top_line() -> io::Result<()> {
+    // Given a press on a mouse-reading program at its cell (5, 1), dragged
+    // up onto the tab bar's line and out of the window's top.
+    let mut test = pixel_mouse_pane(records_clicks, true)?;
+    test.app.handle(
+        pixel_mouse(MouseEventKind::Down(MouseButton::Left), 355, 45),
+        &mut io::sink(),
+    )?;
+    test.app.handle(
+        pixel_mouse(MouseEventKind::Drag(MouseButton::Left), 355, 5),
+        &mut io::sink(),
+    )?;
+
+    // When the mouse moves back in with no button held.
+    test.app.handle(
+        pixel_mouse(MouseEventKind::Moved, 605, 405),
+        &mut io::sink(),
+    )?;
+
+    // Then the program gets its release, kept to its top line.
+    let typed = log_holding(&test.dir.path().join("typed"), "\x1b[<0;6;1m");
+    assert_eq!(
+        typed, "\x1b[<0;6;2M\x1b[<0;6;1m",
+        "a program that got the press gets its release"
     );
     Ok(())
 }
