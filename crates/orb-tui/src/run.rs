@@ -994,6 +994,7 @@ impl App {
                 &self.keys,
                 now,
                 &self.tz,
+                self.outer.orb_background(),
                 &mut self.sidebar_scroll,
                 &mut self.picker_scroll,
                 &mut self.hits,

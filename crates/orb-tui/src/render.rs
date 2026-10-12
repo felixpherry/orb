@@ -13,10 +13,10 @@
 //! Each frame records where it drew the sidebar's rows and input box, the
 //! shown panes, the pickers' rows and the rename box, so a click maps back
 //! to them.
-//! Whatever is left on the terminal's default background gets orb's navy, so
-//! a transparent terminal doesn't show through, except the cells over a
-//! pane's visible image, which keep the terminal's default background so the
-//! image shows.
+//! Whatever is left on the terminal's default background gets orb's navy (or
+//! the colour start-up chose in its place), so a transparent terminal doesn't
+//! show through, except the cells over a pane's visible image, which keep the
+//! terminal's default background so the image shows.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -73,7 +73,8 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// side shows the start screen, with `pane_error` saying why the session
 /// couldn't start. While the sidebar has the keys, the cursor sits on the
 /// first cell of its selected row. `toast` shows in the message box, and the
-/// mode line's clock shows `now` in `tz`. Each drawn pane's images go into
+/// mode line's clock shows `now` in `tz`. Cells nothing coloured get
+/// `background`. Each drawn pane's images go into
 /// `images`. Returns the sidebar's layout unless it's hidden, how
 /// many rows the picker fits when it's open, and where the cursor shows, if anywhere.
 #[expect(
@@ -89,6 +90,7 @@ pub(crate) fn render(
     keys: &Keys,
     now: SystemTime,
     tz: &TimeZone,
+    background: Color,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
     hits: &mut HitMap,
@@ -183,7 +185,7 @@ pub(crate) fn render(
     }
     for cell in &mut frame.buffer_mut().content {
         cell.bg = match cell.bg {
-            Color::Reset => BACKGROUND,
+            Color::Reset => background,
             IMAGE_HOLE => Color::Reset,
             other => other,
         };

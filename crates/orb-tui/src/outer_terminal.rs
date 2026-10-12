@@ -12,8 +12,11 @@
 //! At start-up, before anything else reads input, orb asks the outer terminal
 //! what it is and which colours it draws with. Pane images are forwarded only
 //! to kitty, and a pane's colour questions can be answered with the colours
-//! its text really shows in. Resizing orb's window redraws it without erasing
-//! the whole screen, so the panes' images stay on it.
+//! its text really shows in. When the outer terminal's own background is
+//! exactly orb's navy, orb paints one step off it, since kitty draws pane
+//! images over any cell of its own background colour, even one orb painted.
+//! Resizing orb's window redraws it without erasing the whole screen, so the
+//! panes' images stay on it.
 
 use std::io::{self, Stdout, Write};
 use std::panic;
@@ -39,11 +42,16 @@ use ratatui::style::Color;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;
 
+use crate::render::BACKGROUND;
+
 /// How long start-up waits for the outer terminal to answer.
 const PROBE_WAIT: Duration = Duration::from_millis(300);
 
 /// The first kitty version that takes the transient hint (`N=1`).
 const TRANSIENT_FROM: (u32, u32) = (0, 48);
+
+/// orb's navy with blue one higher: the same to the eye, apart for kitty.
+const BACKGROUND_STEP_OFF: Color = Color::Rgb(0x22, 0x24, 0x37);
 
 /// orb's terminal: ratatui over stdout through [`KeepImages`].
 pub(crate) type OrbTerminal = Terminal<KeepImages<CrosstermBackend<Stdout>>>;
@@ -158,6 +166,8 @@ pub(crate) struct OuterTerminal {
     pub graphics: GraphicsSupport,
     /// The colour a pane's default text shows in (OSC 10), when it answered.
     pub foreground: Option<Color>,
+    /// The outer terminal's own background (OSC 11), when it answered.
+    pub background: Option<Color>,
     /// The colours a pane's ANSI colours 0–15 show in (OSC 4); `None` for each
     /// one it didn't answer.
     pub palette: [Option<Color>; 16],
@@ -170,15 +180,25 @@ impl OuterTerminal {
     pub(crate) fn pixel_mouse(&self) -> bool {
         matches!(self.graphics, GraphicsSupport::Kitty { .. })
     }
+
+    /// The colour orb paints behind cells with no background of their own:
+    /// orb's navy, or one step off it when the outer terminal's own background
+    /// is exactly that navy, so kitty still sees those cells as painted.
+    pub(crate) fn orb_background(&self) -> Color {
+        match self.background {
+            Some(BACKGROUND) => BACKGROUND_STEP_OFF,
+            _ => BACKGROUND,
+        }
+    }
 }
 
 /// Asks the outer terminal for its name and version (XTVERSION), its default
-/// text colour (OSC 10) and its colours 0–15 (OSC 4), fenced by a
-/// device-attributes query (DA1) every terminal answers last, and reads the
-/// replies straight from stdin up to the fence, so they never reach the input
-/// thread. Runs in raw mode before anything else reads input; keys typed
-/// meanwhile are lost. A terminal slower than [`PROBE_WAIT`] counts as one
-/// that answered nothing.
+/// text colour (OSC 10), its background (OSC 11) and its colours 0–15 (OSC 4),
+/// fenced by a device-attributes query (DA1) every terminal answers last, and
+/// reads the replies straight from stdin up to the fence, so they never reach
+/// the input thread. Runs in raw mode before anything else reads input; keys
+/// typed meanwhile are lost. A terminal slower than [`PROBE_WAIT`] counts as
+/// one that answered nothing.
 // ponytail: answers arriving after PROBE_WAIT reach the input thread as keys;
 // a filter in front of crossterm's reader would close that if a slow terminal
 // ever shows it.
@@ -195,7 +215,7 @@ fn ask<W>(out: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    write!(out, "\x1b[>0q\x1b]10;?\x1b\\")?;
+    write!(out, "\x1b[>0q\x1b]10;?\x1b\\\x1b]11;?\x1b\\")?;
     for index in 0..16 {
         write!(out, "\x1b]4;{index};?\x1b\\")?;
     }
@@ -258,6 +278,9 @@ pub(crate) fn parse_probe(replies: &[u8]) -> OuterTerminal {
         }
         if let Some(color) = reply.strip_prefix("]10;") {
             outer.foreground = rgb(color);
+        }
+        if let Some(color) = reply.strip_prefix("]11;") {
+            outer.background = rgb(color);
         }
         if let Some((index, color)) = reply
             .strip_prefix("]4;")
@@ -434,7 +457,10 @@ mod tests {
     use ratatui::backend::{Backend, ClearType, CrosstermBackend};
     use ratatui::style::Color;
 
-    use super::{KeepImages, ask, copy_to_clipboard, disable, enable, has_fence, parse_probe};
+    use super::{
+        KeepImages, OuterTerminal, ask, copy_to_clipboard, disable, enable, has_fence, parse_probe,
+    };
+    use crate::render::BACKGROUND;
 
     /// An output whose bytes stay readable after a backend takes it.
     #[derive(Clone, Default)]
@@ -635,8 +661,51 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn background_reply_gives_the_outer_background() {
+        // Given the outer terminal's background answer.
+        let replies = b"\x1b]11;rgb:2222/2424/3636\x1b\\\x1b[?62;c";
+
+        // When reading its replies.
+        let outer = parse_probe(replies);
+
+        // Then the background is that colour.
+        assert_eq!(
+            outer.background,
+            Some(Color::Rgb(0x22, 0x24, 0x36)),
+            "background should be the answered colour"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::same_as_orbs(Some(BACKGROUND), Color::Rgb(0x22, 0x24, 0x37))]
+    #[case::one_off_orbs(Some(Color::Rgb(0x22, 0x24, 0x37)), BACKGROUND)]
+    #[case::another(Some(Color::Rgb(0x1e, 0x1e, 0x2e)), BACKGROUND)]
+    #[case::unanswered(None, BACKGROUND)]
+    fn orb_background_steps_off_only_an_exact_match(
+        #[case] outer_background: Option<Color>,
+        #[case] expected: Color,
+    ) {
+        // Given an outer terminal with that background.
+        let outer = OuterTerminal {
+            background: outer_background,
+            ..OuterTerminal::default()
+        };
+
+        // When choosing orb's background.
+        let background = outer.orb_background();
+
+        // Then orb's navy moves one step off only when the outer background
+        // is exactly it.
+        assert_eq!(
+            background, expected,
+            "orb's background over {outer_background:?}"
+        );
+    }
+
+    #[rstest::rstest]
     #[case("\x1b[>0q")]
     #[case("\x1b]10;?\x1b\\")]
+    #[case("\x1b]11;?\x1b\\")]
     #[case("\x1b]4;0;?\x1b\\")]
     #[case("\x1b]4;15;?\x1b\\")]
     fn probe_asks_before_the_fence(#[case] question: &str) {

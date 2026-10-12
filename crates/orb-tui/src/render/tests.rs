@@ -90,25 +90,29 @@ fn draw(state: &AppState) -> Buffer {
 
 /// Draws `state` on an 80x8 screen with `keys` pending.
 fn draw_with(state: &AppState, keys: &Keys) -> Buffer {
-    frame(state, None, keys, 8).backend().buffer().clone()
+    frame(state, None, keys, 8, BACKGROUND)
+        .backend()
+        .buffer()
+        .clone()
 }
 
 /// Draws `state` on an 80x40 screen, tall enough for the whole start screen.
 fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
     let keys = Keys::new(keymap(), Scope::Sidebar);
-    frame(state, pane_error, &keys, 40)
+    frame(state, pane_error, &keys, 40, BACKGROUND)
         .backend()
         .buffer()
         .clone()
 }
 
 /// The terminal after drawing `state` on an 80-column screen `height`
-/// rows tall, with `pane_error` and `keys` pending.
+/// rows tall, with `pane_error` and `keys` pending, on `background`.
 fn frame(
     state: &AppState,
     pane_error: Option<&str>,
     keys: &Keys,
     height: u16,
+    background: Color,
 ) -> Terminal<TestBackend> {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, height));
     let Ok(_) = terminal.draw(|frame| {
@@ -121,6 +125,7 @@ fn frame(
             keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            background,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
@@ -236,6 +241,7 @@ fn draw_with_pane_and_toast(
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
@@ -424,10 +430,16 @@ fn delete_worktree_confirm_draws_over_the_worktree_list() {
     let state = delete_worktree_confirm();
 
     // When drawing a frame.
-    let buffer = frame(&state, None, &Keys::new(keymap(), Scope::Sidebar), 20)
-        .backend()
-        .buffer()
-        .clone();
+    let buffer = frame(
+        &state,
+        None,
+        &Keys::new(keymap(), Scope::Sidebar),
+        20,
+        BACKGROUND,
+    )
+    .backend()
+    .buffer()
+    .clone();
 
     // Then the list's row and the confirm's title are both on screen.
     let screen = text(&buffer, buffer.area);
@@ -455,6 +467,7 @@ fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
+                BACKGROUND,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
                 &mut hits,
@@ -544,6 +557,31 @@ fn cells_without_a_background_get_orbs(#[case] state: AppState, #[case] at: (u16
         buffer.cell(at).map(|cell| cell.bg),
         Some(BACKGROUND),
         "background at {at:?}"
+    );
+}
+
+#[rstest::rstest]
+fn cells_without_a_background_get_the_chosen_background() {
+    // Given a background chosen in place of orb's navy.
+    let background = Color::Rgb(0x22, 0x24, 0x37);
+
+    // When drawing an empty frame on it.
+    let buffer = frame(
+        &AppState::default(),
+        None,
+        &Keys::new(keymap(), Scope::Sidebar),
+        8,
+        background,
+    )
+    .backend()
+    .buffer()
+    .clone();
+
+    // Then a cell nothing coloured has the chosen background.
+    assert_eq!(
+        buffer.cell((79, 0)).map(|cell| cell.bg),
+        Some(background),
+        "an empty cell should get the chosen background"
     );
 }
 
@@ -672,6 +710,7 @@ fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
@@ -706,6 +745,7 @@ fn leader_popup_sits_above_the_mode_line() {
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
@@ -817,6 +857,7 @@ fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
@@ -1723,6 +1764,7 @@ fn draw_hits(state: &AppState) -> (Buffer, HitMap) {
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut hits,
@@ -1930,6 +1972,7 @@ fn hidden_sidebar_returns_no_layout() {
             &Keys::new(keymap(), Scope::Sidebar),
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
+            BACKGROUND,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),

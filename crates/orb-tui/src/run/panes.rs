@@ -627,7 +627,7 @@ impl App {
             graphics: self.outer.graphics,
             colors: Some(PaneColors {
                 foreground: self.outer.foreground.unwrap_or(FG),
-                background: render::BACKGROUND,
+                background: self.outer.orb_background(),
                 palette: self.outer.palette,
             }),
         };

@@ -84,7 +84,8 @@ Entries are added or amended **only with human approval**.
 - (keybinds) The projects screen, the session picker and the worktree picker open in list mode, where `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>` move and `Esc` closes.
 - (keybinds) In the projects screen, the session picker and the worktree picker, `/` moves the keys to the input box, where typing filters, `⏎` picks, and `Esc` returns to the list keeping the typed text.
 - (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
-- (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
+- (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells, except the cells over a pane's shown image, which keep the outer terminal's own background.
+- (tui) When the outer terminal's own background is exactly `#222436`, orb paints `#222437` in its place and answers a pane's background question with it, since kitty draws pane images over any cell of its own background colour.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every agent, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
@@ -368,3 +369,21 @@ Entries are added or amended **only with human approval**.
 - (log) The running orb writes one line to the log for each API request that changes something.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
 - (sessions) A session that finishes starting while a picker, the rename box or search has the keys waits until they close.
+- (pane) While orb runs in kitty, orb forwards a pane's kitty graphics commands to the outer kitty with the image data untouched, rewriting only image ids, placement positions, and when they are sent; a pane holding an agent drops them.
+- (pane) orb, not the pane emulator, holds a pane's synchronized update until the child ends it or 150 ms pass, and shows its text and images in the same screen update.
+- (pane) A pane's images leave the screen while the pane isn't shown, and are deleted when its client goes away, its program clears the screen or resets, or it leaves the alternate screen.
+- (pane) Pane images are drawn beneath every cell orb gives a background, so the sidebar, pickers, toasts, the which-key popup, borders, and floating panes always cover them.
+- (pane) orb answers a pane's kitty graphics query itself and never passes it to the outer terminal: OK for direct data while orb runs in kitty, and an error for other transmission media, in a pane holding an agent, or outside kitty.
+- (pane) The pane's PTY carries its size in pixels, and orb answers the child's pixel-size (`CSI 14 t`) and cell-size (`CSI 16 t`) queries when it knows its cell size, its foreground query (OSC 10) with the outer terminal's foreground, and its background query (OSC 11) with orb's background.
+- (pane) While orb runs in kitty, pane programs get `TERMINAL_BROWSER_PRESENT=patched` and `TERMINAL_BROWSER_FRAMES=shared`.
+- (pane) orb answers a pane's XTVERSION query with its own name, `orb(<version>)`, and its OSC 4 queries for colours 0–15 with the outer terminal's colours, staying silent for a colour the outer terminal didn't give.
+- (tui) At start-up orb asks its outer terminal for its name and version, its foreground, background and colours 0–15, and forwards images only when it is kitty, marking them transient from kitty 0.48.
+- (tui) Resizing orb's terminal clears it without deleting kitty images.
+- (pane) A printable key carries its text to a program that asked for it through the kitty keyboard protocol.
+- (pane) A key release reaches a pane's program only if it asked for releases and only in the pane that got that key's press.
+- (pane) A held printable key reaches a pane's program as repeated presses; other held keys arrive as repeats to a program that asked for event types and as presses otherwise.
+- (mouse) While orb runs in kitty, orb passes pixel mouse positions, 0-based and relative to the pane, to a program that turned on pixel mouse reports (1016).
+- (mouse) A pane holding an agent, and every pane outside kitty, is told pixel mouse reports aren't recognised.
+- (mouse) In pixel mode, a drag whose release was lost above or left of the window ends on the next plain move, left press or focus loss.
+- (api) `~/.orb/terminal-browser.sock` answers terminal-browser's current-pane, split and focus requests, so `terminal-browser open --split right` or `--split down` opens an orb pane beside the caller with the keys left where they were; `left` and `up` are refused.
+- (api) Pane programs get `TERMINAL_BROWSER_TERMINAL_SOCKET` only when orb opened that socket.
