@@ -5199,44 +5199,25 @@ fn idle_for_four_days(store: &Store, short_id: &str) -> Result<i64, Report<Store
     Ok(since)
 }
 
-#[rstest::rstest]
-#[tokio::test]
-async fn turn_end_on_an_unselected_agent_is_unseen() -> Result<(), Report<StoreError>> {
-    // Given a working agent while another agent is selected.
-    let (store, id) = store_with_agent("aa")?;
-    let other = add_agent(&store, "bb", now_ms() - HOUR_MS)?;
-    let host = listing(vec![
-        record("aa", AgentStatus::Working),
-        record("bb", AgentStatus::Idle),
-    ]);
-    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-    state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(other.0)));
-    actor.poll().await;
-
-    // When a poll sees its turn end.
-    host.set_running(Ok(vec![
-        record("aa", AgentStatus::Idle),
-        record("bb", AgentStatus::Idle),
-    ]));
-    actor.poll().await;
-
-    // Then it is unseen.
-    assert_eq!(
-        shown(&state, id).map(|agent| agent.unseen),
-        Some(true),
-        "a turn that ended elsewhere should wait to be seen"
-    );
-    Ok(())
+/// Shows `seeded`'s session with the keys in its pane, or in the sidebar
+/// with the cursor on the session when `in_pane` is false.
+fn shown_with_keys(state: &State, seeded: &Seeded, in_pane: bool) {
+    let mut app = state.write();
+    app.attached.insert(seeded.session);
+    app.sessions.enter(seeded.session);
+    app.sessions.cursor = Some(SidebarItem::Session(seeded.session));
+    app.focus = if in_pane { Focus::Pane } else { Focus::Sidebar };
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_on_the_selected_agent_is_seen() -> Result<(), Report<StoreError>> {
-    // Given the selected agent working.
-    let (store, id) = store_with_agent("aa")?;
+async fn turn_end_with_keys_in_its_pane_is_seen() -> Result<(), Report<StoreError>> {
+    // Given agent aa working, with the keys in its pane.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-    state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
+    shown_with_keys(&state, &inserted, true);
     actor.poll().await;
 
     // When a poll sees its turn end.
@@ -5245,9 +5226,65 @@ async fn turn_end_on_the_selected_agent_is_seen() -> Result<(), Report<StoreErro
 
     // Then it is seen.
     assert_eq!(
-        shown(&state, id).map(|agent| agent.unseen),
+        shown(&state, inserted.agent).map(|agent| agent.unseen),
         Some(false),
-        "being on the agent when its turn ends counts as seeing it"
+        "a turn that ends with the keys in its pane counts as seen"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn turn_end_with_keys_in_sidebar_is_unseen() -> Result<(), Report<StoreError>> {
+    // Given agent aa working, its session shown and the keys in the
+    // sidebar on it.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    shown_with_keys(&state, &inserted, false);
+    actor.poll().await;
+
+    // When a poll sees its turn end.
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
+    actor.poll().await;
+
+    // Then it is unseen.
+    assert_eq!(
+        shown(&state, inserted.agent).map(|agent| agent.unseen),
+        Some(true),
+        "a turn that ends while the keys are in the sidebar waits to be seen"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn turn_end_with_keys_in_another_sessions_pane_is_unseen() -> Result<(), Report<StoreError>> {
+    // Given agent aa working, with the keys in agent bb's pane.
+    let store = Store::open_in_memory()?;
+    let aa = insert_agent(&store, "aa")?;
+    let bb = insert_agent(&store, "bb")?;
+    let host = listing(vec![
+        record("aa", AgentStatus::Working),
+        record("bb", AgentStatus::Idle),
+    ]);
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    shown_with_keys(&state, &bb, true);
+    actor.poll().await;
+
+    // When a poll sees aa's turn end.
+    host.set_running(Ok(vec![
+        record("aa", AgentStatus::Idle),
+        record("bb", AgentStatus::Idle),
+    ]));
+    actor.poll().await;
+
+    // Then aa is unseen.
+    assert_eq!(
+        shown(&state, aa.agent).map(|agent| agent.unseen),
+        Some(true),
+        "a turn that ends while the keys are in another pane waits to be seen"
     );
     Ok(())
 }
