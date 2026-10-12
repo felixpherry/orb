@@ -695,14 +695,16 @@ pub(super) fn rename_hex_branch(
     None
 }
 
-/// The branch checked out in `cwd`, if git can tell. A failed read is
-/// logged, once until its text changes.
+/// The branch checked out in `cwd`, if git can tell. A failed read in a
+/// git repository is logged, once per folder until its text changes; a
+/// folder outside git has no branch, so its failure isn't logged.
 pub(super) fn current_branch(services: &Services, cwd: &Path) -> Option<String> {
     let refs = match services.git.refs(cwd) {
         Ok(refs) => refs,
+        Err(_) if services.git.project_path(cwd).is_none() => return None,
         Err(report) => {
             services.log.error_on_change(
-                "branch read",
+                &format!("branch read {}", cwd.display()),
                 &format!("couldn't read the branch in {}", cwd.display()),
                 &report,
             );

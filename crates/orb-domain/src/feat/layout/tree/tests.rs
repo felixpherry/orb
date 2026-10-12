@@ -1539,6 +1539,31 @@ fn move_mode_up_from_below_a_stack_swaps_with_its_shown_pane() {
 }
 
 #[rstest::rstest]
+fn move_mode_up_from_below_a_no_row_stack_swaps_with_its_shown_pane() {
+    // Given panes 1, 2 and 3 stacked in no rows over pane 4, pane 2 shown
+    // and pane 4 focused.
+    let mut layout = TileLayout::from_saved(
+        split(
+            Split::Down,
+            0.1,
+            stack_of(&[1, 2, 3], 2),
+            Node::Pane(pane(4)),
+        ),
+        pane(4),
+    );
+
+    // When moving pane 4 up in a body four rows tall.
+    layout.swap_toward(Rect::new(0, 0, 100, 4), NavDirection::Up);
+
+    // Then pane 4 takes the shown pane 2's place in the stack.
+    assert_eq!(
+        stacked(&layout),
+        vec![vec![pane(1), pane(4), pane(3)]],
+        "a stack with no rows should still swap with the pane it shows"
+    );
+}
+
+#[rstest::rstest]
 fn move_mode_up_from_below_a_one_row_stack_swaps_with_its_shown_pane() {
     // Given panes 1, 2 and 3 stacked in one row over pane 4, pane 2 shown
     // and pane 4 focused.

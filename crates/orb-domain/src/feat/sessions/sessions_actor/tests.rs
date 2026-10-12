@@ -12,7 +12,7 @@ use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
     FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob,
-    WorktreeReady, now_ms, spawn_sessions_actor,
+    WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -55,6 +55,8 @@ const ORB_ROOT: &str = "/nonexistent/orb";
 const INCOGNITO_ROOT: &str = "/nonexistent/orb-incognito";
 /// Why git refuses outside a repository.
 const NOT_A_REPO: &str = "fatal: not a git repository";
+/// Why git fails inside a repository whose files are damaged.
+const BROKEN_REPO: &str = "fatal: bad object HEAD";
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
@@ -106,6 +108,8 @@ struct FakeGit {
     merged: bool,
     /// What `project_path` answers.
     project: Option<PathBuf>,
+    /// Why `refs` fails inside the repository, if it does.
+    refs_error: Option<String>,
     calls: Mutex<Vec<GitCall>>,
     /// The app state `fetch` looks at, once a test watches one.
     watched: OnceLock<State>,
@@ -133,6 +137,7 @@ impl FakeGit {
             remote: Vec::new(),
             merged: true,
             project: None,
+            refs_error: None,
             calls: Mutex::default(),
             watched: OnceLock::new(),
             fetching_seen: Mutex::default(),
@@ -210,6 +215,15 @@ impl FakeGit {
         })
     }
 
+    /// A repository whose refs can't be read.
+    fn broken() -> Arc<Self> {
+        Arc::new(Self {
+            project: Some(PathBuf::from(PROJECT_ROOT)),
+            refs_error: Some(BROKEN_REPO.to_owned()),
+            ..Self::answering()
+        })
+    }
+
     /// Whether the directory is a repository now.
     fn is_repo(&self) -> bool {
         self.repo
@@ -272,6 +286,9 @@ impl Git for FakeGit {
     fn refs(&self, _cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
         if !self.is_repo() {
             return Err(Report::new(GitError).attach(NOT_A_REPO.to_owned()));
+        }
+        if let Some(error) = &self.refs_error {
+            return Err(Report::new(GitError).attach(error.clone()));
         }
         Ok(vec![GitRef {
             current: true,
@@ -5250,8 +5267,42 @@ async fn turn_end_without_a_scanned_branch_takes_the_branch_from_git()
 #[rstest::rstest]
 #[tokio::test]
 async fn a_failed_branch_read_after_a_turn_is_logged() -> Result<(), Report<StoreError>> {
-    // Given a branchless agent a poll saw working, in a folder git can't
-    // read, whose transcript names no branch, and a log.
+    // Given a branchless agent a poll saw working, in a repository whose
+    // refs can't be read, whose transcript names no branch, and a log.
+    let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
+    fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
+    fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
+    let (store, _) = store_with_agent("aa")?;
+    let working = record("aa", AgentStatus::Working);
+    let host = listing(vec![working.clone()]);
+    let (mut actor, _state) = start_with(store, &host, &FakeGit::broken(), claude_dir.path());
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let log = dir.path().join("orb.log");
+    actor.services.log = Log::new(log.clone());
+    actor.poll().await;
+
+    // When a poll sees its turn end.
+    host.set_running(Ok(vec![RunningAgent {
+        status: AgentStatus::Idle,
+        ..working
+    }]));
+    actor.poll().await;
+
+    // Then the log says the branch couldn't be read, and why.
+    let content = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        content.contains("couldn't read the branch in") && content.contains(BROKEN_REPO),
+        "the failed branch read should be logged with its cause, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn a_branch_read_outside_git_after_a_turn_is_not_logged() -> Result<(), Report<StoreError>> {
+    // Given a branchless agent a poll saw working, in a folder that isn't a
+    // git repository, whose transcript names no branch, and a log.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
@@ -5273,11 +5324,36 @@ async fn a_failed_branch_read_after_a_turn_is_logged() -> Result<(), Report<Stor
     }]));
     actor.poll().await;
 
-    // Then the log says the branch couldn't be read, and why.
+    // Then nothing is logged.
     let content = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        content.contains("couldn't read the branch in") && content.contains(NOT_A_REPO),
-        "the failed branch read should be logged with its cause, got {content:?}"
+        content.is_empty(),
+        "a folder outside git has no branch to read, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn failed_branch_reads_in_two_folders_are_each_logged_once() -> Result<(), Report<StoreError>> {
+    // Given a repository whose refs can't be read, and a log.
+    let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![]);
+    let (mut actor, _state) = start_with(store, &host, &FakeGit::broken(), claude_dir.path());
+    let log = claude_dir.path().join("orb.log");
+    actor.services.log = Log::new(log.clone());
+
+    // When the branch is read in two folders in turn, twice.
+    for folder in ["/repo/a", "/repo/b", "/repo/a", "/repo/b"] {
+        let _ = current_branch(&actor.services, Path::new(folder));
+    }
+
+    // Then each folder's failure is logged once.
+    let content = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        content.matches("couldn't read the branch in").count(),
+        2,
+        "each folder's failure should be logged once, got {content:?}"
     );
     Ok(())
 }

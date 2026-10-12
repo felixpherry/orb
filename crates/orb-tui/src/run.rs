@@ -805,7 +805,7 @@ impl App {
     /// Reads `agent`'s transcript, in its harness's format, into the open
     /// picker's preview. An unreadable transcript, or one whose harness orb
     /// doesn't know, gives an empty preview, which shows as no transcript;
-    /// an unreadable one is logged, once until its text changes.
+    /// an unreadable one is logged, once per agent until its text changes.
     fn load_preview(&mut self, agent: AgentId, transcript: &Path) {
         let harness = self
             .state
@@ -818,7 +818,7 @@ impl App {
             Some(Ok(read)) => read,
             Some(Err(report)) => {
                 self.log.error_on_change(
-                    "preview read",
+                    &format!("preview read {}", agent.0),
                     &format!(
                         "couldn't read agent {}'s transcript {}",
                         agent.0,

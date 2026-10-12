@@ -1798,6 +1798,66 @@ fn an_unreadable_preview_is_logged() -> io::Result<()> {
     Ok(())
 }
 
+#[rstest::rstest]
+fn unreadable_previews_of_two_agents_are_each_logged_once() -> io::Result<()> {
+    // Given agents 1 and 2 of a harness that can't read their transcripts,
+    // and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    test.app.harnesses = Harnesses::new(vec![Arc::new(UnreadableHarness)]);
+    let transcript = test.dir.path().join("1.jsonl");
+    let agent = Agent {
+        last_session: None,
+        harness: HarnessId::new("claude"),
+        id: AgentId(1),
+        title: None,
+        cwd: "/tmp".into(),
+        transcript: Some(transcript.clone()),
+        status: AgentStatus::Idle,
+        turn_started_at: None,
+        pane: None,
+        branch: None,
+        created_at: UNIX_EPOCH,
+        last_activity_at: UNIX_EPOCH,
+        unseen: false,
+        model: None,
+    };
+    test.state.write().sessions.projects = vec![Project {
+        id: ProjectId(1),
+        title: "orb".to_owned(),
+        root: PathBuf::from("/repo"),
+        created_at: UNIX_EPOCH,
+        agents: vec![
+            Agent {
+                id: AgentId(2),
+                ..agent.clone()
+            },
+            agent,
+        ],
+        repo: true,
+        removed: false,
+        kind: ProjectKind::Normal,
+    }];
+
+    // When the loop loads the two previews in turn, twice.
+    for id in [1, 2, 1, 2] {
+        test.app.execute(&Command::LoadPreview {
+            agent: AgentId(id),
+            transcript: transcript.clone(),
+        });
+    }
+
+    // Then each agent's failure is logged once.
+    let content = fs::read_to_string(&path)?;
+    assert_eq!(
+        content.matches("couldn't read agent").count(),
+        2,
+        "each agent's failed preview read should be logged once, got {content:?}"
+    );
+    Ok(())
+}
+
 /// A desktop whose notifications always fail.
 struct FailingNotifier;
 

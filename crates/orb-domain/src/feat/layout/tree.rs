@@ -277,6 +277,9 @@ impl TileLayout {
                 .position(|id| *id == stack.expanded)
                 .unwrap_or_default();
             let (rows, start) = stack_list_rows(stack.panes.len(), a.height, at);
+            // A stack with no rows has no list, so its shown pane sits at
+            // its top edge, right above the pane below it.
+            let rows = rows.min(a.height);
             // ponytail: a list row counts as the stack's full width; the drawn
             // list is only as wide as its names, which only the frontend knows.
             // Pass the list width in if a pane overlapping only the stack's

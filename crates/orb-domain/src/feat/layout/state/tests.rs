@@ -324,10 +324,15 @@ fn expanded(layouts: &Layouts) -> Option<PaneId> {
 /// on the top half with pane `300 + shown` shown, over pane 304 on the
 /// bottom half, which has the focus.
 fn stack_over_pane(shown: i64) -> Layouts {
+    stack_over_pane_in(shown, 0.5, BODY)
+}
+
+/// [`stack_over_pane`], the stack taking `ratio` of `body`.
+fn stack_over_pane_in(shown: i64, ratio: f32, body: Rect) -> Layouts {
     let tree = TileLayout::from_saved(
         Node::Split {
             split: Split::Down,
-            ratio: 0.5,
+            ratio,
             first: Box::new(Node::Stack {
                 panes: vec![pane(1), pane(2), pane(3)],
                 expanded: pane(shown),
@@ -346,7 +351,7 @@ fn stack_over_pane(shown: i64) -> Layouts {
             Floats::default(),
         ),
     );
-    layouts.fit_to(BODY);
+    layouts.fit_to(body);
     layouts
 }
 
@@ -367,6 +372,28 @@ fn up_from_below_a_stack_lands_on_its_shown_pane(#[case] shown: i64) {
         focused(&layouts),
         Some(pane(shown)),
         "moving up from below a stack should land on the pane it shows"
+    );
+}
+
+#[rstest::rstest]
+#[case::no_rows(0.1, 4)]
+#[case::one_row(0.25, 3)]
+fn up_from_below_a_stack_under_two_rows_lands_on_its_shown_pane(
+    #[case] ratio: f32,
+    #[case] height: u16,
+) {
+    // Given panes 301, 302 and 303 stacked over pane 304 in a body so short
+    // the stack gets under two rows, pane 302 shown and pane 304 focused.
+    let mut layouts = stack_over_pane_in(2, ratio, Rect::new(0, 0, 80, height));
+
+    // When moving the focus up.
+    layouts.move_focus(OWNER, NavDirection::Up);
+
+    // Then the stack's shown pane has the focus.
+    assert_eq!(
+        focused(&layouts),
+        Some(pane(2)),
+        "moving up from below a short stack should land on the pane it shows"
     );
 }
 
