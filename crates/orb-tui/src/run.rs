@@ -90,6 +90,7 @@ use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
+use orb_domain::feat::notify::sound::{SoundService, sound_for};
 use orb_domain::feat::picker::state::{PickerKind, worktree_items};
 use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::pane_env;
@@ -188,8 +189,9 @@ impl Frontend {
     /// `worktrees`; search commands go to `search`; an agent whose worktree
     /// under `worktrees_root` is gone has it recreated before attaching; the
     /// branch picker's refs come from `git`; panes run with `env` and attach
-    /// through `zmx`; notices are
-    /// announced through `notifier` while orb's terminal isn't focused;
+    /// through `zmx`; notices play a sound through `sounds` unless the
+    /// user is looking at that agent's finished turn, and are announced
+    /// through `notifier` while orb's terminal isn't focused;
     /// problems are written to `log`. The first frame is drawn before the
     /// panes of open sessions reconnect. The terminal is restored on exit and
     /// on panic.
@@ -210,6 +212,7 @@ impl Frontend {
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
         notifier: NotifierService,
+        sounds: SoundService,
         log: Log,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
@@ -228,6 +231,7 @@ impl Frontend {
                 zmx,
                 attach_argv,
                 notifier,
+                sounds,
                 log,
                 tx,
                 tz,
@@ -337,6 +341,8 @@ struct App {
     attach: fn(&ZmxSession) -> Vec<OsString>,
     /// Announces the sessions actor's status changes.
     notifier: NotifierService,
+    /// Plays the sounds for the sessions actor's status changes.
+    sounds: SoundService,
     /// orb's log file.
     log: Log,
     /// The zone the mode line's clock shows.
@@ -371,6 +377,7 @@ impl App {
         zmx: ZmxService,
         attach: fn(&ZmxSession) -> Vec<OsString>,
         notifier: NotifierService,
+        sounds: SoundService,
         log: Log,
         tx: Sender<LoopEvent>,
         tz: TimeZone,
@@ -402,6 +409,7 @@ impl App {
             zmx,
             attach,
             notifier,
+            sounds,
             log,
             tz,
             tx,

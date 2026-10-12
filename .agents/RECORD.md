@@ -68,7 +68,7 @@ Entries are added or amended **only with human approval**.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (pane) The right-hand area shows the active session's panes while orb is attached to it; otherwise it shows the start screen.
 - (sidebar) Pinned sessions come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
-- (sidebar) An agent shows a green check and "done" when its latest turn ended after the user last selected its session.
+- (sidebar) An agent shows a green check and "done" when its latest turn ended after the keys were last in its pane.
 - (settle) A turn underway in any of a session's agent panes, including one waiting for approval or input, un-settles the session.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
@@ -126,6 +126,11 @@ Entries are added or amended **only with human approval**.
 - (notify) On Linux, approval and input notifications are sent at critical urgency and finished-turn notifications at normal urgency.
 - (notify) On Linux, a later notification about the same agent replaces the earlier one.
 - (notify) On Linux, clicking a notification focuses orb's niri window when niri is running.
+- (notify) orb plays herdr's "request" sound, built into orb, each time an agent starts needing approval or input, whether or not the user is looking at it.
+- (notify) orb plays herdr's "done" sound, built into orb, when an agent finishes a turn, unless orb's terminal is focused and the agent's pane is in the shown session's shown tab or a showing float.
+- (notify) On macOS, sounds play through `afplay`.
+- (notify) On Linux, a sound plays through the first of paplay, pw-play, ffplay, mpg123 and mpv that plays it, and nothing plays when none can.
+- (notify) Sounds play even while macOS Focus hides the notification, and orb has no setting to turn them off.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (keybinds) In the sidebar, `r` on a session opens a Rename Session box filled in with its title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
 - (keybinds) In the sidebar, `/` or `i` moves the keys to its input box; typing filters, `<C-j>`/`<C-k>` or `↓`/`↑` move between matches, wrapping from the last to the first and back, `⏎` clears the text and keeps the cursor on the match (or, with no match, acts as `Esc`), and `Esc` clears it and puts the cursor back where it was.
@@ -306,7 +311,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
 - (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell or the card is folded, and it follows every focus change inside the session.
-- (sidebar) The hovered row has a filled background, and the active row has a blue bar at its left edge and a bold first line.
+- (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
 - (sidebar) Deleting or settling the active session leaves no active session.
 - (layout) When orb can't read its saved layouts at start, or any saved tab's split tree, the message box says `couldn't fully read orb's saved layouts (<reason>); orb keeps what it couldn't read`.
@@ -321,7 +326,7 @@ Entries are added or amended **only with human approval**.
 - (repo) `just lint` checks that every code name AGENTS.md and the Record mention outside code blocks exists in orb's code, except an allowlist of the style guide's examples and outside names.
 - (log) orb appends a log to `~/.orb/orb.log`, moved to `~/.orb/orb.log.1` once it reaches 5 MB, keeping one old file.
 - (log) Each orb start, including `orb integration` but not the API subcommands, writes a `start` line with orb's version and process id to the log, and an error that ends orb is written as `orb stopped` with its causes.
-- (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. An unreadable transcript, a failed branch read in a git repository, a failed read of a worktree's git facts, an unreadable session picker preview and a desktop notification that can't be sent are written to the log with their causes too, the repeating reads only when their text changes for that folder, worktree or agent. A command the loop can't send to an actor writes one line naming the command's kind, the actor and why (`couldn't send SearchTranscripts to the search actor: actor not running`), never what the command carried, such as the searched text; a branch read in a folder outside git and a failed fallback after terminal-notifier fails are not logged.
+- (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. An unreadable transcript, a failed branch read in a git repository, a failed read of a worktree's git facts, an unreadable session picker preview and a desktop notification that can't be sent, a sound that can't be played are written to the log with their causes too, the repeating reads only when their text changes for that folder, worktree or agent. A command the loop can't send to an actor writes one line naming the command's kind, the actor and why (`couldn't send SearchTranscripts to the search actor: actor not running`), never what the command carried, such as the searched text; a branch read in a folder outside git and a failed fallback after terminal-notifier fails are not logged.
 - (log) Every zmx kill, worktree removal and branch deletion writes one line to the log saying what was removed, why, and whether it worked (a kill of a session zmx no longer has says `already gone`); every session deletion writes one line naming the session, its agents and panes and whether it worked; every pane row dropped by a layout save writes one line naming the pane and its session.
 - (crash) A crash anywhere in orb except one pane's output handling writes the crash line and a backtrace to `~/.orb/orb.log`, restores the terminal, prints the usual crash message and ends orb with exit code 101; the panes keep running in zmx and come back at the next start.
 - (crash) A crash while handling one pane's output writes its line to the log and stops showing only that pane, with `stopped showing pane <name> after an error; it keeps running` in the message box and the log; its program keeps running, and the pane shows again once its session is attached again (after it is settled, deleted, moved or detached after a failed attach, or at the next orb start).
@@ -361,3 +366,5 @@ Entries are added or amended **only with human approval**.
 - (api) `orb agent reply` returns the agent's last reply from its transcript.
 - (integration) `orb integration install` also installs an `orb` skill for Claude Code and pi that teaches agents the API.
 - (log) The running orb writes one line to the log for each API request that changes something.
+- (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
+- (sessions) A session that finishes starting while a picker, the rename box or search has the keys waits until they close.

@@ -5,3 +5,6 @@ licensed under the Apache License, Version 2.0
 
 crates/orb-domain/src/feat/layout/tree.rs is adapted from herdr's
 src/layout.rs at commit 3d9d2b18 and was modified.
+
+crates/orb-domain/assets/sounds/done.mp3 and request.mp3 are copied unmodified
+from herdr's assets/sounds at commit 3d9d2b18.

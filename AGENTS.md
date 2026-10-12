@@ -241,7 +241,7 @@ let c = {
 
 **The loop applies the reports in one place** (`apply`, `show` and `open_ready` in run/report.rs). It:
 
-- opens a ready session (a new, restored, moved or switched one) while the session active when it was asked for is still active, even if the cursor moved, and once the keys are back in the sidebar;
+- opens a ready session (a new, restored, moved or switched one) while the session active when it was asked for is still active, even if the cursor moved: at once from the sidebar or a pane (from a pane it takes the keys into its pane), and only after a picker, the rename box or search gives the keys back;
 - shows an error or a notice in the message box (the same error doesn't pop again until a key or a success, and an error isn't hidden by a notice in the same turn);
 - announces a status change on the desktop while orb's terminal isn't focused;
 - re-lists an open worktree picker, and re-sorts an open projects screen after any report;

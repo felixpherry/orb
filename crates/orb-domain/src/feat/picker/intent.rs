@@ -18,10 +18,10 @@ use crate::feat::picker::validator::{
     validate_delete_worktree, validate_open_directory, validate_pick_project,
     validate_pick_session, validate_remove_project,
 };
+use crate::feat::sessions::intent::new_session;
 use crate::feat::sessions::intent::{
     delete_session, filter_to, pick_project, remove_project, settle_session, still_deletable,
 };
-use crate::feat::sessions::intent::{new_session, with_visit};
 use crate::feat::sessions::state::Project;
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
 use crate::feat::sidebar;
@@ -634,7 +634,7 @@ pub(crate) fn pick(
         vec![Command::Sessions(SessionsCommand::SaveJumps)]
     };
     commands.extend(show_pane(state));
-    with_visit(state, commands)
+    commands
 }
 
 /// Jumps to `session`, picked in the search picker: puts the cursor on it

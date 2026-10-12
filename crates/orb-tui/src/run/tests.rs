@@ -28,6 +28,7 @@ use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::notify::none::NoneNotifier;
 use orb_domain::feat::notify::notifier::NotifierService;
+use orb_domain::feat::notify::sound::{SoundError, SoundPlayer, SoundService};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
@@ -449,8 +450,7 @@ fn new_session_opens_when_nothing_was_active_and_still_isnt() {
 #[case(Focus::Picker)]
 #[case(Focus::Rename)]
 #[case(Focus::Search)]
-#[case(Focus::Pane)]
-fn ready_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
+fn ready_session_waits_while_typing(#[case] focus: Focus) {
     // Given session 1 ready while it is still active, e.g. while a picker
     // has the keys.
     let active = Some(SessionId(1));
@@ -463,6 +463,23 @@ fn ready_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
         decision,
         StartedAttach::Wait,
         "the open should wait in {focus:?}"
+    );
+}
+
+#[rstest::rstest]
+fn ready_session_opens_at_once_from_a_pane() {
+    // Given session 1 ready while it is still active and the keys are in a
+    // pane.
+    let active = Some(SessionId(1));
+
+    // When deciding what to do in the pane.
+    let decision = started_attach(active, active, Focus::Pane, false);
+
+    // Then orb opens it, taking the keys into its pane.
+    assert_eq!(
+        decision,
+        StartedAttach::Attach { keep_keys: false },
+        "being in a pane shouldn't hold the open back"
     );
 }
 
@@ -480,6 +497,23 @@ fn waited_ready_session_opens_once_the_keys_are_back() {
         decision,
         StartedAttach::Attach { keep_keys: true },
         "a waited open should keep the keys where they came back to"
+    );
+}
+
+#[rstest::rstest]
+fn waited_ready_session_takes_the_keys_when_they_come_back_to_a_pane() {
+    // Given session 1 waited while the user was in a picker, and it is
+    // still active.
+    let active = Some(SessionId(1));
+
+    // When deciding what to do once the keys are back in a pane.
+    let decision = started_attach(active, active, Focus::Pane, true);
+
+    // Then orb opens it, taking the keys into its pane.
+    assert_eq!(
+        decision,
+        StartedAttach::Attach { keep_keys: false },
+        "a waited open coming back to a pane should take the keys"
     );
 }
 
@@ -1360,6 +1394,7 @@ fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Resul
         ZmxService::new(zmx.clone(), dir.path().join("zmx"), Log::default()),
         attach,
         NotifierService::new(Arc::new(NoneNotifier)),
+        SoundService::silent(),
         Log::default(),
         tx,
         TimeZone::UTC,
@@ -1951,6 +1986,190 @@ fn a_failed_desktop_notification_is_logged() -> io::Result<()> {
     assert!(
         content.contains("couldn't send a desktop notification"),
         "the failed notification should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+/// A player that sends each file it plays down a channel.
+struct RecordingPlayer(mpsc::Sender<PathBuf>);
+
+impl SoundPlayer for RecordingPlayer {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    fn play(&self, file: &Path) -> Result<(), error_stack::Report<SoundError>> {
+        let _ = self.0.send(file.to_owned());
+        Ok(())
+    }
+}
+
+/// A player that never plays.
+struct FailingPlayer;
+
+impl SoundPlayer for FailingPlayer {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+
+    fn play(&self, _: &Path) -> Result<(), error_stack::Report<SoundError>> {
+        Err(error_stack::Report::new(SoundError).attach("no audio player"))
+    }
+}
+
+/// Gives `test` a recording player of `done.mp3` and `request.mp3`, and
+/// the files it plays.
+fn recording_sounds(test: &mut LoopTest) -> mpsc::Receiver<PathBuf> {
+    let (tx, played) = mpsc::channel();
+    test.app.sounds = SoundService::new(
+        Arc::new(RecordingPlayer(tx)),
+        PathBuf::from("done.mp3"),
+        PathBuf::from("request.mp3"),
+    );
+    played
+}
+
+/// Agent 1 running in pane 1 of shown session 1: in the shown tab when
+/// `in_shown_tab`, else in a tab behind the shown one.
+fn watching_agent(test: &LoopTest, in_shown_tab: bool) {
+    let mut state = test.state.write();
+    let projects = vec![Project {
+        id: ProjectId(1),
+        title: "orb".to_owned(),
+        root: PathBuf::from("/repo"),
+        created_at: UNIX_EPOCH,
+        agents: vec![Agent {
+            last_session: None,
+            harness: HarnessId::new("claude"),
+            id: AgentId(1),
+            title: None,
+            cwd: "/tmp".into(),
+            transcript: None,
+            status: AgentStatus::Idle,
+            turn_started_at: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(1),
+                session: SessionId(1),
+            }),
+            branch: None,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            model: None,
+        }],
+        repo: true,
+        removed: false,
+        kind: ProjectKind::Normal,
+    }];
+    state.sessions = Sessions {
+        sessions: sessions_for(&projects),
+        projects,
+        ..Sessions::default()
+    };
+    state
+        .layouts
+        .insert(SessionId(1), SessionLayout::of(entry(1)));
+    if !in_shown_tab {
+        state.layouts.new_tab(SessionId(1), entry(2));
+    }
+    state.attached.insert(SessionId(1));
+    state.sessions.enter(SessionId(1));
+}
+
+/// Agent 1's notice of `kind`.
+fn notice_of(kind: orb_domain::feat::sessions::state::NoticeKind) -> Outcome {
+    Outcome::Announce(orb_domain::feat::sessions::state::Notice {
+        agent: AgentId(1),
+        kind,
+        project: "orb".to_owned(),
+        title: "Fix it".to_owned(),
+    })
+}
+
+#[rstest::rstest]
+fn a_finished_turn_being_watched_plays_nothing() -> io::Result<()> {
+    // Given a focused orb showing agent 1's pane.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let played = recording_sounds(&mut test);
+    watching_agent(&test, true);
+
+    // When agent 1 finishes a turn.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::Finished,
+    ));
+
+    // Then no sound plays.
+    let sound = played.recv_timeout(Duration::from_millis(300)).ok();
+    assert_eq!(sound, None, "a watched finish should be silent");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn a_finished_turn_in_another_tab_plays_done() -> io::Result<()> {
+    // Given a focused orb with agent 1's pane in a tab behind the shown one.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let played = recording_sounds(&mut test);
+    watching_agent(&test, false);
+
+    // When agent 1 finishes a turn.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::Finished,
+    ));
+
+    // Then the done sound plays.
+    let sound = played.recv_timeout(Duration::from_secs(5)).ok();
+    assert_eq!(
+        sound,
+        Some(PathBuf::from("done.mp3")),
+        "a finish off screen plays done"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn an_approval_being_watched_plays_request() -> io::Result<()> {
+    // Given a focused orb showing agent 1's pane.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let played = recording_sounds(&mut test);
+    watching_agent(&test, true);
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the request sound plays.
+    let sound = played.recv_timeout(Duration::from_secs(5)).ok();
+    assert_eq!(
+        sound,
+        Some(PathBuf::from("request.mp3")),
+        "a request always plays"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn a_sound_that_cant_play_is_logged() -> io::Result<()> {
+    // Given an orb whose sounds can't play, and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    test.app.sounds = SoundService::new(
+        Arc::new(FailingPlayer),
+        PathBuf::from("done.mp3"),
+        PathBuf::from("request.mp3"),
+    );
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the log says the sound couldn't play.
+    let content = log_holding(&path, "couldn't play a sound");
+    assert!(
+        content.contains("couldn't play a sound"),
+        "the failed sound should be logged, got {content:?}"
     );
     Ok(())
 }

@@ -178,13 +178,15 @@ mod tests {
         // When handling Attach.
         let commands = IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the loop attaches to that agent and the statuses are refreshed.
+        // Then the loop attaches to that agent, the statuses are refreshed
+        // and its pane is visited.
         assert_eq!(
             commands,
             vec![
                 Command::Attach(SessionId(1)),
                 Command::Sessions(SessionsCommand::RefreshSessions),
                 Command::Sessions(SessionsCommand::SaveJumps),
+                Command::Sessions(SessionsCommand::Visit(PaneId(1))),
             ],
             "Attach should target the selected agent, then refresh"
         );
@@ -454,13 +456,15 @@ mod tests {
         // When handling FocusPanes (`<C-g> l`).
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
-        // Then the loop attaches to agent 2 and the statuses are refreshed.
+        // Then the loop attaches to agent 2, the statuses are refreshed and
+        // its pane is visited.
         assert_eq!(
             commands,
             vec![
                 Command::Attach(SessionId(2)),
                 Command::Sessions(SessionsCommand::RefreshSessions),
                 Command::Sessions(SessionsCommand::SaveJumps),
+                Command::Sessions(SessionsCommand::Visit(PaneId(2))),
             ],
             "<C-g> l should attach to the selected session, then refresh"
         );

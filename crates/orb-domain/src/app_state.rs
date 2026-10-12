@@ -12,7 +12,7 @@ use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
-use crate::ids::SessionId;
+use crate::ids::{AgentId, SessionId};
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
 /// which-key scopes.
@@ -156,6 +156,27 @@ impl AppState {
         self.layouts.get(self.shown_session()?)
     }
 
+    /// Whether agent `agent`'s pane is on screen: in the shown session's
+    /// shown tab, or a float of it that's drawn. A pane hidden by a zoom or a
+    /// folded stack still counts.
+    pub fn agent_on_screen(&self, agent: AgentId) -> bool {
+        let Some(launch) = self
+            .sessions
+            .all_agents()
+            .find(|candidate| candidate.id == agent)
+            .and_then(|agent| agent.pane.as_ref())
+        else {
+            return false;
+        };
+        self.shown_session() == Some(launch.session)
+            && self.layouts.get(launch.session).is_some_and(|layout| {
+                layout
+                    .active_tab()
+                    .is_some_and(|tab| tab.holds(launch.pane))
+                    || layout.floats().draws(launch.pane)
+            })
+    }
+
     /// What the frontend knows about harness `id`.
     pub fn harness_info(&self, id: &HarnessId) -> Option<&HarnessInfo> {
         self.harnesses.iter().find(|info| info.id == *id)
@@ -275,6 +296,125 @@ mod tests {
             shown.is_none(),
             "an unattached agent shows the start screen"
         );
+    }
+
+    fn pane(id: i64) -> PaneEntry {
+        PaneEntry {
+            id: PaneId(id),
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/tmp/zmx".into(),
+            },
+            cwd: "/tmp".into(),
+            name: None,
+            resume: None,
+        }
+    }
+
+    /// Agent 1 attached and active in session 1, with agent 2 running in
+    /// pane 20 of session 1.
+    fn with_second_agent() -> AppState {
+        let mut state = selecting_agent(true);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.agents.push(agent_in(2, Some(20)));
+        }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state
+    }
+
+    #[rstest::rstest]
+    fn agent_on_screen_in_the_shown_tab() {
+        // Given agent 1 in the shown tab of the shown session.
+        let state = selecting_agent(true);
+
+        // When asking whether agent 1 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(1));
+
+        // Then it is.
+        assert!(on_screen, "an agent in the shown tab is on screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_off_screen_in_another_tab() {
+        // Given agent 2's pane in a tab behind the shown one.
+        let mut state = with_second_agent();
+        state.layouts.new_tab_keeping_shown(SessionId(1), pane(20));
+
+        // When asking whether agent 2 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(2));
+
+        // Then it isn't.
+        assert!(!on_screen, "an agent in another tab is off screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_off_screen_in_a_session_not_shown() {
+        // Given agent 1 in session 1, which isn't attached.
+        let state = selecting_agent(false);
+
+        // When asking whether agent 1 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(1));
+
+        // Then it isn't.
+        assert!(!on_screen, "an agent in a session not shown is off screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_off_screen_without_a_pane() {
+        // Given agent 2 with no pane, beside a shown session.
+        let mut state = selecting_agent(true);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.agents.push(agent_in(2, None));
+        }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
+
+        // When asking whether agent 2 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(2));
+
+        // Then it isn't.
+        assert!(!on_screen, "an agent with no pane is off screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_on_screen_in_a_shown_float() {
+        // Given agent 2's pane as a shown float.
+        let mut state = with_second_agent();
+        state.layouts.add_float(SessionId(1), pane(20));
+
+        // When asking whether agent 2 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(2));
+
+        // Then it is.
+        assert!(on_screen, "an agent in a shown float is on screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_off_screen_in_a_hidden_float() {
+        // Given agent 2's pane as a float, with the floats hidden.
+        let mut state = with_second_agent();
+        state.layouts.add_float(SessionId(1), pane(20));
+        state.layouts.toggle_floats(SessionId(1));
+
+        // When asking whether agent 2 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(2));
+
+        // Then it isn't.
+        assert!(!on_screen, "an agent in a hidden float is off screen");
+    }
+
+    #[rstest::rstest]
+    fn agent_on_screen_in_a_pinned_hidden_float() {
+        // Given agent 2's pane as a pinned float, with the floats hidden.
+        let mut state = with_second_agent();
+        state.layouts.add_float(SessionId(1), pane(20));
+        state.layouts.toggle_pin(SessionId(1));
+        state.layouts.toggle_floats(SessionId(1));
+
+        // When asking whether agent 2 is on screen.
+        let on_screen = state.agent_on_screen(AgentId(2));
+
+        // Then it is.
+        assert!(on_screen, "a pinned float stays on screen while hidden");
     }
 
     #[rstest::rstest]
