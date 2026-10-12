@@ -318,7 +318,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its agents' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.
 - (repo) `just lint` checks that every code name AGENTS.md and the Record mention outside code blocks exists in orb's code, except an allowlist of the style guide's examples and outside names.
 - (log) orb appends a log to `~/.orb/orb.log`, moved to `~/.orb/orb.log.1` once it reaches 5 MB, keeping one old file.
-- (log) Each orb start, including `orb integration`, writes a `start` line with orb's version and process id to the log, and an error that ends orb is written as `orb stopped` with its causes.
+- (log) Each orb start, including `orb integration` but not the API subcommands, writes a `start` line with orb's version and process id to the log, and an error that ends orb is written as `orb stopped` with its causes.
 - (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. An unreadable transcript, a failed branch read in a git repository, a failed read of a worktree's git facts, an unreadable session picker preview and a desktop notification that can't be sent are written to the log with their causes too, the repeating reads only when their text changes for that folder, worktree or agent. A command the loop can't send to an actor writes one line naming the command's kind, the actor and why (`couldn't send SearchTranscripts to the search actor: actor not running`), never what the command carried, such as the searched text; a branch read in a folder outside git and a failed fallback after terminal-notifier fails are not logged.
 - (log) Every zmx kill, worktree removal and branch deletion writes one line to the log saying what was removed, why, and whether it worked (a kill of a session zmx no longer has says `already gone`); every session deletion writes one line naming the session, its agents and panes and whether it worked; every pane row dropped by a layout save writes one line naming the pane and its session.
 - (crash) A crash anywhere in orb except one pane's output handling writes the crash line and a backtrace to `~/.orb/orb.log`, restores the terminal, prints the usual crash message and ends orb with exit code 101; the panes keep running in zmx and come back at the next start.
@@ -350,3 +350,12 @@ Entries are added or amended **only with human approval**.
 - (projects) The projects screen re-sorts by recency while it is open.
 - (repo) `just lint` fails when a Rust file's production part (lines before its first `#[cfg(test)]`) passes 2,000 lines; test-only files (`tests.rs`, `test_support.rs`, listed once in scripts/lint-rules.py) have no production part.
 - (repo) No Rust source file over 2,000 lines keeps its tests inline; they live in a sibling `<file>/tests.rs`.
+- (api) A running orb takes agent requests on `~/.orb/orb.sock`, which only the user can open, and removes it when it quits.
+- (api) `orb session|tab|pane|agent <verb>` sends one request to the running orb and prints its JSON reply, or fails with `orb is not running`.
+- (api) An API request names its pane, tab or session by ID, and defaults to the calling pane's from `ORB_PANE_ID`.
+- (api) The API can't delete a session or worktree, remove a project or quit orb.
+- (api) `orb agent start` types `claude` or `pi`, with any flags given, into a shell pane and replies once orb's hook reports the agent started.
+- (api) `orb agent prompt` is refused while the agent waits for approval or input.
+- (api) `orb agent reply` returns the agent's last reply from its transcript.
+- (integration) `orb integration install` also installs an `orb` skill for Claude Code and pi that teaches agents the API.
+- (log) The running orb writes one line to the log for each API request that changes something.

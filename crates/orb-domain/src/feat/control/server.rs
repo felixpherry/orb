@@ -182,8 +182,9 @@ enum Action {
 }
 
 /// The reply to `request`: worked out from the state (with no lock held
-/// after), then carried out. Each change writes one `api` log line; lists,
-/// reads and waits write none.
+/// after), then carried out. Each change, and any request refused before it
+/// runs, writes one `api` log line; lists, reads, waits, gets and replies that
+/// are answered write none.
 fn answer(deps: &ControlDeps, request: &Request) -> Reply {
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
