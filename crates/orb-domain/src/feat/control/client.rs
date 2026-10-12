@@ -31,7 +31,11 @@ const USAGE: &str = "usage:
   orb tab close [--pane <id>]
   orb session rename [<session>] <name>
   orb session settle [<session>]
-  orb session focus <session>";
+  orb session focus <session>
+  orb pane send <pane> <text>
+  orb pane keys <pane> <key>...
+  orb pane run <pane> <command>
+  orb pane read [<pane>] [--lines <n>]";
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
 /// pane `caller` when it runs inside orb. The reply's result goes to `out`, an
@@ -155,6 +159,38 @@ fn parse(args: &[OsString]) -> Option<Op> {
         ("session", "focus", rest) => Some(Op::SessionFocus {
             session: SessionId(one_id(rest)?),
         }),
+        ("pane", "send" | "keys" | "run" | "read", rest) => pane_io(verb, rest),
+        _ => None,
+    }
+}
+
+/// The pane input or output `verb` and its words ask for.
+fn pane_io(verb: &str, rest: &[&str]) -> Option<Op> {
+    match (verb, rest) {
+        ("send", [pane, text]) => Some(Op::PaneSend {
+            pane: PaneId(number(pane).ok()?),
+            text: (*text).to_owned(),
+        }),
+        ("run", [pane, command]) => Some(Op::PaneRun {
+            pane: PaneId(number(pane).ok()?),
+            command: (*command).to_owned(),
+        }),
+        ("keys", [pane, keys @ ..]) if !keys.is_empty() => Some(Op::PaneKeys {
+            pane: PaneId(number(pane).ok()?),
+            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        }),
+        ("read", rest) => {
+            let words = Words::split(rest, &[("--lines", true)])?;
+            Some(Op::PaneRead {
+                pane: words.target().ok()?.map(PaneId),
+                lines: words
+                    .value("--lines")
+                    .map(str::parse)
+                    .transpose()
+                    .ok()?
+                    .unwrap_or(0),
+            })
+        }
         _ => None,
     }
 }
@@ -341,5 +377,49 @@ mod tests {
             }),
             "the pane and direction come from the words"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::send(
+        &["pane", "send", "3", "--x y"],
+        Op::PaneSend { pane: PaneId(3), text: "--x y".into() },
+    )]
+    #[case::keys(
+        &["pane", "keys", "3", "esc", "enter"],
+        Op::PaneKeys { pane: PaneId(3), keys: vec!["esc".into(), "enter".into()] },
+    )]
+    #[case::run(
+        &["pane", "run", "3", "just test"],
+        Op::PaneRun { pane: PaneId(3), command: "just test".into() },
+    )]
+    #[case::read_own(&["pane", "read", "--lines", "5"], Op::PaneRead { pane: None, lines: 5 })]
+    #[case::read_named(&["pane", "read", "3"], Op::PaneRead { pane: Some(PaneId(3)), lines: 0 })]
+    fn pane_io_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing the words.
+        let op = parse(&args(words));
+
+        // Then they make the request they spell.
+        assert_eq!(op, Some(expected), "{words:?} parse to their request");
+    }
+
+    #[rstest::rstest]
+    fn pane_keys_without_a_key_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given a socket path nothing listens on.
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("orb.sock");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        // When running `pane keys 3` with no key.
+        let code = run(
+            &args(&["pane", "keys", "3"]),
+            None,
+            &socket,
+            &mut out,
+            &mut err,
+        );
+
+        // Then it exits 2 with the usage.
+        assert_eq!(code, 2, "keys need at least one key name");
+        Ok(())
     }
 }

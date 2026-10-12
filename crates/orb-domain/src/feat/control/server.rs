@@ -1,6 +1,6 @@
 //! The running orb's side of the control socket: reads each request, answers
 //! it from orb's state, asks the sessions actor for what it adds or the screen
-//! loop for what it changes, and writes the reply.
+//! loop for what it changes and for what a pane shows, and writes the reply.
 
 use std::fs::{self, Permissions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -15,10 +15,10 @@ use kameo::actor::ActorRef;
 use wherror::Error;
 
 use crate::feat::control::change::Change;
-use crate::feat::control::pane_control::{PaneControl, PaneRequest};
+use crate::feat::control::pane_control::{PaneControl, PaneRequest, key_event};
 use crate::feat::control::protocol::{
-    AgentRow, AgentsResult, ApiError, Done, ErrorCode, Op, PaneResult, PaneRow, PanesResult, Reply,
-    Request, SessionRow, SessionsResult, StartResult, TabRow, TabsResult,
+    AgentRow, AgentsResult, ApiError, Done, ErrorCode, Op, PaneResult, PaneRow, PanesResult,
+    ReadResult, Reply, Request, SessionRow, SessionsResult, StartResult, TabRow, TabsResult,
 };
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
@@ -147,20 +147,31 @@ enum Action {
     Start(ApiStart),
     /// A change the screen loop applies.
     Change(Change),
+    /// Typing the screen loop does into a pane: a send, keys or a run.
+    Pane(PaneRequest),
+    /// A pane's text the screen loop reads.
+    Read(PaneRequest),
 }
 
 /// The reply to `request`: worked out from the state (with no lock held
-/// after), then carried out. Each change writes one `api` log line.
+/// after), then carried out. Each change writes one `api` log line; lists and
+/// reads write none.
 fn answer(deps: &ControlDeps, request: &Request) -> Reply {
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
+        Ok(Action::Read(read)) => {
+            return match deps.panes.ask(read) {
+                Ok(text) => Reply::ok(&ReadResult {
+                    text: text.unwrap_or_default(),
+                }),
+                Err(error) => Reply::err(error),
+            };
+        }
         Ok(Action::Add(add)) => add_pane(deps, add),
         Ok(Action::Start(start)) => start_session(deps, start),
-        Ok(Action::Change(change)) => match deps.panes.ask(PaneRequest::Change(change)) {
-            Ok(()) => Reply::ok(&Done {}),
-            Err(error) => Reply::err(error),
-        },
+        Ok(Action::Change(change)) => typed(deps, PaneRequest::Change(change)),
+        Ok(Action::Pane(request)) => typed(deps, request),
         Err(error) => Reply::err(error),
     };
     deps.log.line("api", &log_text(request, &reply));
@@ -257,6 +268,65 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
             session: changing_session(app, Some(*session), caller)?,
             pane: None,
         })),
+        Op::PaneSend { .. } | Op::PaneKeys { .. } | Op::PaneRun { .. } | Op::PaneRead { .. } => {
+            pane_io(app, &request.op, caller)
+        }
+    }
+}
+
+/// What a send, keys, run or read comes to, read from `app`: settled before
+/// an unknown key name, so a refused list of keys sends nothing.
+fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
+    match op {
+        Op::PaneSend { pane, text } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            Ok(Action::Pane(PaneRequest::Send {
+                pane: *pane,
+                text: text.clone(),
+            }))
+        }
+        Op::PaneKeys { pane, keys } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            let keys = keys
+                .iter()
+                .map(|name| {
+                    key_event(name).ok_or_else(|| {
+                        ApiError::new(ErrorCode::BadRequest, format!("unknown key {name}"))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Action::Pane(PaneRequest::Keys { pane: *pane, keys }))
+        }
+        Op::PaneRun { pane, command } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            Ok(Action::Pane(PaneRequest::Run {
+                pane: *pane,
+                line: command.clone(),
+            }))
+        }
+        Op::PaneRead { pane, lines } => match changing(app, pane.map(Target::Pane), caller)? {
+            Resolved {
+                pane: Some(pane), ..
+            } => Ok(Action::Read(PaneRequest::Read {
+                pane,
+                lines: *lines,
+            })),
+            Resolved { pane: None, .. } => {
+                Err(ApiError::new(ErrorCode::BadRequest, "no pane to read"))
+            }
+        },
+        _ => Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "not pane input or output",
+        )),
+    }
+}
+
+/// Asks the screen loop for `request` and replies `{}` once it's done.
+fn typed(deps: &ControlDeps, request: PaneRequest) -> Reply {
+    match deps.panes.ask(request) {
+        Ok(_) => Reply::ok(&Done {}),
+        Err(error) => Reply::err(error),
     }
 }
 
@@ -619,11 +689,15 @@ mod tests {
     #[case::session_rename(Op::SessionRename { session: None, name: "x".into() })]
     #[case::session_settle(Op::SessionSettle { session: None })]
     #[case::session_focus(Op::SessionFocus { session: SessionId(1) })]
-    fn change_on_a_settled_session_is_refused(#[case] op: Op) {
+    #[case::pane_send(Op::PaneSend { pane: PaneId(1), text: "x".into() })]
+    #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
+    #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into() })]
+    #[case::pane_read(Op::PaneRead { pane: None, lines: 0 })]
+    fn request_on_a_settled_session_is_refused(#[case] op: Op) {
         // Given session 1, settled, with pane 1.
         let app = settle(state_with(vec![stopped(1)], 1), &[1]);
 
-        // When planning the change from pane 1.
+        // When planning the request from pane 1.
         let planned = plan(
             &app,
             &Request {
@@ -675,5 +749,50 @@ mod tests {
 
         // Then it ends in ok.
         assert_eq!(text, "pane.close pane=3 -> ok", "a success logs ok");
+    }
+
+    #[rstest::rstest]
+    fn unknown_key_name_is_a_bad_request() {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning keys `enter` then an unknown `nope` for pane 1.
+        let request = Request {
+            caller: None,
+            op: Op::PaneKeys {
+                pane: PaneId(1),
+                keys: vec!["enter".into(), "nope".into()],
+            },
+        };
+        let planned = plan(&app, &request);
+
+        // Then it is refused with bad_request before anything reaches the
+        // screen loop.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "an unknown key name sends nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn log_line_of_a_send_leaves_out_the_text() {
+        // Given pane 1 pasting private text into pane 3, done.
+        let request = Request {
+            caller: Some(PaneId(1)),
+            op: Op::PaneSend {
+                pane: PaneId(3),
+                text: "secret".into(),
+            },
+        };
+
+        // When writing its log line.
+        let text = log_text(&request, &Reply::ok(&Done {}));
+
+        // Then it has the op and the IDs, and not the text.
+        assert_eq!(
+            text, "pane.send caller=1 pane=3 -> ok",
+            "typed text never reaches the log"
+        );
     }
 }

@@ -129,6 +129,25 @@ pub enum Op {
     /// Shows a session's focused pane and moves the keys into it.
     #[serde(rename = "session.focus")]
     SessionFocus { session: SessionId },
+    /// Pastes text into a pane.
+    #[serde(rename = "pane.send")]
+    PaneSend { pane: PaneId, text: String },
+    /// Presses named keys in a pane, in order.
+    #[serde(rename = "pane.keys")]
+    PaneKeys { pane: PaneId, keys: Vec<String> },
+    /// Types a command and Enter into a pane.
+    #[serde(rename = "pane.run")]
+    PaneRun { pane: PaneId, command: String },
+    /// A pane's screen, plus up to `lines` lines of history, as text.
+    #[serde(rename = "pane.read")]
+    PaneRead {
+        /// The pane, else the caller's.
+        #[serde(default)]
+        pane: Option<PaneId>,
+        /// How many lines of history to add above the screen.
+        #[serde(default)]
+        lines: usize,
+    },
 }
 
 /// Which side of a pane `pane split` puts the new one.
@@ -331,6 +350,12 @@ pub struct StartResult {
     reason = "a unit struct would go on the wire as null, not {}"
 )]
 pub struct Done {}
+
+/// `pane read`'s result: the screen as text, empty when it shows nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadResult {
+    pub text: String,
+}
 
 /// `agent list`'s result.
 #[derive(Debug, Clone, Serialize)]

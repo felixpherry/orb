@@ -104,6 +104,8 @@ pub struct Pane {
     size: PaneSize,
     /// When the child was started.
     started: Instant,
+    /// Whether the child has printed anything yet.
+    spoke: Arc<AtomicBool>,
 }
 
 impl Pane {
@@ -151,9 +153,15 @@ impl Pane {
             exited: Arc::new(AtomicBool::new(false)),
             size,
             started: Instant::now(),
+            spoke: Arc::new(AtomicBool::new(false)),
         };
         // From here on, an early return drops `pane`, which kills the child.
-        spawn_reader(reader, pane.emulator.clone(), notify.clone())?;
+        spawn_reader(
+            reader,
+            pane.emulator.clone(),
+            pane.spoke.clone(),
+            notify.clone(),
+        )?;
         spawn_reaper(child, pane.exited.clone(), notify)?;
         Ok(pane)
     }
@@ -172,6 +180,12 @@ impl Pane {
     /// Whether the child has exited.
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Whether the child has printed anything yet. A line typed before that
+    /// can be lost.
+    pub fn has_output(&self) -> bool {
+        self.spoke.load(Ordering::SeqCst)
     }
 
     /// Whether the child has exited and the pane started less than `within`
@@ -264,6 +278,12 @@ impl Pane {
     pub fn cursor_style(&self) -> SetCursorStyle {
         lock(&self.emulator).cursor_style()
     }
+
+    /// The child's screen as plain text, after up to `lines` lines of its
+    /// history: soft-wrapped rows joined, trailing blanks dropped.
+    pub fn text(&self, lines: usize) -> String {
+        lock(&self.emulator).text(lines)
+    }
 }
 
 impl Drop for Pane {
@@ -313,15 +333,21 @@ impl Write for QueuedWriter {
     }
 }
 
-/// Feeds the child's output into `emulator` until the PTY closes.
+/// Feeds the child's output into `emulator` until the PTY closes, marking
+/// `spoke` before the first chunk is fed.
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     emulator: Arc<Mutex<Emulator>>,
+    spoke: Arc<AtomicBool>,
     notify: Notify,
 ) -> Result<(), Report<PaneError>> {
+    let feed = move |chunk: &[u8]| {
+        spoke.store(true, Ordering::SeqCst);
+        lock(&emulator).feed(chunk);
+    };
     thread::Builder::new()
         .name(PANE_READER_THREAD.to_owned())
-        .spawn(move || read_into(&mut reader, |chunk| lock(&emulator).feed(chunk), &*notify))
+        .spawn(move || read_into(&mut reader, feed, &*notify))
         .change_context(PaneError)
         .attach("failed to start the pane reader thread")?;
     Ok(())
@@ -667,5 +693,21 @@ mod tests {
             (vec![PaneEvent::Broken], 1),
             "a crashing handler should report the pane broken once"
         );
+    }
+
+    #[rstest::rstest]
+    fn pane_has_output_once_its_child_prints() -> Result<(), Report<PaneError>> {
+        // Given a child that prints "hi".
+        let command = command(&["/bin/sh", "-c", "printf hi"], &[]);
+
+        // When it runs in a pane.
+        let pane = Pane::spawn(&command, SIZE, |_| {})?;
+
+        // Then the pane says its child has printed.
+        assert!(
+            wait_until(|| pane.has_output()),
+            "the pane should know its child printed"
+        );
+        Ok(())
     }
 }

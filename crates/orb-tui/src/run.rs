@@ -62,10 +62,10 @@
 //! selects its text, and the release copies it to the clipboard through
 //! OSC 52.
 //!
-//! Agents' changes through the control socket (closing, renaming, settling
-//! or focusing a named pane, tab or session) are applied here too, and their
-//! refusals go back to the agent, never to the message box. Only `focus`
-//! moves the keys.
+//! Agents' requests through the control socket (closing, renaming, settling
+//! or focusing a named pane, tab or session, and typing into or reading a
+//! pane) are carried out here too, and their refusals go back to the agent,
+//! never to the message box. Only `focus` moves the keys.
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, the attached

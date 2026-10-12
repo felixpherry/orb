@@ -1435,6 +1435,23 @@ impl LoopTest {
         self.app.reconcile();
     }
 
+    /// Handles the loop's events, for up to five seconds, until it has
+    /// handled pane `id`'s output; whether it did.
+    fn handle_until_output(&mut self, id: PaneId) -> io::Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Ok(event) = self
+            .rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            let output = matches!(event, LoopEvent::Pane(pane, PaneEvent::Output) if pane == id);
+            self.app.handle(event, &mut io::sink())?;
+            if output {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Waits up to five seconds for pane `id`'s client to exit.
     fn exit_of(&self, id: PaneId) -> Option<LoopEvent> {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1962,6 +1979,141 @@ fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()>
         ),
         (Err(ErrorCode::NotFound), true),
         "a refusal goes back to the agent, not to the user"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn read_of_a_pane_added_this_turn_reaches_it() -> io::Result<()> {
+    // Given attached session 1 whose pane 1 was just added, before the loop
+    // gave it a client.
+    let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+    {
+        let entry = test.entry(PaneId(1));
+        let mut state = test.state.write();
+        state.sessions.sessions = vec![Session {
+            id: session_id(1),
+            dir: test.dir.path().to_owned(),
+            ..session(1, false)
+        }];
+        state
+            .layouts
+            .insert(session_id(1), SessionLayout::of(entry));
+        state.attached.insert(session_id(1));
+    }
+    let (tx, rx) = mpsc::channel();
+
+    // When an agent reads pane 1 in the same turn.
+    let read = PaneRequest::Read {
+        pane: PaneId(1),
+        lines: 0,
+    };
+    test.app
+        .handle(LoopEvent::Control(read, tx), &mut io::sink())?;
+
+    // Then the read reaches the pane instead of finding no live pane.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert!(
+        answer.is_ok(),
+        "a pane added this turn should be reachable, got {answer:?}"
+    );
+    Ok(())
+}
+
+/// A client that prints `ready`, then writes what's typed into it to
+/// `typed`.
+fn prints_then_records(_: &ZmxSession) -> Vec<OsString> {
+    ["/bin/sh", "-c", "printf ready; /bin/cat > typed"]
+        .map(OsString::from)
+        .to_vec()
+}
+
+/// A client that prints nothing of its own and writes what's typed into it
+/// to `typed`.
+fn records_silently(_: &ZmxSession) -> Vec<OsString> {
+    ["/bin/sh", "-c", "/bin/cat > typed"]
+        .map(OsString::from)
+        .to_vec()
+}
+
+#[rstest::rstest]
+fn agent_run_types_the_line_and_enter_into_the_pane() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent runs `just test` in pane 1.
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "just test".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(run, tx), &mut io::sink())?;
+
+    // Then the line and Enter reach the program in the pane.
+    let typed = log_holding(&test.dir.path().join("typed"), "just test\n");
+    assert_eq!(typed, "just test\n", "the line is typed and entered");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_run_into_a_silent_pane_waits_for_its_output() -> io::Result<()> {
+    // Given attached pane 1 whose client hasn't printed anything.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent runs `late` in it, then pastes a line that makes it
+    // print (the echo of `early`).
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "late".into(),
+    };
+    let send = PaneRequest::Send {
+        pane: PaneId(1),
+        text: "early\n".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(run, tx.clone()), &mut io::sink())?;
+    test.app
+        .handle(LoopEvent::Control(send, tx), &mut io::sink())?;
+    test.handle_until_output(PaneId(1))?;
+
+    // Then the run is typed only after that first output.
+    let typed = log_holding(&test.dir.path().join("typed"), "late");
+    assert_eq!(
+        typed, "early\nlate\n",
+        "a run into a silent pane waits for its first output"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn pane_io_without_a_client_is_not_found() -> io::Result<()> {
+    // Given a loop with nothing attached.
+    let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+    let (tx, rx) = mpsc::channel();
+
+    // When an agent reads pane 7.
+    let read = PaneRequest::Read {
+        pane: PaneId(7),
+        lines: 0,
+    };
+    test.app
+        .handle(LoopEvent::Control(read, tx), &mut io::sink())?;
+
+    // Then it is refused with not_found.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        answer.map_err(|error| error.code),
+        Err(ErrorCode::NotFound),
+        "a pane with no client has no live pane"
     );
     Ok(())
 }

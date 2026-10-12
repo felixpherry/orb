@@ -5,6 +5,9 @@ use std::sync::mpsc::Sender;
 
 use orb_domain::feat::control::change;
 use orb_domain::feat::control::pane_control::{PaneReply, PaneRequest};
+use orb_domain::feat::control::protocol::{ApiError, ErrorCode};
+use orb_domain::ids::PaneId;
+use orb_term::Pane;
 
 use super::App;
 
@@ -20,9 +23,56 @@ impl App {
                     for command in &commands {
                         self.execute(command);
                     }
+                    None
                 })
+            }
+            PaneRequest::Send { pane, text } => self.live_pane(pane).map(|live| {
+                live.paste(&text);
+                None
+            }),
+            PaneRequest::Keys { pane, keys } => self.live_pane(pane).map(|live| {
+                for key in &keys {
+                    live.key(key);
+                }
+                None
+            }),
+            PaneRequest::Run { pane, line } => self.run_line(pane, line),
+            PaneRequest::Read { pane, lines } => {
+                self.live_pane(pane).map(|live| Some(live.text(lines)))
             }
         };
         let _ = reply.send(answer);
+    }
+
+    /// Pane `id`'s client; `not_found` "no live pane" when it has none (a
+    /// settled session, a broken pane) or its client has exited. A pane added
+    /// earlier in this turn gets its client first: on a miss the panes are
+    /// matched to the layouts once before refusing.
+    fn live_pane(&mut self, id: PaneId) -> Result<&Pane, ApiError> {
+        let live = |app: &Self| app.panes.get(&id).is_some_and(|pane| !pane.has_exited());
+        if !live(self) {
+            self.reconcile();
+        }
+        self.panes
+            .get(&id)
+            .filter(|pane| !pane.has_exited())
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no live pane"))
+    }
+
+    /// Types `line` and Enter into pane `id`. Until the pane's program has
+    /// printed anything, the line waits for that first output, as a resumed
+    /// agent's command does, unless a line already waits there.
+    fn run_line(&mut self, id: PaneId, line: String) -> PaneReply {
+        let printed = self.live_pane(id)?.has_output();
+        match (
+            printed || self.typing.contains_key(&id),
+            self.panes.get(&id),
+        ) {
+            (true, Some(pane)) => pane.type_line(&line),
+            _ => {
+                self.typing.insert(id, line);
+            }
+        }
+        Ok(None)
     }
 }

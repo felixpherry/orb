@@ -9,7 +9,8 @@
 //! screen changed, when the child copied to the clipboard, and when it exited.
 //!
 //! The pane keeps a history the owner can scroll with the wheel, and a text
-//! selection the owner drives with the mouse and copies on release.
+//! selection the owner drives with the mouse and copies on release. The owner
+//! can also read the screen and its history as plain text.
 
 mod emulator;
 mod encode;

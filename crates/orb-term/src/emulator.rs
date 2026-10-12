@@ -10,7 +10,8 @@
 //!
 //! The screen keeps a history the wheel scrolls back through, and a text
 //! selection the mouse drags out and copies. Keys and pastes bring the view
-//! back to the live screen and drop the selection.
+//! back to the live screen and drop the selection. The screen and its history
+//! can also be read out as plain text.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::Processor;
@@ -263,6 +264,25 @@ impl Emulator {
         let text = self.term.selection_to_string()?;
         let text = text.trim_end_matches('\n');
         (!text.is_empty()).then(|| text.to_owned())
+    }
+
+    /// The screen as plain text, after up to `history` lines of the history
+    /// above it: soft-wrapped rows joined into one line, trailing blanks
+    /// dropped from each line and from the end. The view's scroll position
+    /// and the selection don't change it.
+    pub(crate) fn text(&self, history: usize) -> String {
+        let above = i32::try_from(history.min(self.term.history_size())).unwrap_or(0);
+        let bottom = i32::try_from(self.term.screen_lines()).unwrap_or(1) - 1;
+        let text = self.term.bounds_to_string(
+            Point::new(Line(-above), Column(0)),
+            Point::new(Line(bottom), self.term.last_column()),
+        );
+        text.lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_owned()
     }
 
     /// The grid cell under `at` in the pane drawn at `area`, clamped into
@@ -830,5 +850,66 @@ mod tests {
             reversed(&emulator, 0..3, 0),
             "the selection should stay drawn"
         );
+    }
+
+    #[rstest::rstest]
+    fn text_is_the_screen_as_plain_text() {
+        // Given a child that printed `line1` to `line9` on a 5-row screen.
+        let (emulator, _) = nine_lines();
+
+        // When reading the text with no history.
+        let text = emulator.text(0);
+
+        // Then it is the five lines on screen.
+        assert_eq!(
+            text, "line5\nline6\nline7\nline8\nline9",
+            "the text is what the screen shows"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::two_lines(2, 3)]
+    #[case::more_than_kept(100, 1)]
+    fn text_adds_the_history_asked_for(#[case] history: usize, #[case] first: usize) {
+        // Given a child that printed `line1` to `line9` on a 5-row screen.
+        let (emulator, _) = nine_lines();
+
+        // When reading the text with `history` lines of history.
+        let text = emulator.text(history);
+
+        // Then it starts that far back, capped at what's kept, and runs to
+        // the bottom of the screen.
+        let expected = (first..=9)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text, expected, "history lines come before the screen");
+    }
+
+    #[rstest::rstest]
+    fn text_joins_a_soft_wrapped_row() {
+        // Given 30 `a`s printed on a 20-column screen, wrapping once.
+        let (mut emulator, _, _) = emulator();
+        let line = "a".repeat(30);
+        emulator.feed(line.as_bytes());
+
+        // When reading the text.
+        let text = emulator.text(0);
+
+        // Then the wrapped row reads as one line.
+        assert_eq!(text, line, "a soft wrap isn't a line break");
+    }
+
+    #[rstest::rstest]
+    fn text_drops_trailing_blank_rows() {
+        // Given a child that printed `hi` and nothing else.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"hi");
+
+        // When reading the text.
+        let text = emulator.text(0);
+
+        // Then the blank rows below it are gone.
+        assert_eq!(text, "hi", "trailing blanks are dropped");
     }
 }
