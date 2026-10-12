@@ -45,7 +45,7 @@ Entries are added or amended **only with human approval**.
 - (pane) While a pane has the keys, every key but orb's own (the Cmd keys, `<C-S-h>`/`<C-S-l>`, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (identity) A thread is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
+- (identity) An agent is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
 - (identity) orb's code and screens call each agent conversation an agent; the stored database keeps its older `threads` table and `thread` column names.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
@@ -56,9 +56,9 @@ Entries are added or amended **only with human approval**.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.
 - (arch) While orb waits on a zmx, git or `du` command, it checks whether the command has ended every millisecond for its first 20 ms and every 10 ms after, so one that ends at once holds orb up for only a millisecond or two.
 - (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
-- (sessions) The poll asks `claude agents` only while a pane holds a Claude thread.
-- (sessions) A thread's elapsed time counts from when orb first saw its turn running.
-- (sessions) A Claude thread's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New agent".
+- (sessions) The poll asks `claude agents` only while a pane holds a Claude agent.
+- (sessions) An agent's elapsed time counts from when orb first saw its turn running.
+- (sessions) A Claude agent's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New agent".
 - (sidebar) The sidebar lists orb's sessions as one list across projects, each a three-line card (its most urgent agent's status icon, title and time; its project and status word; its branch), followed by one row per agent pane.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of sessions, and the hovered row's first line highlighted.
 - (pane) Each pane is a `zmx attach orb-p<id>` client on `~/.orb/zmx`, in a PTY emulated by `alacritty_terminal`, drawn in the right-hand area.
@@ -71,11 +71,11 @@ Entries are added or amended **only with human approval**.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
-- (sessions) Deleting a session kills every pane and deletes its tabs, panes, threads and, for a Research or Learn session, its own folder; Claude transcripts, pi session files and worktrees stay.
+- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a Research or Learn session, its own folder; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled session closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
-- (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
+- (projects) The project picker lists projects by their agents' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
 - (projects) Projects are added only from the directory picker that `a` opens in the projects screen, except orb's `Research` and `Learn` projects, which the first `<C-g> g r`/`<C-g> g l` adds, and its `Incognito` project, which orb adds at start.
 - (keybinds) In a picker other than the projects screen and the session and worktree pickers, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
@@ -84,7 +84,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, and the local time on the right.
-- (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
+- (tui) The mode line's running, approval and input counts include every agent, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule (a / prompt in the projects screen), numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
 - (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, close-pane, delete-worktree and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the search picker shows no keys.
@@ -97,13 +97,13 @@ Entries are added or amended **only with human approval**.
 - (arch) Every git command orb runs has a time limit — 5 s for one that only reads, 60 s for one that changes a repository, 15 s for a fetch — after which git is killed and the call fails as timed out.
 - (arch) A git command that only reads and times out is run once more before orb gives up.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
-- (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
+- (worktrees) After an agent's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the agent's title; the directory keeps its name.
 - (worktrees) Deleting a session leaves its worktree on disk for the sweep to prune.
 - (worktrees) A session's workspace can change only before its first agent turn; orb then kills every pane, restarts each as a shell in the new directory, and removes an orb worktree no session uses any more unless it has changes.
 - (keybinds) `<C-g> w` in the sidebar or a pane opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
 - (keybinds) `<C-g> b` in the sidebar or a pane opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the session's directory.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
-- (branches) Switching branch is refused while any thread in the same directory is working or waiting.
+- (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
 - (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `p`/`s` only on a session card, and `r`/`d` on a card or an agent row.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
@@ -122,7 +122,7 @@ Entries are added or amended **only with human approval**.
 - (notify) Clicking a `terminal-notifier` notification brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
 - (notify) On Linux, notifications are delivered over D-Bus to the freedesktop notification server, and nothing is shown when there is none.
 - (notify) On Linux, approval and input notifications are sent at critical urgency and finished-turn notifications at normal urgency.
-- (notify) On Linux, a later notification about the same thread replaces the earlier one.
+- (notify) On Linux, a later notification about the same agent replaces the earlier one.
 - (notify) On Linux, clicking a notification focuses orb's niri window when niri is running.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (keybinds) In the sidebar, `r` on a session opens a Rename Session box filled in with its title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
@@ -170,12 +170,12 @@ Entries are added or amended **only with human approval**.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table), an agent by its pane, dropping at start an agent whose pane is gone; a row already in the list moves to the newest slot.
 - (folders) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents for Claude Code and for pi, conventions its agents follow, a report template and an empty `SOURCES.md`.
 - (folders) The Research kit's pi subagents run through pi's `subagent` tool, from pi's example extension, which the user installs (filtering out pi-amplike's own `subagent` tool) and orb doesn't.
-- (folders) The Research kit's pi subagents run on the thread's model and thinking level.
+- (folders) The Research kit's pi subagents run on the agent's model and thinking level.
 - (folders) A Research folder shares no files with other Research folders.
 - (folders) orb's built-in Learn template is a learning kit: an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files under `.learn/`, an epub ingest script and a `.gitignore` that keeps `source/` out of any repository.
-- (folders) A Learn folder's threads share one campaign: each thread appends its event to `EVENTS.md`, writes learning records for every challenge attempted, and leaves syllabus status and notes for the next thread.
-- (folders) A Learn folder's raids are planted by the `saboteur` subagent on a fresh `raid/R<n>` branch of the proving ground and recorded in `raids/R<n>.md`, which the orchestrating thread reads only after the learner declares a fix; it exists for Claude Code and for pi, and on pi runs through the same example `subagent` extension as the Research kit's agents.
-- (incognito) orb's `Incognito` project runs its threads in `/tmp/orb-incognito/`, which orb creates at start and before each incognito start.
+- (folders) A Learn folder's agents share one campaign: each agent appends its event to `EVENTS.md`, writes learning records for every challenge attempted, and leaves syllabus status and notes for the next agent.
+- (folders) A Learn folder's raids are planted by the `saboteur` subagent on a fresh `raid/R<n>` branch of the proving ground and recorded in `raids/R<n>.md`, which the orchestrating agent reads only after the learner declares a fix; it exists for Claude Code and for pi, and on pi runs through the same example `subagent` extension as the Research kit's agents.
+- (incognito) orb's `Incognito` project runs its agents in `/tmp/orb-incognito/`, which orb creates at start and before each incognito start.
 - (keybinds) `<C-g> i` in the sidebar or a pane makes a session in orb's Incognito folder with one shell.
 - (incognito) `<C-g> n` doesn't list orb's `Incognito` project.
 - (incognito) Incognito sessions settle, delete, rename and resume like any other session.
@@ -188,8 +188,8 @@ Entries are added or amended **only with human approval**.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on an agent closed or deleted since, or one Claude no longer knows, only closes it.
 - (picker) `⏎` in the session picker reveals the agent's session in the sidebar and moves the keys into the agent's pane, like `⏎` on its agent row.
 - (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
-- (picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools the session ran, and the end of its last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
-- (picker) While the session picker is open, a growing transcript re-reads the preview at most once a second, and a newly selected thread's preview loads at once; a transcript that stopped growing is re-read within a second without a key press.
+- (picker) The session picker's preview shows the selected agent's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools the session ran, and the end of its last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
+- (picker) While the session picker is open, a growing transcript re-reads the preview at most once a second, and a newly selected agent's preview loads at once; a transcript that stopped growing is re-read within a second without a key press.
 - (mouse) orb captures the mouse from startup until it exits.
 - (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a press on a pane moves the keys into it without reaching its program; the start screen takes no clicks.
 - (mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.
@@ -219,28 +219,28 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the worktree picker, `⏎` does nothing and `d` deletes the selected worktree after a `No`/`Yes` confirm drawn over the list, which either answer returns to; it is refused, with the reason in the message box, while a session in it is attached or an agent in it has a turn underway.
 - (worktrees) Deleting a worktree from the worktree picker force-removes it, uncommitted changes included, and keeps its branch.
 - (paths) orb persists its transcript search index to `~/.orb/userdata/search.sqlite`, which it rebuilds from the transcripts when the file is missing, can't be read, or holds another schema version.
-- (search) The search index holds the prompts the user typed and Claude's text replies from every orb thread's transcripts, settled threads included; tool calls, tool output and thinking are left out.
-- (search) At startup orb indexes, newest chat first and in the background, the lines each thread's current transcript gained since the search index last read it.
+- (search) The search index holds the prompts the user typed and Claude's text replies from every orb agent's transcripts, settled agents included; tool calls, tool output and thinking are left out.
+- (search) At startup orb indexes, newest chat first and in the background, the lines each agent's current transcript gained since the search index last read it.
 - (search) Before each search picker query, orb indexes the lines added to each transcript since it last read it, so results include replies written while the picker is open.
-- (search) A thread's earlier transcripts stay indexed after `/clear` starts a new one, and a deleted thread's messages leave the index.
+- (search) An agent's earlier transcripts stay indexed after `/clear` starts a new one, and a deleted agent's messages leave the index.
 - (keybinds) `<C-g> /` in the sidebar or a pane opens the search picker, labelled grep in which-key.
-- (picker) The search picker matches typed text as case-insensitive substrings across all orb threads, ignoring the project filter, with every whitespace-separated term of at least 3 characters required.
-- (picker) The search picker lists one row per matching message, newest first, at most 200, labelled `<project>/<session title>` (or `<project>/<thread title>` once its session is gone) followed by a snippet of the message with its matches lit.
+- (picker) The search picker matches typed text as case-insensitive substrings across all orb agents, ignoring the project filter, with every whitespace-separated term of at least 3 characters required.
+- (picker) The search picker lists one row per matching message, newest first, at most 200, labelled `<project>/<session title>` (or `<project>/<agent title>` once its session is gone) followed by a snippet of the message with its matches lit.
 - (picker) The search picker is drawn like the session picker, with its list box titled Search, `indexing n/total` beside the title while transcripts are still being indexed, `200+` as its count when more than 200 messages matched, and `search unavailable: <error>` in place of the rows when the index can't be opened.
-- (picker) The search picker's preview shows the thread's status, branch and model, then the exchange the matching message is in, naming the speaker only where it changes; the matching message is plain wrapped text with its matches lit and the first one in view, and the other messages render as Markdown.
+- (picker) The search picker's preview shows the agent's status, branch and model, then the exchange the matching message is in, naming the speaker only where it changes; the matching message is plain wrapped text with its matches lit and the first one in view, and the other messages render as Markdown.
 - (picker) The search picker loads the first row's preview along with the results.
-- (picker) `⏎` in the search picker reveals the thread in the sidebar and attaches to its current session, and on a thread deleted since, or one Claude no longer knows, it only closes the picker.
-- (arch) Everything orb does differently per harness (the agents it sees running, reading transcripts, the resume command, and where status comes from) lives in that harness's implementation of one shared interface, picked by the harness id each thread stores.
-- (sessions) A thread whose stored harness orb doesn't know shows as gone.
-- (sessions) Panes migrated from pi threads keep their `orb-<32 hex>` zmx session under `~/.orb/pi`.
+- (picker) `⏎` in the search picker reveals the agent in the sidebar and attaches to its current session, and on an agent deleted since, or one Claude no longer knows, it only closes the picker.
+- (arch) Everything orb does differently per harness (the agents it sees running, reading transcripts, the resume command, and where status comes from) lives in that harness's implementation of one shared interface, picked by the harness id each agent stores.
+- (sessions) An agent whose stored harness orb doesn't know shows as gone.
+- (sessions) Panes migrated from pi agents keep their `orb-<32 hex>` zmx session under `~/.orb/pi`.
 - (pane) A pane whose zmx session is gone gets a fresh shell, and orb types its agent's resume command (`claude --resume <id>` or `pi --session-id <id>`) once the shell first prints.
 - (sessions) Quitting orb does not stop Claude or pi sessions.
 - (tui) Quitting orb lets the workers finish what they had queued, for at most 2 s, before orb exits, and the store lock is released after that.
 - (tui) SIGTERM, SIGINT and SIGHUP quit orb the same way `<C-g> q` does, with the terminal restored.
 - (sessions) A pi agent's status is the latest report orb's pi extension wrote to its pane file, and it reads as stopped once its pane's zmx session is gone.
 - (sessions) A pi agent is only ever working, idle or stopped, because its pane reports carry only those states.
-- (sessions) A pi thread's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New agent".
-- (sessions) A pi thread's branch is read from git in its directory after each turn.
+- (sessions) A pi agent's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New agent".
+- (sessions) A pi agent's branch is read from git in its directory after each turn.
 - (pane) An attach pane whose program exits within about a second of starting shows `session <title> exited at start`, naming its session, and writes that text to the log; with no title it shows `session exited at start`.
 - (sidebar) An agent row ends with its harness's mark: `✳` for Claude, `π` for pi.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
@@ -315,12 +315,12 @@ Entries are added or amended **only with human approval**.
 - (panes) A pane whose connection dies is attached again only if its session is still shown; otherwise its connection is dropped and its program and saved pane are kept.
 - (pane) When a pane's `zmx attach` client dies again after one reattach, its session is detached with `couldn't reattach to zmx session <name>` in the message box, and the pane and its program are kept.
 - (worktrees) When orb renames a worktree's `orb/<hex>` branch to `orb/<slug>`, the sessions in that worktree take the new branch too, so the tab bar shows it.
-- (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its threads' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.
+- (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its agents' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.
 - (repo) `just lint` checks that every code name AGENTS.md and the Record mention outside code blocks exists in orb's code, except an allowlist of the style guide's examples and outside names.
 - (log) orb appends a log to `~/.orb/orb.log`, moved to `~/.orb/orb.log.1` once it reaches 5 MB, keeping one old file.
 - (log) Each orb start, including `orb integration`, writes a `start` line with orb's version and process id to the log, and an error that ends orb is written as `orb stopped` with its causes.
-- (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. Failed actor mailbox sends, transcript scans, the branch read after a turn, worktree fact reads, the session picker's preview read and desktop notifications are still not logged.
-- (log) Every zmx kill, worktree removal and branch deletion writes one line to the log saying what was removed, why, and whether it worked (a kill of a session zmx no longer has says `already gone`); every session deletion writes one line naming the session, its threads and panes and whether it worked; every pane row dropped by a layout save writes one line naming the pane and its session.
+- (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. A command the loop can't send to an actor, an unreadable transcript, a failed branch read, a failed read of a worktree's git facts, an unreadable session picker preview and a desktop notification that can't be sent are written to the log with their causes too, the repeating reads only when their text changes; a failed fallback after terminal-notifier fails is not logged.
+- (log) Every zmx kill, worktree removal and branch deletion writes one line to the log saying what was removed, why, and whether it worked (a kill of a session zmx no longer has says `already gone`); every session deletion writes one line naming the session, its agents and panes and whether it worked; every pane row dropped by a layout save writes one line naming the pane and its session.
 - (crash) A crash anywhere in orb except one pane's output handling writes the crash line and a backtrace to `~/.orb/orb.log`, restores the terminal, prints the usual crash message and ends orb with exit code 101; the panes keep running in zmx and come back at the next start.
 - (crash) A crash while handling one pane's output writes its line to the log and stops showing only that pane, with `stopped showing pane <name> after an error; it keeps running` in the message box and the log; its program keeps running, and the pane shows again once its session is attached again (after it is settled, deleted, moved or detached after a failed attach, or at the next orb start).
 - (store) Before upgrading `~/.orb/userdata/state.sqlite` to a newer version, orb copies it to `state.sqlite.bak-v<old version>` beside it (an existing copy of that version is kept, not overwritten), then deletes all but the 3 newest copies, never the copy of the version it is upgrading from; it writes an `upgrade` line naming the copy and a `delete old copy <path>: ok` (or `failed` with its causes) line per removed copy to the log, and a failed removal never stops the upgrade.

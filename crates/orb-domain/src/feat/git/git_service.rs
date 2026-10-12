@@ -296,13 +296,21 @@ impl GitService {
     }
 
     /// The branch, uncommitted changes and last commit of the worktree at
-    /// `path`.
+    /// `path`. A failure is logged, once until its text changes.
     ///
     /// # Errors
     ///
     /// Returns an error if `path` isn't in a git repository.
     pub fn worktree_facts(&self, path: &Path) -> Result<WorktreeFacts, Report<GitError>> {
-        self.git.worktree_facts(path)
+        let facts = self.git.worktree_facts(path);
+        if let Err(report) = &facts {
+            self.log.error_on_change(
+                &format!("worktree facts {}", path.display()),
+                &format!("couldn't read git's facts for {}", path.display()),
+                report,
+            );
+        }
+        facts
     }
 
     /// Kilobytes `path` takes on disk; `None` when it can't be measured.
@@ -438,7 +446,7 @@ mod tests {
             Ok(())
         }
         fn worktree_facts(&self, _: &Path) -> Result<WorktreeFacts, Report<GitError>> {
-            Ok(WorktreeFacts {
+            self.outcome().map(|()| WorktreeFacts {
                 branch: None,
                 changes: 0,
                 last_commit: None,
@@ -476,6 +484,27 @@ mod tests {
     /// A service over a git giving `result`, logging to `path`.
     fn service_logging(result: Result<(), String>, path: &Path) -> GitService {
         GitService::new(Arc::new(FakeGit { result }), Log::new(path.to_path_buf()))
+    }
+
+    #[rstest::rstest]
+    fn a_failed_worktree_facts_read_is_logged() -> Result<(), std::io::Error> {
+        // Given a git that can't read a worktree's facts.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+        let service = service_logging(Err("broken".to_owned()), &path);
+
+        // When reading /w/orb-1's facts.
+        let facts = service.worktree_facts(Path::new("/w/orb-1"));
+
+        // Then the log names the worktree and carries git's reason.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            facts.is_err()
+                && log.contains("couldn't read git's facts for /w/orb-1")
+                && log.contains("broken"),
+            "the failed facts read should be logged, got {log:?}"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]

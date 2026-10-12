@@ -351,9 +351,9 @@ impl SessionsActor {
             let before = row.clone();
             let was_in_progress = row.turn_started_at.is_some();
             let format = harness.map(|harness| harness.as_ref() as &dyn TranscriptFormat);
-            let asks_git = update_row(row, status, now, format);
+            let asks_git = update_row(row, status, now, format, &self.services.log);
             if was_in_progress && !status.in_progress() {
-                if asks_git && let Some(branch) = current_branch(&self.services.git, &row.cwd) {
+                if asks_git && let Some(branch) = current_branch(&self.services, &row.cwd) {
                     row.branch = Some(branch);
                 }
                 if let Some(new) = rename_hex_branch(&self.services.git, &self.worktrees_root, row)
@@ -592,6 +592,7 @@ fn update_row(
     status: AgentStatus,
     now_ms: i64,
     format: Option<&dyn TranscriptFormat>,
+    log: &Log,
 ) -> bool {
     row.turn_started_at = status
         .in_progress()
@@ -609,12 +610,23 @@ fn update_row(
         ai_titled: row.ai_titled,
         offset: row.transcript_offset,
     };
-    let Some(scan) = row
-        .transcript_path
-        .as_deref()
-        .and_then(|path| format.scan(path, row.transcript_offset, &previous).ok())
-    else {
+    let Some(path) = row.transcript_path.as_deref() else {
         return false;
+    };
+    let scan = match format.scan(path, row.transcript_offset, &previous) {
+        Ok(scan) => scan,
+        Err(report) => {
+            log.error_on_change(
+                &format!("transcript scan {}", row.id.0),
+                &format!(
+                    "couldn't read agent {}'s transcript {}",
+                    row.id.0,
+                    path.display()
+                ),
+                &report,
+            );
+            return false;
+        }
     };
     // A new `/rename` replaces the orb name; the harness re-writing its old
     // name doesn't.

@@ -90,7 +90,7 @@ impl SessionsActor {
             }
             to => {
                 let saved = reach(&root, to).and_then(|dir| {
-                    let branch = current_branch(&self.services.git, &dir);
+                    let branch = current_branch(&self.services, &dir);
                     self.save_session(id, session_kind(kind), &dir, branch, name)
                 });
                 let opens = saved
@@ -370,7 +370,7 @@ impl SessionsActor {
         made: Option<&MadeWorktree>,
     ) -> Result<(), String> {
         let branch = made.map_or_else(
-            || current_branch(&self.services.git, dir),
+            || current_branch(&self.services, dir),
             |made| Some(made.branch.clone()),
         );
         if let Err(report) = self.store.move_session(id, dir, branch.as_deref()) {
@@ -695,11 +695,21 @@ pub(super) fn rename_hex_branch(
     None
 }
 
-/// The branch checked out in `cwd`, if git can tell.
-pub(super) fn current_branch(git: &GitService, cwd: &Path) -> Option<String> {
-    git.refs(cwd)
-        .ok()?
-        .into_iter()
+/// The branch checked out in `cwd`, if git can tell. A failed read is
+/// logged, once until its text changes.
+pub(super) fn current_branch(services: &Services, cwd: &Path) -> Option<String> {
+    let refs = match services.git.refs(cwd) {
+        Ok(refs) => refs,
+        Err(report) => {
+            services.log.error_on_change(
+                "branch read",
+                &format!("couldn't read the branch in {}", cwd.display()),
+                &report,
+            );
+            return None;
+        }
+    };
+    refs.into_iter()
         .find(|git_ref| git_ref.current)
         .map(|git_ref| git_ref.name)
 }

@@ -5249,6 +5249,73 @@ async fn turn_end_without_a_scanned_branch_takes_the_branch_from_git()
 
 #[rstest::rstest]
 #[tokio::test]
+async fn a_failed_branch_read_after_a_turn_is_logged() -> Result<(), Report<StoreError>> {
+    // Given a branchless agent a poll saw working, in a folder git can't
+    // read, whose transcript names no branch, and a log.
+    let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
+    fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
+    fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
+    let (store, _) = store_with_agent("aa")?;
+    let working = record("aa", AgentStatus::Working);
+    let host = listing(vec![working.clone()]);
+    let (mut actor, _state) =
+        start_with(store, &host, &FakeGit::plain(Err("no")), claude_dir.path());
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let log = dir.path().join("orb.log");
+    actor.services.log = Log::new(log.clone());
+    actor.poll().await;
+
+    // When a poll sees its turn end.
+    host.set_running(Ok(vec![RunningAgent {
+        status: AgentStatus::Idle,
+        ..working
+    }]));
+    actor.poll().await;
+
+    // Then the log says the branch couldn't be read, and why.
+    let content = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        content.contains("couldn't read the branch in") && content.contains(NOT_A_REPO),
+        "the failed branch read should be logged with its cause, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn an_unreadable_transcript_is_logged() -> Result<(), Report<StoreError>> {
+    // Given an agent whose transcript a poll found, then became a folder,
+    // and a log.
+    let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
+    fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
+    fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, claude_dir.path());
+    actor.poll().await;
+    fs::remove_file(&path).change_context(StoreError)?;
+    fs::create_dir_all(&path).change_context(StoreError)?;
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let log = dir.path().join("orb.log");
+    actor.services.log = Log::new(log.clone());
+
+    // When polling.
+    actor.poll().await;
+
+    // Then the log says the agent's transcript couldn't be read.
+    let content = fs::read_to_string(&log).unwrap_or_default();
+    let expected = format!("couldn't read agent {}'s transcript", id.0);
+    assert!(
+        content.contains(&expected),
+        "expected {expected:?} in the log, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
 async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
     // Given an agent whose transcript's prompt names a branch.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;

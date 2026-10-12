@@ -179,16 +179,23 @@ impl App {
     /// While orb's terminal isn't focused, sends `notice` on a thread of
     /// its own (the desktop's notification server can be slow to answer);
     /// while it is, the sidebar already shows it and it's dropped. A notice
-    /// that can't be sent is dropped.
+    /// that can't be sent is logged and dropped.
     fn announce(&self, notice: Notice) {
         if self.focused {
             return;
         }
         let notifier = self.notifier.clone();
-        let _ = thread::Builder::new()
+        let log = self.log.clone();
+        if let Err(error) = thread::Builder::new()
             .name("orb-notice".into())
             .spawn(move || {
-                let _ = notifier.announce(&notice);
-            });
+                if let Err(report) = notifier.announce(&notice) {
+                    log.error("couldn't send a desktop notification", &report);
+                }
+            })
+        {
+            self.log
+                .error("couldn't start the desktop notification thread", &error);
+        }
     }
 }

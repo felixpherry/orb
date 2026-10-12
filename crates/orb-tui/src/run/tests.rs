@@ -1657,3 +1657,192 @@ fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
     );
     Ok(())
 }
+
+/// Up to two seconds for the log at `path` to hold `text`; what it holds.
+fn log_holding(path: &Path, text: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        if content.contains(text) || Instant::now() >= deadline {
+            return content;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[rstest::rstest]
+fn a_command_for_a_stopped_actor_is_logged() -> io::Result<()> {
+    // Given a loop whose search actor has stopped, and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    let search = test.app.search.clone();
+    test.runtime.block_on(async move {
+        let _ = search.stop_gracefully().await;
+        search.wait_for_shutdown().await;
+    });
+
+    // When the loop sends it a search.
+    test.app.execute(&Command::Search(
+        orb_domain::SearchCommand::SearchTranscripts { query: "x".into() },
+    ));
+
+    // Then the log says the command couldn't be sent.
+    let content = fs::read_to_string(&path)?;
+    assert!(
+        content.contains("couldn't send to the search actor"),
+        "the lost command should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+/// A harness whose transcripts can't be read.
+struct UnreadableHarness;
+
+impl orb_domain::feat::harness::TranscriptFormat for UnreadableHarness {
+    fn locate(&self, _: &Path, _: &str) -> Option<PathBuf> {
+        None
+    }
+    fn scan(
+        &self,
+        _: &Path,
+        _: u64,
+        _: &orb_domain::feat::harness::Scan,
+    ) -> io::Result<orb_domain::feat::harness::Scan> {
+        Err(io::Error::other("unreadable"))
+    }
+    fn exchanges(
+        &self,
+        _: &Path,
+    ) -> io::Result<(u64, Vec<orb_domain::feat::sessions::transcript::Exchange>)> {
+        Err(io::Error::other("unreadable"))
+    }
+    fn messages(
+        &self,
+        _: &Path,
+        _: u64,
+        _: u64,
+    ) -> io::Result<orb_domain::feat::sessions::transcript::MessageRead> {
+        Err(io::Error::other("unreadable"))
+    }
+}
+
+impl orb_domain::feat::harness::Harness for UnreadableHarness {
+    fn name(&self) -> &'static str {
+        "unreadable"
+    }
+    fn id(&self) -> HarnessId {
+        HarnessId::new("claude")
+    }
+    fn label(&self) -> &'static str {
+        "claude"
+    }
+    fn info(&self) -> orb_domain::feat::harness::HarnessInfo {
+        orb_domain::feat::harness::HarnessInfo {
+            id: self.id(),
+            label: "claude".to_owned(),
+            icon: None,
+        }
+    }
+    fn resume_command(&self, session_id: &str) -> String {
+        format!("claude --resume {session_id}")
+    }
+}
+
+#[rstest::rstest]
+fn an_unreadable_preview_is_logged() -> io::Result<()> {
+    // Given agent 1 of a harness that can't read its transcript, and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    test.app.harnesses = Harnesses::new(vec![Arc::new(UnreadableHarness)]);
+    let transcript = test.dir.path().join("1.jsonl");
+    test.state.write().sessions.projects = vec![Project {
+        id: ProjectId(1),
+        title: "orb".to_owned(),
+        root: PathBuf::from("/repo"),
+        created_at: UNIX_EPOCH,
+        agents: vec![Agent {
+            last_session: None,
+            harness: HarnessId::new("claude"),
+            id: AgentId(1),
+            title: None,
+            cwd: "/tmp".into(),
+            transcript: Some(transcript.clone()),
+            status: AgentStatus::Idle,
+            turn_started_at: None,
+            pane: None,
+            branch: None,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            model: None,
+        }],
+        repo: true,
+        removed: false,
+        kind: ProjectKind::Normal,
+    }];
+
+    // When the loop loads its preview.
+    test.app.execute(&Command::LoadPreview {
+        agent: AgentId(1),
+        transcript,
+    });
+
+    // Then the log says the agent's transcript couldn't be read, and why.
+    let content = fs::read_to_string(&path)?;
+    assert!(
+        content.contains("couldn't read agent 1's transcript") && content.contains("unreadable"),
+        "the failed preview read should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+/// A desktop whose notifications always fail.
+struct FailingNotifier;
+
+impl orb_domain::feat::notify::notifier::Notifier for FailingNotifier {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+    fn notify(
+        &self,
+        _: &str,
+        _: &str,
+        _: orb_domain::feat::notify::notifier::Urgency,
+        _: AgentId,
+    ) -> Result<(), error_stack::Report<orb_domain::feat::notify::notifier::NotifyError>> {
+        Err(
+            error_stack::Report::new(orb_domain::feat::notify::notifier::NotifyError)
+                .attach("no notification server"),
+        )
+    }
+}
+
+#[rstest::rstest]
+fn a_failed_desktop_notification_is_logged() -> io::Result<()> {
+    // Given an unfocused orb whose desktop notifications fail, and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    test.app.notifier = NotifierService::new(Arc::new(FailingNotifier));
+    test.app.focused = false;
+
+    // When a status change is announced.
+    test.app.apply(Outcome::Announce(
+        orb_domain::feat::sessions::state::Notice {
+            agent: AgentId(1),
+            kind: orb_domain::feat::sessions::state::NoticeKind::Finished,
+            project: "orb".to_owned(),
+            title: "Fix it".to_owned(),
+        },
+    ));
+
+    // Then the log says the notification couldn't be sent.
+    let content = log_holding(&path, "couldn't send a desktop notification");
+    assert!(
+        content.contains("couldn't send a desktop notification"),
+        "the failed notification should be logged, got {content:?}"
+    );
+    Ok(())
+}

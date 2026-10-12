@@ -736,10 +736,14 @@ impl App {
                         }
                         app.sessions.starting = true;
                     }
-                    let _ = self
+                    if let Err(error) = self
                         .sessions
                         .tell(SessionsCommand::RestoreWorktree(*session))
-                        .try_send();
+                        .try_send()
+                    {
+                        self.log
+                            .error("couldn't send to the sessions actor", &error);
+                    }
                     return;
                 }
                 self.pane_error = None;
@@ -779,20 +783,29 @@ impl App {
                 self.load_preview(*agent, transcript);
             }
             Command::Sessions(command) => {
-                let _ = self.sessions.tell(command.clone()).try_send();
+                if let Err(error) = self.sessions.tell(command.clone()).try_send() {
+                    self.log
+                        .error("couldn't send to the sessions actor", &error);
+                }
             }
             Command::Worktrees(command) => {
-                let _ = self.worktrees.tell(command.clone()).try_send();
+                if let Err(error) = self.worktrees.tell(command.clone()).try_send() {
+                    self.log
+                        .error("couldn't send to the worktrees actor", &error);
+                }
             }
             Command::Search(command) => {
-                let _ = self.search.tell(command.clone()).try_send();
+                if let Err(error) = self.search.tell(command.clone()).try_send() {
+                    self.log.error("couldn't send to the search actor", &error);
+                }
             }
         }
     }
 
     /// Reads `agent`'s transcript, in its harness's format, into the open
     /// picker's preview. An unreadable transcript, or one whose harness orb
-    /// doesn't know, gives an empty preview, which shows as no transcript.
+    /// doesn't know, gives an empty preview, which shows as no transcript;
+    /// an unreadable one is logged, once until its text changes.
     fn load_preview(&mut self, agent: AgentId, transcript: &Path) {
         let harness = self
             .state
@@ -801,9 +814,22 @@ impl App {
             .all_agents()
             .find(|candidate| candidate.id == agent)
             .and_then(|found| self.harnesses.get(&found.harness).cloned());
-        let (len, exchanges) = harness
-            .and_then(|harness| harness.exchanges(transcript).ok())
-            .unwrap_or_default();
+        let (len, exchanges) = match harness.map(|harness| harness.exchanges(transcript)) {
+            Some(Ok(read)) => read,
+            Some(Err(report)) => {
+                self.log.error_on_change(
+                    "preview read",
+                    &format!(
+                        "couldn't read agent {}'s transcript {}",
+                        agent.0,
+                        transcript.display()
+                    ),
+                    &report,
+                );
+                Default::default()
+            }
+            None => Default::default(),
+        };
         if let Some(picker) = &mut self.state.write().picker {
             picker.show_preview(agent, len, exchanges);
         }

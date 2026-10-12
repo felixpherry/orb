@@ -217,7 +217,7 @@ let c = {
   IntentHandler (sync, one match; each arm calls its feature's intent.rs): validate → mutate AppState → return commands
          │
          ▼
-  Frontend loop: pane commands run here; each actor's commands → one tell → that actor
+  Frontend loop: pane commands run here; each actor command → one tell → that actor's mailbox
          │                                   (SessionsActor, WorktreesActor, SearchActor)
          ▼
   Actors write their own AppState fields, then report to the loop (Outcome)
@@ -227,19 +227,19 @@ let c = {
          → reconcile panes → draw (the renderer reads AppState)
 ```
 
-**Keys become intents.** The keymap turns a key into an `Intent`. The `IntentHandler` (crates/orb-domain/src/intent_handler.rs) validates it, mutates `AppState` directly and returns `Command`s. It never touches outside services.
+**Keys become intents.** The keymap turns a key into an `Intent`. The `IntentHandler` (crates/orb-domain/src/intent_handler.rs) validates it, mutates `AppState` directly and returns `Command`s. Its `handle` is one match, and each arm is one call into its feature's `intent.rs` (crates/orb-domain/src/feat/<feature>/intent.rs), which validates, mutates and returns the commands; only quitting stays a small function beside the match. It never touches outside services. The ids of agents, sessions, panes and projects (`AgentId`, `SessionId`, `PaneId`, `ProjectId`) live in one shared module, crates/orb-domain/src/ids.rs (`orb_domain::ids`).
 
-**The frontend loop carries out the commands** (crates/orb-tui/src/run.rs, `execute`). It runs the pane commands itself (attach, detach, sending Ctrl-g to the attached pane) and a few quick reads (branch and folder lists for a picker, the thread preview). Every other command belongs to one actor: commands are grouped into one list per actor (`SessionsCommand`, `WorktreesCommand`, `SearchCommand` in crates/orb-domain/src/command.rs), the loop forwards each list with a single `tell`, and each actor handles its list in one `impl Message` with one match. Messages an actor sends itself (the poll, a made worktree's result, the start-up kill of settled sessions, the sweep, the search indexing) stay separate. The poll is two asks with the slow outside calls (harness and zmx listing) run between them, and a new worktree is made in a blocking job beside the sessions queue, so neither holds up the commands queued behind it.
+**The frontend loop carries out the commands** (crates/orb-tui/src/run.rs, `execute`). It runs the pane commands itself (attach, detach, sending Ctrl-g to the attached pane) and a few quick reads (branch and folder lists for a picker, the session picker's agent preview). Every other command belongs to one actor's command enum (`SessionsCommand`, `WorktreesCommand`, `SearchCommand` in crates/orb-domain/src/command.rs); the loop sends each one straight to that actor's mailbox with a single `tell` — nothing sits between them — and each actor handles its enum in one `impl Message` with one match. Messages an actor sends itself (the poll, a made worktree's result, the start-up kill of settled sessions, the sweep, the search indexing) stay separate. The poll is two asks with the slow outside calls (harness and zmx listing) run between them, and a new worktree is made in a blocking job beside the sessions queue, so neither holds up the commands queued behind it.
 
 **There are three actors**, `SessionsActor`, `WorktreesActor` and `SearchActor`, all spawned in src/main.rs. Each gets a handle to the shared `AppState` and a `Reporter`.
 
-**Actors write the `AppState` fields they own, then send a report** (`Outcome`, through their `Reporter`). The reports, terminal input and the pane threads (output, clipboard, exit) all feed one channel (`LoopEvent`). The loop handles everything pending, reconciles the panes against the layouts, then draws one frame. There is no fixed tick: besides that channel, the loop wakes only for a pane's held screen update, a spinner frame, or the message box running out.
+**Actors write the `AppState` fields they own, then send a report** (`Outcome`, through their `Reporter`). The reports, terminal input (and a failed terminal read), a quit signal and the pane threads (output, clipboard, exit) all feed one channel (`LoopEvent`). The loop handles everything pending, reconciles the panes against the layouts, then draws one frame. There is no fixed tick: besides that channel, the loop wakes only for a pane's held screen update, a spinner frame, the message box running out, or the session picker's preview being due for a re-read.
 
-**The loop owns every pane's attach client** (`App.panes`). It decides which pane clients close and which reconnect, and kills the pane sessions that left every layout (`reconcile`, `classify_exits`, `reattach_live` in run/panes.rs). Actors change the layouts; the loop makes the panes match. (The sessions actor also kills a session's panes itself when it settles or deletes that session.)
+**The loop owns every pane's attach client** (`App.panes`). It decides which pane clients close and which reconnect, and kills the pane sessions that left every layout (`reconcile`, `classify_exits`, `reattach_live` in run/panes.rs). Actors change the layouts; the loop makes the panes match. (The sessions actor also kills a session's panes itself when it settles or deletes that session, moves it to another workspace, or kills the settled sessions at start-up.)
 
-**Commands go out, reports come back.** Commands go frontend → actor, one list per actor. Reports come back actor → loop on one channel. Durable facts (sessions, statuses, layouts, worktrees) live in `AppState`, written by their owner; reports say what changed or what the screen should do. Workers never write the picker or the message box.
+**Commands go out, reports come back.** Commands go frontend → actor, one command enum per actor. Reports come back actor → loop on one channel. Durable facts (sessions, statuses, layouts, worktrees) live in `AppState`, written by their owner; reports say what changed or what the screen should do. Workers never write the picker or the message box.
 
-**One loop function applies the reports** (`apply` and `show` in run/report.rs). It:
+**The loop applies the reports in one place** (`apply`, `show` and `open_ready` in run/report.rs). It:
 
 - opens a ready session (a new, restored, moved or switched one) while the session active when it was asked for is still active, even if the cursor moved, and once the keys are back in the sidebar;
 - shows an error or a notice in the message box (the same error doesn't pop again until a key or a success, and an error isn't hidden by a notice in the same turn);
@@ -255,7 +255,7 @@ Each `AppState` field/sub-struct is written by **at most one actor** — its own
 
 The `IntentHandler` is **not an actor** and is exempt from this rule. It is the synchronous frontend mutator (user input → `AppState`). It may write any field, in frontend or elsewhere; it is never counted as a writer. An actor owning a field the `IntentHandler` also writes is not a conflict (e.g. optimistic IntentHandler write + authoritative actor write is fine).
 
-Ownership is per-field, not per-top-level-struct: a domain actor writing `frontend.pins` it owns is correct; the `IntentHandler` writing it too is also correct (exempt); a _second actor_ writing it is the red flag. A cross-boundary write is mutating a field you don't own, regardless of which top-level struct it lives under.
+Ownership is per-field, not per-top-level-struct: the sessions actor writing `layouts` it owns is correct; the `IntentHandler` writing it too is also correct (exempt); a _second actor_ writing it is the red flag. A cross-boundary write is mutating a field you don't own, regardless of which top-level struct it lives under.
 
 **Anti-pattern — the "sync sibling."** Do not split one domain boundary across two actors where one persists/forwards and a second "sync" actor exists only to write `AppState` from the first one's results. If you keep an actor "pure" (no `State`) and spawn a sibling to do the write, the sibling is the bug — give the first actor a `State` clone and write inline. One boundary = one actor.
 
