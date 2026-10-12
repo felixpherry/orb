@@ -18,14 +18,24 @@
 //! While orb runs in kitty, pane programs also get terminal-browser's own
 //! settings for its fast path: whole frames patched in place through shared
 //! memory. They steer terminal-browser only.
+//!
+//! Each pane's program also gets `TERMINAL_BROWSER_TERMINAL_SOCKET`, naming
+//! orb's socket for terminal-browser's splits, while that socket is open; one
+//! inherited from orb's own environment is dropped.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use crate::ids::PaneId;
 
 /// The variable naming the pane a program runs in. orb sets it on each
 /// pane's program, and drops one inherited from its own environment.
 pub const ORB_PANE_ID: &str = "ORB_PANE_ID";
+
+/// The variable naming the socket terminal-browser asks for its splits. orb
+/// sets it on each pane's program while that socket is open, and drops one
+/// inherited from its own environment, so a pane never asks another orb.
+pub const TERMINAL_BROWSER_TERMINAL_SOCKET: &str = "TERMINAL_BROWSER_TERMINAL_SOCKET";
 
 /// The terminal identity every child gets.
 const IDENTITY: [(&str, &str); 4] = [
@@ -117,8 +127,15 @@ pub fn terminal_browser_env(kitty_images: bool) -> Vec<(OsString, OsString)> {
     .into()
 }
 
+/// The setting that sends terminal-browser's splits to orb's socket at
+/// `socket`.
+pub fn terminal_browser_socket_env(socket: &Path) -> (OsString, OsString) {
+    (TERMINAL_BROWSER_TERMINAL_SOCKET.into(), socket.into())
+}
+
 fn is_scrubbed(key: &str) -> bool {
     key == ORB_PANE_ID
+        || key == TERMINAL_BROWSER_TERMINAL_SOCKET
         || SESSION_VARS.contains(&key)
         || TERMINAL_VARS.contains(&key)
         || IDENTITY.iter().any(|(name, _)| *name == key)
@@ -130,8 +147,12 @@ fn is_scrubbed(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::path::Path;
 
-    use super::{ORB_PANE_ID, child_env, pane_env, terminal_browser_env};
+    use super::{
+        ORB_PANE_ID, TERMINAL_BROWSER_TERMINAL_SOCKET, child_env, pane_env, terminal_browser_env,
+        terminal_browser_socket_env,
+    };
     use crate::ids::PaneId;
 
     fn env_of(vars: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -279,6 +300,43 @@ mod tests {
         assert!(
             values_of(&env, ORB_PANE_ID).is_empty(),
             "an inherited ORB_PANE_ID should be removed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn child_env_drops_an_inherited_terminal_browser_socket() {
+        // Given orb runs inside another orb's pane.
+        let parent = [(
+            TERMINAL_BROWSER_TERMINAL_SOCKET,
+            "/other/.orb/terminal-browser.sock",
+        )];
+
+        // When building the child's environment.
+        let env = env_of(&parent);
+
+        // Then the inherited socket is gone.
+        assert!(
+            values_of(&env, TERMINAL_BROWSER_TERMINAL_SOCKET).is_empty(),
+            "an inherited TERMINAL_BROWSER_TERMINAL_SOCKET should be removed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn terminal_browser_socket_env_names_the_socket() {
+        // Given orb's terminal-browser socket.
+        let socket = Path::new("/h/.orb/terminal-browser.sock");
+
+        // When building the setting.
+        let setting = terminal_browser_socket_env(socket);
+
+        // Then it names that socket.
+        assert_eq!(
+            setting,
+            (
+                OsString::from(TERMINAL_BROWSER_TERMINAL_SOCKET),
+                OsString::from("/h/.orb/terminal-browser.sock")
+            ),
+            "the setting should name orb's terminal-browser socket"
         );
     }
 

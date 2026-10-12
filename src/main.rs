@@ -14,6 +14,7 @@ use std::{panic, thread};
 
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
+use orb_domain::feat::control::browser_socket;
 use orb_domain::feat::control::client;
 use orb_domain::feat::control::protocol::socket_path;
 use orb_domain::feat::control::server::{self, ControlDeps};
@@ -28,7 +29,7 @@ use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::SoundService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
-use orb_domain::feat::sessions::child_env::{ORB_PANE_ID, child_env};
+use orb_domain::feat::sessions::child_env::{ORB_PANE_ID, child_env, terminal_browser_socket_env};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::{self, Store, Upgrade};
 use orb_domain::feat::worktrees::worktrees_actor::{
@@ -152,7 +153,7 @@ fn run(
     let tz = TimeZone::system();
     let notifier = desktop_notifier();
     let sounds = desktop_sounds(&orb_root, log);
-    let socket = socket_path(&orb_root);
+    let sockets = socket_paths(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
     let store_lock = store::lock(&store_path).change_context(OrbError)?;
     let store =
@@ -197,8 +198,8 @@ fn run(
         log: log.clone(),
     });
     let workers = (sessions.clone(), worktrees.clone(), search.clone());
-    listen_for_agents(
-        &socket,
+    let browser_env = open_sockets(
+        &sockets,
         ControlDeps {
             state: state.clone(),
             log: log.clone(),
@@ -217,14 +218,14 @@ fn run(
             search,
             git,
             harnesses,
-            env,
+            [env, browser_env].concat(),
             zmx,
             notifier,
             sounds,
             log.clone(),
         )
         .change_context(OrbError);
-    server::remove_socket(&socket, log);
+    remove_sockets(&sockets, log);
     let stopped = runtime.block_on(tokio::time::timeout(QUIT_CAP, async {
         tokio::join!(
             stop_gracefully(&workers.0),
@@ -242,12 +243,36 @@ fn run(
     ended
 }
 
-/// Opens the agent control socket; when it can't, orb runs without it and
-/// says so in the log.
-fn listen_for_agents(socket: &Path, deps: ControlDeps) {
+/// Where the agent control socket and terminal-browser's split socket go,
+/// given orb's folder.
+fn socket_paths(orb_root: &Path) -> [PathBuf; 2] {
+    [socket_path(orb_root), browser_socket::socket_path(orb_root)]
+}
+
+/// Opens the agent control socket and terminal-browser's split socket; when
+/// one can't open, orb runs without it and says so in the log. Returns the
+/// pane env that points terminal-browser at its socket, empty when that one
+/// didn't open, so terminal-browser never asks a socket nobody answers.
+fn open_sockets(sockets: &[PathBuf; 2], deps: ControlDeps) -> Vec<(OsString, OsString)> {
+    let [control, browser] = sockets;
     let log = deps.log.clone();
-    if let Err(report) = server::listen(socket, deps) {
+    let browser_env = match browser_socket::listen(browser, deps.clone()) {
+        Ok(()) => vec![terminal_browser_socket_env(browser)],
+        Err(report) => {
+            log.error("couldn't open terminal-browser's split socket", &report);
+            Vec::new()
+        }
+    };
+    if let Err(report) = server::listen(control, deps) {
         log.error("couldn't open the agent control socket", &report);
+    }
+    browser_env
+}
+
+/// Removes both sockets once orb no longer answers them.
+fn remove_sockets(sockets: &[PathBuf; 2], log: &Log) {
+    for socket in sockets {
+        server::remove_socket(socket, log);
     }
 }
 

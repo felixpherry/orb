@@ -64,8 +64,15 @@ pub(crate) fn shell_line(kind: AgentKind, args: &[String]) -> String {
         AgentKind::Pi => "pi",
     };
     args.iter().fold(program.to_owned(), |line, arg| {
-        format!("{line} '{}'", arg.replace('\'', "'\\''"))
+        format!("{line} {}", quoted(arg))
     })
+}
+
+/// `word` in single quotes, its own `'` written `'\''`, which POSIX shells
+/// and fish both read as one word.
+pub(crate) fn quoted(word: &str) -> String {
+    // ponytail: POSIX single quotes; fish reads `\\` and a trailing `\` inside them differently, quote per shell if a word ever carries one.
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// Reads `state` every tick until `check` gives an answer, poking the poll

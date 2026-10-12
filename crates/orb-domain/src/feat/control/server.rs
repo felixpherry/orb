@@ -63,16 +63,16 @@ pub struct ControlDeps {
 /// Returns an error if the socket can't be bound, made private, or its
 /// thread can't start.
 pub fn listen(path: &Path, deps: ControlDeps) -> Result<(), Report<ControlServerError>> {
-    open(path, deps.log.clone(), move |request| {
-        answer(&deps, request)
+    open(path, deps.log.clone(), move |line| {
+        reply_line(line, |request| answer(&deps, request))
     })
 }
 
-/// Opens the socket at `path` as [`listen`] does, answering each request with
-/// `answer`.
-fn open<F>(path: &Path, log: Log, answer: F) -> Result<(), Report<ControlServerError>>
+/// Opens a socket at `path` as [`listen`] does, answering each request line
+/// with the reply line `answer` gives.
+pub(super) fn open<F>(path: &Path, log: Log, answer: F) -> Result<(), Report<ControlServerError>>
 where
-    F: Fn(&Request) -> Reply + Send + Sync + 'static,
+    F: Fn(&str) -> String + Send + Sync + 'static,
 {
     remove_socket(path, &log);
     let listener = UnixListener::bind(path)
@@ -104,7 +104,7 @@ pub fn remove_socket(path: &Path, log: &Log) {
 /// Hands each connection to its own thread, for as long as orb runs.
 fn accept<F>(listener: &UnixListener, log: &Log, answer: &Arc<F>)
 where
-    F: Fn(&Request) -> Reply + Send + Sync + 'static,
+    F: Fn(&str) -> String + Send + Sync + 'static,
 {
     for stream in listener.incoming() {
         match stream {
@@ -128,20 +128,27 @@ where
 /// that hangs up early gets nothing.
 fn serve<F>(stream: UnixStream, answer: &F)
 where
-    F: Fn(&Request) -> Reply,
+    F: Fn(&str) -> String,
 {
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() {
         return;
     }
-    let reply = match serde_json::from_str::<Request>(&line) {
+    let mut stream = stream;
+    let _ = writeln!(stream, "{}", answer(&line));
+}
+
+/// The control socket's reply line to `line`: `answer`'s reply to the
+/// request it holds, or `bad_request` when it holds none.
+fn reply_line<F>(line: &str, answer: F) -> String
+where
+    F: FnOnce(&Request) -> Reply,
+{
+    let reply = match serde_json::from_str::<Request>(line) {
         Ok(request) => answer(&request),
         Err(error) => Reply::err(ApiError::new(ErrorCode::BadRequest, error.to_string())),
     };
-    if let Ok(text) = serde_json::to_string(&reply) {
-        let mut stream = stream;
-        let _ = writeln!(stream, "{text}");
-    }
+    serde_json::to_string(&reply).unwrap_or_default()
 }
 
 /// What a request comes to once read against the state.
@@ -185,7 +192,7 @@ enum Action {
 /// after), then carried out. Each change, and any request refused before it
 /// runs, writes one `api` log line; lists, reads, waits, gets and replies that
 /// are answered write none.
-fn answer(deps: &ControlDeps, request: &Request) -> Reply {
+pub(super) fn answer(deps: &ControlDeps, request: &Request) -> Reply {
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
@@ -762,7 +769,7 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{Action, ControlServerError, log_text, open, plan, route};
+    use super::{Action, ControlServerError, log_text, open, plan, reply_line, route};
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
@@ -778,8 +785,8 @@ mod tests {
         let dir = tempfile::tempdir().change_context(ControlServerError)?;
         let socket = dir.path().join("orb.sock");
         let state = State::new(app);
-        open(&socket, Log::default(), move |request| {
-            route(&state.read(), request)
+        open(&socket, Log::default(), move |line| {
+            reply_line(line, |request| route(&state.read(), request))
         })?;
         Ok((dir, socket))
     }

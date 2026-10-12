@@ -382,7 +382,7 @@ pub struct AgentRow {
 }
 
 /// What an add replies: the new pane.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneResult {
     pub pane: PaneId,
 }
