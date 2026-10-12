@@ -3,7 +3,7 @@
 use wherror::Error;
 
 use crate::feat::layout::state::SessionLayout;
-use crate::feat::sessions::state::PaneId;
+use crate::ids::PaneId;
 use crate::{AppState, Focus};
 
 /// Why a pane action (focus move between panes, split, close, zoom, pane
@@ -149,9 +149,9 @@ mod tests {
     use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus, sessions_for,
+        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
     };
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use crate::{AppState, Focus};
 
     fn thread(id: i64) -> Thread {

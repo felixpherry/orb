@@ -9,7 +9,8 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::feat::sessions::state::{PaneId, ThreadStatus};
+use crate::feat::sessions::state::ThreadStatus;
+use crate::ids::PaneId;
 
 /// What the agent in a pane reported last.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -125,7 +126,8 @@ mod tests {
 
     use super::{AgentEvent, AgentReport, PaneFiles};
     use crate::feat::integration::IntegrationError;
-    use crate::feat::sessions::state::{PaneId, ThreadStatus};
+    use crate::feat::sessions::state::ThreadStatus;
+    use crate::ids::PaneId;
 
     type TestResult = Result<(), Report<IntegrationError>>;
 

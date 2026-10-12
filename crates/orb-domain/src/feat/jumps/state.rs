@@ -162,7 +162,8 @@ impl JumpList {
 #[cfg(test)]
 mod tests {
     use super::{JUMP_LIMIT, JumpList};
-    use crate::feat::sessions::state::{PaneId, SessionId, SidebarItem};
+    use crate::feat::sessions::state::SidebarItem;
+    use crate::ids::{PaneId, SessionId};
 
     fn on(id: i64) -> SidebarItem {
         SidebarItem::Session(SessionId(id))

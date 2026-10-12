@@ -83,8 +83,9 @@ fn title(target: RenameTarget) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::sessions::state::{FolderKind, PaneId, ProjectId, SessionId};
+    use orb_domain::feat::sessions::state::FolderKind;
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
+    use orb_domain::ids::{PaneId, ProjectId, SessionId};
     use orb_domain::{Focus, TextInput};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};

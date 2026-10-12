@@ -16,8 +16,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use unicode_segmentation::UnicodeSegmentation;
 use wherror::Error;
 
-use crate::feat::sessions::state::ThreadId;
 use crate::feat::sessions::transcript::{MessageRead, Role};
+use crate::ids::ThreadId;
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -541,8 +541,8 @@ mod tests {
 
     use super::{SCHEMA, SearchIndex, SearchIndexError, ThreadKey, snippet};
     use crate::feat::harness::claude::transcript::read_messages;
-    use crate::feat::sessions::state::ThreadId;
     use crate::feat::sessions::transcript::Role;
+    use crate::ids::ThreadId;
 
     const KEY: ThreadKey = (ThreadId(1), 1_000);
 

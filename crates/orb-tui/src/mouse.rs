@@ -32,7 +32,8 @@
 
 use std::time::{Duration, Instant};
 
-use orb_domain::feat::sessions::state::{PaneId, SidebarItem};
+use orb_domain::feat::sessions::state::SidebarItem;
+use orb_domain::ids::PaneId;
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -689,7 +690,8 @@ where
 mod tests {
     use std::time::{Duration, Instant};
 
-    use orb_domain::feat::sessions::state::{PaneId, SessionId, SidebarItem};
+    use orb_domain::feat::sessions::state::SidebarItem;
+    use orb_domain::ids::{PaneId, SessionId};
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;

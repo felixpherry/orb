@@ -17,7 +17,7 @@
 
 use std::ffi::OsString;
 
-use super::state::PaneId;
+use crate::ids::PaneId;
 
 /// The variable naming the pane a program runs in. orb sets it on each
 /// pane's program, and drops one inherited from its own environment.
@@ -114,7 +114,7 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{ORB_PANE_ID, child_env, pane_env};
-    use crate::feat::sessions::state::PaneId;
+    use crate::ids::PaneId;
 
     fn env_of(vars: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         child_env(

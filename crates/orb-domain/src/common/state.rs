@@ -9,8 +9,9 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::AppState;
 use crate::feat::picker::list::PickerItem;
-use crate::feat::sessions::state::{Notice, SessionId};
+use crate::feat::sessions::state::Notice;
 use crate::feat::sessions::transcript::Role;
+use crate::ids::SessionId;
 
 /// Shared, lock-protected [`AppState`]. Cloning shares the same state.
 #[derive(Debug, Clone, Default)]

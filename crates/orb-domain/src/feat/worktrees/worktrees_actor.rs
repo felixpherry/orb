@@ -326,8 +326,9 @@ mod tests {
     use crate::AppState;
     use crate::common::{Log, Outcome, Reporter, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
-    use crate::feat::sessions::state::{Project, ProjectId, ProjectKind, Sessions};
+    use crate::feat::sessions::state::{Project, ProjectKind, Sessions};
     use crate::feat::worktrees::state::Worktree;
+    use crate::ids::ProjectId;
 
     /// The main repository the fake git names for every linked worktree.
     const REPO: &str = "/repo";

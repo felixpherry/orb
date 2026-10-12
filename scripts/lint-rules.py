@@ -15,7 +15,9 @@
 
 `--self-test` plants a bad name, a bad phrase, a dropped kill, a dropped
 report, an unreviewed zmx list site and an unlimited `.output()`, and exits 0
-only if all are reported.
+only if all are reported and a dropped kill in a test-only file is not.
+
+Test-only files (`tests.rs`, `test_support.rs`) have no production part.
 """
 
 import re
@@ -59,15 +61,16 @@ TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]", re.M)
 # Production `zmx list` call sites per file, each reviewed to mean "keep" on error.
 ZMX_LIST = re.compile(r"zmx\s*\.list\(")
 ZMX_LIST_SITES = {
-    "crates/orb-tui/src/run.rs": 4,
+    "crates/orb-tui/src/run/panes.rs": 4,
     # classify_exits (shown sessions only): error -> None -> the pane respawns, never ends
     #   (exited_client_with_unlistable_zmx_keeps_its_pane, classify_exit's zmx_unknown case)
     # plan_resumes: error -> None -> nothing typed (resume_plan_types_nothing_where_zmx_couldnt_list)
     # reattach_live sweep: error -> empty -> nothing killed (stale_sessions_kills_nothing_when_zmx_lists_nothing)
     # reattach_live running: error -> empty -> panes come back as fresh shells, no kill
     #   (start_attaches_a_session_whose_panes_all_died)
-    "crates/orb-domain/src/feat/sessions/sessions_actor.rs": 2,
+    "crates/orb-domain/src/feat/sessions/sessions_actor.rs": 1,
     # poll probe (ticker): error -> that dir's panes left as they were (poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list)
+    "crates/orb-domain/src/feat/sessions/sessions_actor/settle.rs": 1,
     # kill_settled: error -> empty -> nothing killed (kill_settled_kills_nothing_when_zmx_cant_list)
 }
 
@@ -138,15 +141,20 @@ def check_section3(label, text):
     return reports
 
 
-def production(text):
-    """The text before a file's first `#[cfg(test)]` line."""
+TEST_ONLY = ("tests.rs", "test_support.rs")
+
+
+def production(label, text):
+    """The text before a file's first `#[cfg(test)]` line; nothing in a test-only file."""
+    if label.rsplit("/", 1)[-1] in TEST_ONLY:
+        return ""
     test = TEST_MODULE.search(text)
     return text[: test.start()] if test else text
 
 
 def check_drops(label, text):
     """Report dropped kill/removal results and dropped error reports in production code."""
-    code = production(text)
+    code = production(label, text)
     reports = []
     for found in LET_DROP.finditer(code):
         if (label, found.group(1)) in LET_DROP_ALLOWLIST:
@@ -161,7 +169,7 @@ def check_drops(label, text):
 
 def check_zmx_lists(label, text):
     """Report a file whose production `zmx … .list(` count differs from the reviewed list."""
-    found = len(ZMX_LIST.findall(production(text)))
+    found = len(ZMX_LIST.findall(production(label, text)))
     want = ZMX_LIST_SITES.get(label, 0)
     if found == want:
         return []
@@ -195,11 +203,15 @@ def self_test():
         "self-test", f"{SECTION_START}\nEvents go on the message bus.\n{SECTION_END}\n"
     )
     kill = check_drops("self-test", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
+    blind = check_drops("self-test/tests.rs", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
     report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
     zmx = check_zmx_lists("self-test", "fn f() {\n    self.zmx\n        .list(dir);\n}\n")
     output = check_outputs("self-test", "fn f() {\n    c.output();\n}\n")
     for line in names + deny + kill + report + zmx + output:
         print(line)
+    if blind:
+        print("self-test: a test-only file was checked as production")
+        return 1
     if not names or not deny or not kill or not report or not zmx or not output:
         print("self-test: a check did not fail on its planted text")
         return 1

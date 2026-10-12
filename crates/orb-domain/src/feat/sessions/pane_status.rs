@@ -4,10 +4,11 @@
 
 use std::collections::HashMap;
 
-use super::state::{PaneId, ThreadStatus};
+use super::state::ThreadStatus;
 use crate::feat::harness::RunningAgent;
 use crate::feat::integration::pane_file::AgentEvent;
 use crate::feat::zmx::zmx_service::ZmxEntry;
+use crate::ids::PaneId;
 
 /// The latest report from a pane's agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +80,9 @@ mod tests {
     use super::{PaneReport, match_records, pane_status};
     use crate::feat::harness::RunningAgent;
     use crate::feat::integration::pane_file::AgentEvent;
-    use crate::feat::sessions::state::{PaneId, ThreadStatus};
+    use crate::feat::sessions::state::ThreadStatus;
     use crate::feat::zmx::zmx_service::ZmxEntry;
+    use crate::ids::PaneId;
 
     /// A Claude the user started, whose process and parents are `ancestry`.
     fn interactive(ancestry: &[u32], status: ThreadStatus) -> RunningAgent {

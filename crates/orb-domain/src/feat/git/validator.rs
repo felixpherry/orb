@@ -102,9 +102,9 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus, sessions_for,
+        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
     };
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
 
     /// One project at `/work` whose only session, selected, runs in the
     /// root with one thread titled `title`.

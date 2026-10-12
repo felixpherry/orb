@@ -312,10 +312,9 @@ mod tests {
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
-    use orb_domain::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
-    };
+    use orb_domain::feat::sessions::state::{Project, ProjectKind, Sessions, Thread, ThreadStatus};
     use orb_domain::feat::sessions::transcript::Role;
+    use orb_domain::ids::{ProjectId, ThreadId};
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;

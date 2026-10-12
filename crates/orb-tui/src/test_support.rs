@@ -7,10 +7,9 @@ use std::sync::{Mutex, PoisonError};
 use error_stack::Report;
 use orb_domain::feat::git::git_service::{Git, GitError, GitRef, WorktreeFacts};
 use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
-use orb_domain::feat::sessions::state::{
-    PaneId, Project, ProjectKind, Session, SessionId, SessionKind,
-};
+use orb_domain::feat::sessions::state::{Project, ProjectKind, Session, SessionKind};
 use orb_domain::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxSession};
+use orb_domain::ids::{PaneId, SessionId};
 
 /// Session `n`, for `n < 100`: 200 + n. The same ranges as the domain's
 /// test ids (`feat::sessions::test_ids`), so a mixed-up id fails.

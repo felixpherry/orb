@@ -5,7 +5,8 @@ use std::fmt;
 use crate::PaneMode;
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::picker::state::SessionFilter;
-use crate::feat::sessions::state::{FolderKind, PaneId, SidebarItem};
+use crate::feat::sessions::state::{FolderKind, SidebarItem};
+use crate::ids::PaneId;
 
 /// A user action produced by the keymap and applied by the
 /// [`IntentHandler`](crate::IntentHandler).
@@ -323,7 +324,8 @@ mod tests {
     use super::Intent;
     use crate::feat::layout::tree::{NavDirection, Split};
     use crate::feat::picker::state::SessionFilter;
-    use crate::feat::sessions::state::{FolderKind, PaneId};
+    use crate::feat::sessions::state::FolderKind;
+    use crate::ids::PaneId;
 
     #[rstest::rstest]
     #[case(Intent::MoveFocus(NavDirection::Left), "focus left")]

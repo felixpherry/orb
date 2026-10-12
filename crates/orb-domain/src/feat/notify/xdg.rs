@@ -13,7 +13,7 @@ use error_stack::Report;
 
 use super::click::{ClickRunner, ClickTarget, focus_orb};
 use super::notifier::{Notifier, NotifyError, Urgency};
-use crate::feat::sessions::state::ThreadId;
+use crate::ids::ThreadId;
 
 /// One notification as the desktop is asked to show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +209,8 @@ mod tests {
     use super::{Desktop, XdgNotification, XdgNotifier};
     use crate::feat::notify::click::{ClickRunner, ClickTarget, NiriTarget};
     use crate::feat::notify::notifier::{Notifier, NotifierService, NotifyError, Urgency};
-    use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
+    use crate::feat::sessions::state::{Notice, NoticeKind};
+    use crate::ids::ThreadId;
 
     /// One program run: the program and its arguments.
     type Call = (PathBuf, Vec<String>);

@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 use crate::feat::git::git_service::WorktreeFacts;
-use crate::feat::sessions::state::{Project, Session, SessionId, Thread};
+use crate::feat::sessions::state::{Project, Session, Thread};
+use crate::ids::SessionId;
 
 /// How long after the newest settle a worktree is pruned.
 pub const PRUNE_AFTER: Duration = Duration::from_hours(3 * 24);
@@ -200,9 +201,9 @@ mod tests {
     use crate::AppState;
     use crate::feat::git::git_service::WorktreeFacts;
     use crate::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus, sessions_for,
+        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
     };
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
 
     const WT: &str = "/w/orb/orb-1";
 

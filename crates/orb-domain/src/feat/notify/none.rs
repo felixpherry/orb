@@ -3,7 +3,7 @@
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency};
-use crate::feat::sessions::state::ThreadId;
+use crate::ids::ThreadId;
 
 /// Shows nothing, and always succeeds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -29,7 +29,7 @@ impl Notifier for NoneNotifier {
 mod tests {
     use super::NoneNotifier;
     use crate::feat::notify::notifier::{Notifier, Urgency};
-    use crate::feat::sessions::state::ThreadId;
+    use crate::ids::ThreadId;
 
     #[rstest::rstest]
     fn none_notifier_shows_nothing_and_succeeds() {

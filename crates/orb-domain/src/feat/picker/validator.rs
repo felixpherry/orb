@@ -298,9 +298,9 @@ mod tests {
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus, sessions_for,
+        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
     };
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use crate::{AppState, Focus};
 
     const HOME: &str = "/home/me";

@@ -36,11 +36,38 @@ lint:
     cargo fmt -- --check
     just lint-testattr
     just lint-rules
+    just lint-filelen
 
 # Check that code names in AGENTS.md and the Record exist in orb, and that AGENTS.md §3 names no bus
 lint-rules:
     python3 scripts/lint-rules.py
     python3 scripts/lint-rules.py --self-test
+
+# Fail when a Rust file's production part (lines before its first top-level #[cfg(test)]) passes LIMIT lines; RATCHET holds files still over it at their current size. Test-only files (tests.rs, test_support.rs) have no production part.
+lint-filelen LIMIT="2000":
+   #!/usr/bin/env python3
+   import os, sys
+   LIMIT = int("{{LIMIT}}")
+   # path -> highest allowed production line count while over LIMIT; lower it as the file shrinks
+   RATCHET = {}
+   TEST_ONLY = {"tests.rs", "test_support.rs"}
+   bad = []
+   for root in ("crates", "src"):
+       for dirpath, dirnames, filenames in os.walk(root):
+           dirnames[:] = [d for d in dirnames if d != "target"]
+           for fn in filenames:
+               if not fn.endswith(".rs") or fn in TEST_ONLY:
+                   continue
+               path = os.path.join(dirpath, fn)
+               with open(path, encoding="utf-8") as f:
+                   lines = f.readlines()
+               prod = next((i for i, l in enumerate(lines) if l.startswith("#[cfg(test)]")), len(lines))
+               cap = max(LIMIT, RATCHET.get(path, 0))
+               if prod > cap:
+                   bad.append((path, prod, cap))
+   for path, prod, cap in sorted(bad):
+       print(f"ERROR: {path}: {prod} production lines (cap {cap}); split it by concern", file=sys.stderr)
+   sys.exit(1 if bad else 0)
 
 # Fail on bare #[test]/#[tokio::test] lacking an rstest attr (escapes the rstest timeout)
 lint-testattr:

@@ -24,8 +24,9 @@ use std::time::SystemTime;
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState, SessionFilter};
-use orb_domain::feat::sessions::state::{SessionId, Sessions, Thread, ThreadStatus};
+use orb_domain::feat::sessions::state::{Sessions, Thread, ThreadStatus};
 use orb_domain::feat::sessions::transcript::Exchange;
+use orb_domain::ids::SessionId;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -677,10 +678,10 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus,
+        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus,
     };
     use orb_domain::feat::sessions::transcript::Exchange;
+    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;

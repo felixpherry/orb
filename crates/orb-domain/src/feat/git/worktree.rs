@@ -99,9 +99,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{hex_branch, is_orb_worktree, previous_worktree, slug};
-    use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions,
-    };
+    use crate::feat::sessions::state::{Project, ProjectKind, Session, SessionKind, Sessions};
+    use crate::ids::{ProjectId, SessionId};
 
     const ROOT: &str = "/tmp/orb";
 

@@ -8,5 +8,6 @@
 //! the cursor there and shows its pane only while orb is still attached to
 //! it; it never attaches or clears the filter.
 
+pub(crate) mod intent;
 pub mod state;
 pub mod validator;

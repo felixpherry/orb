@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::feat::sessions::state::ThreadId;
+use crate::ids::ThreadId;
 
 /// Shows notifications with `osascript … display notification`, which macOS
 /// attributes to Script Editor: a click opens Script Editor, and a later

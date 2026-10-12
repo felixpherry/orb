@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
-use crate::feat::sessions::state::{FolderKind, ProjectId, SessionId, ThreadId};
+use crate::feat::sessions::state::FolderKind;
+use crate::ids::{ProjectId, SessionId, ThreadId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]

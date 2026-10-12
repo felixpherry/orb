@@ -2,7 +2,8 @@
 //! name box, which names a session, a new session's folder, a tab, a pane
 //! or an agent's pane.
 
-use crate::feat::sessions::state::{FolderKind, PaneId, ProjectId, SessionId};
+use crate::feat::sessions::state::FolderKind;
+use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{Focus, TextInput};
 
 /// The sidebar's width in columns until the user resizes it.

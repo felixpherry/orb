@@ -13,7 +13,7 @@
 use ratatui::layout::Rect;
 
 use super::tree::{NavDirection, first_fitting};
-use crate::feat::sessions::state::PaneId;
+use crate::ids::PaneId;
 
 /// Smallest float width, in cells (capped at the body).
 const MIN_WIDTH: u16 = 10;

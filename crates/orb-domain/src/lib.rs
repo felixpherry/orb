@@ -10,6 +10,7 @@ mod app_state;
 mod command;
 mod common;
 pub mod feat;
+pub mod ids;
 mod intent;
 mod intent_handler;
 

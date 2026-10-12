@@ -5,5 +5,6 @@
 
 pub mod git_cli;
 pub mod git_service;
+pub(crate) mod intent;
 pub mod validator;
 pub mod worktree;

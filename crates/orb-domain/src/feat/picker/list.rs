@@ -8,7 +8,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{PaneId, ProjectId, ProjectKind, SessionId, ThreadId};
+use crate::feat::sessions::state::ProjectKind;
+use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,7 +505,8 @@ mod tests {
 
     use super::{BranchRow, Matches, PickerItem, PickerList};
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::sessions::state::{ProjectId, ProjectKind};
+    use crate::feat::sessions::state::ProjectKind;
+    use crate::ids::ProjectId;
 
     fn directories(names: &[&str]) -> Vec<PickerItem> {
         names

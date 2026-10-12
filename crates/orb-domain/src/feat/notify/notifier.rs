@@ -12,7 +12,8 @@ use wherror::Error;
 use super::click::{ClickTarget, on_path};
 use super::osascript::OsascriptNotifier;
 use super::terminal_notifier::TerminalNotifierNotifier;
-use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
+use crate::feat::sessions::state::{Notice, NoticeKind};
+use crate::ids::ThreadId;
 
 /// A notification couldn't be sent.
 #[derive(Debug, Error)]
@@ -191,7 +192,8 @@ mod tests {
 
     use super::{Notifier, NotifierService, NotifyError, Urgency};
     use crate::feat::notify::click::ClickTarget;
-    use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
+    use crate::feat::sessions::state::{Notice, NoticeKind};
+    use crate::ids::ThreadId;
 
     /// What the fake notifier was asked to show.
     #[derive(Debug, Clone, PartialEq, Eq)]

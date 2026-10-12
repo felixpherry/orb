@@ -16,7 +16,7 @@ use orb_domain::AppState;
 use orb_domain::feat::layout::floats::FloatLayout;
 use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList};
 use orb_domain::feat::layout::tree::SwapLayout;
-use orb_domain::feat::sessions::state::PaneId;
+use orb_domain::ids::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -407,8 +407,8 @@ mod tests {
     use orb_domain::AppState;
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
-    use orb_domain::feat::sessions::state::{PaneId, SessionId};
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
+    use orb_domain::ids::{PaneId, SessionId};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 

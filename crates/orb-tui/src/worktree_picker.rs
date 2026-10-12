@@ -462,10 +462,10 @@ mod tests {
     use orb_domain::feat::git::git_service::WorktreeFacts;
     use orb_domain::feat::picker::state::{PickerState, worktree_items};
     use orb_domain::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus,
+        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::{Worktree, Worktrees};
+    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};

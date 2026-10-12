@@ -25,7 +25,7 @@ use error_stack::Report;
 
 use super::click::ClickTarget;
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::feat::sessions::state::ThreadId;
+use crate::ids::ThreadId;
 
 /// Shows notifications with `terminal-notifier`, whose click runs a command,
 /// and through `fallback` when terminal-notifier exits unsuccessfully.
@@ -135,7 +135,7 @@ mod tests {
     use super::TerminalNotifierNotifier;
     use crate::feat::notify::click::{ClickTarget, Kitty};
     use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
-    use crate::feat::sessions::state::ThreadId;
+    use crate::ids::ThreadId;
 
     /// What a fallback notifier was asked to show: title, body and thread.
     type Resent = (String, String, ThreadId);

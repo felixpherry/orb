@@ -1,0 +1,700 @@
+//! What the pane keys do: moving the keys from the sidebar into a session's
+//! panes and back.
+
+use crate::command::SessionsCommand;
+use crate::feat::sessions::state::SidebarItem;
+use crate::intent_handler::{attach_session, focus_right};
+use crate::{AppState, Command, Focus};
+
+/// `⏎` on a sidebar row: on the settled shelf opens or closes it; on an
+/// agent row reveals its pane and attaches; else attaches to the selected
+/// session.
+pub(crate) fn attach(state: &mut AppState) -> Vec<Command> {
+    if state.sessions.cursor == Some(SidebarItem::SettledShelf) {
+        if state.sessions.shelf_open {
+            state.sessions.close_shelf();
+        } else {
+            state.sessions.open_shelf();
+        }
+        return vec![];
+    }
+    match state.sessions.selected_agent(&state.layouts) {
+        Some((session, pane)) => {
+            state.layouts.reveal(session, pane);
+            let mut commands = attach_session(state);
+            commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
+            commands
+        }
+        None => attach_session(state),
+    }
+}
+
+/// Moves the keys from the sidebar into the right-hand area.
+pub(crate) fn focus_panes(state: &mut AppState) -> Vec<Command> {
+    match state.focus {
+        Focus::Sidebar => focus_right(state),
+        _ => vec![],
+    }
+}
+
+/// Moves the keys from a pane to the sidebar, showing it if it's hidden.
+pub(crate) fn leave_pane(state: &mut AppState) -> Vec<Command> {
+    match state.focus {
+        Focus::Pane => {
+            state.sidebar.hidden = false;
+            state.focus = Focus::Sidebar;
+            vec![
+                Command::Detach,
+                Command::Sessions(SessionsCommand::RefreshSessions),
+            ]
+        }
+        _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::command::SessionsCommand;
+    use crate::feat::layout::state::{Layouts, SessionLayout, test_entry};
+    use crate::feat::sessions::state::{SidebarItem, ThreadStatus};
+    use crate::feat::sidebar::state::SidebarView;
+    use crate::ids::{PaneId, SessionId};
+    use crate::intent_handler::test_support::{
+        agent, attached, jumping, left_pane, left_pane_showing_1, on_agent_in_another_tab,
+        on_thread, settle, shown_focus, split_layout, state_at, state_with, stopped, thread,
+        two_agents_from_sidebar, two_projects, with_layout,
+    };
+    use crate::{AppState, Command, Focus, Intent, IntentHandler, PaneMode};
+
+    #[rstest::rstest]
+    fn attach_to_live_thread_sets_focus_attached() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then keys go to the session.
+        assert_eq!(state.focus, Focus::Pane, "Attach should focus the session");
+    }
+
+    #[rstest::rstest]
+    fn attach_to_live_thread_returns_attach_and_refresh() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the loop attaches to that thread and the statuses are refreshed.
+        assert_eq!(
+            commands,
+            vec![
+                Command::Attach(SessionId(1)),
+                Command::Sessions(SessionsCommand::RefreshSessions),
+                Command::Sessions(SessionsCommand::SaveJumps),
+            ],
+            "Attach should target the selected thread, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_shows_its_tab_and_focuses_its_pane() {
+        // Given an agent row whose pane is in tab 1 while tab 2 is shown.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then tab 1 is shown with the agent's pane focused.
+        let layout = state.layouts.get(SessionId(1));
+        assert_eq!(
+            (
+                layout.map(SessionLayout::active),
+                layout.and_then(SessionLayout::focused)
+            ),
+            (Some(0), Some(PaneId(1))),
+            "Enter on an agent row should show its tab and focus its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_attaches_with_the_keys_in_the_pane() {
+        // Given an agent row of a session that isn't attached.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the session is attached with the keys in the pane.
+        assert_eq!(
+            (state.focus, state.attached.contains(&SessionId(1))),
+            (Focus::Pane, true),
+            "Enter on an agent row should attach its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_saves_the_layout() {
+        // Given an agent row whose pane is in another tab.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the session's layout is saved.
+        assert!(
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
+            "Enter on an agent row should save the revealed layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_settled_session_unsettles_and_attaches_it() {
+        // Given a selected settled session.
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then it is un-settled, then attached.
+        assert_eq!(
+            commands.get(..2),
+            Some(
+                &[
+                    Command::Sessions(SessionsCommand::UnsettleSession(SessionId(1))),
+                    Command::Attach(SessionId(1))
+                ][..]
+            ),
+            "⏎ on a settled session should bring it back and attach"
+        );
+    }
+
+    /// Settled session 1 selected in the sidebar, its last pane closed.
+    fn settled_without_layout() -> AppState {
+        AppState {
+            focus: Focus::Sidebar,
+            layouts: Layouts::default(),
+            ..settle(state_with(vec![stopped(1)], 1), &[1])
+        }
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_settled_session_without_a_layout_opens_a_shell_tab() {
+        // Given a selected settled session whose last pane closed.
+        let mut state = settled_without_layout();
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then it is un-settled, then gets a tab of one shell.
+        assert_eq!(
+            commands.get(..2),
+            Some(
+                &[
+                    Command::Sessions(SessionsCommand::UnsettleSession(SessionId(1))),
+                    Command::Sessions(SessionsCommand::NewTab(SessionId(1)))
+                ][..]
+            ),
+            "⏎ on an emptied session should open a shell in it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_session_without_a_layout_keeps_the_keys_in_the_sidebar() {
+        // Given a selected settled session whose last pane closed.
+        let mut state = settled_without_layout();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the keys stay in the sidebar and nothing is attached yet.
+        assert_eq!(
+            (state.focus, state.attached.is_empty()),
+            (Focus::Sidebar, true),
+            "the attach waits for the new tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_shows_the_threads_session() {
+        // Given a selected idle thread running in session 1.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then session 1 is shown.
+        assert_eq!(
+            state.shown_session(),
+            Some(SessionId(1)),
+            "attaching should show the thread's session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_adds_the_thread_to_attached() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the thread is attached.
+        assert!(
+            state.attached.contains(&SessionId(1)),
+            "Attach should add the thread to attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_focuses_the_sidebar() {
+        // Given keys going to an attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then keys drive the sidebar.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "LeavePane should focus the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_keeps_the_thread_attached() {
+        // Given keys going to thread 1's attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then thread 1 is still attached.
+        assert!(
+            state.attached.contains(&SessionId(1)),
+            "LeavePane should keep the thread attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_returns_detach_and_refresh() {
+        // Given keys going to an attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the loop stops sending the pane input and the statuses are
+        // refreshed.
+        assert_eq!(
+            commands,
+            vec![
+                Command::Detach,
+                Command::Sessions(SessionsCommand::RefreshSessions)
+            ],
+            "LeavePane should detach, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_while_the_sidebar_is_hidden_shows_it_with_the_keys() {
+        // Given keys going to an attached session, with the sidebar hidden.
+        let mut state = AppState {
+            sidebar: SidebarView {
+                hidden: true,
+                ..SidebarView::default()
+            },
+            ..attached()
+        };
+
+        // When handling LeavePane (`<C-S-h>`).
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the sidebar is shown and has the keys.
+        assert_eq!(
+            (state.sidebar.hidden, state.focus),
+            (false, Focus::Sidebar),
+            "LeavePane should show a hidden sidebar and focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_from_the_sidebar_does_nothing() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
+
+        // When handling LeavePane.
+        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Sidebar, vec![]),
+            "the keys are already out of the panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_the_sidebar_on_an_attached_session_enters_its_panes() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then keys go into thread 2's pane.
+        assert_eq!(
+            state.focus,
+            Focus::Pane,
+            "<C-S-l> should go into the selected session's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_the_sidebar_returns_attach_and_refresh() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then the loop attaches to thread 2 and the statuses are refreshed.
+        assert_eq!(
+            commands,
+            vec![
+                Command::Attach(SessionId(2)),
+                Command::Sessions(SessionsCommand::RefreshSessions),
+                Command::Sessions(SessionsCommand::SaveJumps),
+            ],
+            "<C-S-l> should attach to the selected session, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(&[])]
+    #[case(&[1])]
+    fn focus_panes_from_the_sidebar_on_an_unattached_session_keeps_the_keys(
+        #[case] attached: &[i64],
+    ) {
+        // Given thread 2 selected and unattached, with no thread or thread 1
+        // attached.
+        let mut state = left_pane(attached, 2);
+        let before = state.focus;
+
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then the keys stay put.
+        assert_eq!(
+            state.focus, before,
+            "<C-S-l> with {attached:?} attached should keep the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn enter_on_the_shelf_toggles_it(#[case] open: bool) {
+        // Given the cursor on the Settled header, with the shelf `open`.
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
+        state.sessions.shelf_open = open;
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the shelf flipped.
+        assert_eq!(
+            state.sessions.shelf_open, !open,
+            "⏎ on the header should toggle the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_the_shelf_returns_no_commands() {
+        // Given the cursor on the Settled header.
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then nothing attaches.
+        assert!(commands.is_empty(), "⏎ on the header shouldn't attach");
+    }
+
+    #[rstest::rstest]
+    fn attach_on_b_after_a_lists_their_agents() {
+        // Given thread 1 entered, then the cursor moved to thread 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        state.sessions.cursor = Some(on_thread(1));
+        IntentHandler::handle(&Intent::Attach, &mut state);
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(on_thread(2));
+
+        // When handling Attach on thread 2.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the jump list is thread 1's agent, then thread 2's.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 1), agent(2, 2)],
+            "entering each pane should record its agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_returns_save_jumps() {
+        // Given thread 2 selected.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the jump list is saved.
+        assert!(
+            commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
+            "entering a pane should save the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn re_entering_the_pane_jump_back_landed_in_returns_no_save_jumps() {
+        // Given a jump back from thread 2's pane into thread 1's, then a
+        // click on the sidebar.
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // When handling `<C-S-l>` back into thread 1's pane.
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then the list isn't saved: nothing was recorded.
+        assert!(
+            !commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
+            "re-entering the landed pane records nothing to save"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_records_the_agent() {
+        // Given the sidebar on agent 1's row, with agent 2's pane focused.
+        let mut state = two_agents_from_sidebar(agent(1, 1), &[]);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then agent 1 is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 1)],
+            "⏎ on an agent row should record that agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_card_records_its_focused_agent() {
+        // Given the sidebar on session 1's card, with agent 2's pane focused.
+        let mut state = two_agents_from_sidebar(on_thread(1), &[]);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then agent 2 is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 2)],
+            "⏎ on a card should record the agent in its focused pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_card_with_a_shell_focused_records_the_card() {
+        // Given the sidebar on session 1's card, with shell pane 50 focused.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then session 1's card is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1)],
+            "⏎ on a card with a shell focused should record the card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_the_sidebar_without_a_layout_keeps_the_keys() {
+        // Given thread 1 selected but not attached.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then the sidebar keeps the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "nothing is shown to enter");
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_a_pane_does_nothing() {
+        // Given thread 1's pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Pane, vec![]),
+            "the keys are already in the panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn entering_a_pane_starts_with_no_pane_mode() {
+        // Given resize mode left over with the keys in the sidebar.
+        let mut state = with_layout(Focus::Sidebar);
+        state.pane_mode = Some(PaneMode::Resize);
+
+        // When attaching to the selected session.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the keys arrive in the pane with no mode on.
+        assert_eq!(state.pane_mode(), None, "a pane is entered with no mode");
+    }
+
+    #[rstest::rstest]
+    fn attach_on_an_agent_row_of_a_float_shows_it_on_top() {
+        // Given thread 1's pane turned into a hidden float beside shell pane
+        // 50, the cursor on its agent row in the sidebar.
+        let mut state = split_layout();
+        state.layouts.focus_pane(SessionId(1), PaneId(1));
+        state.layouts.float_pane(SessionId(1));
+        state.layouts.toggle_floats(SessionId(1));
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the floats are shown with thread 1's float on top.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(1)),
+            "Enter on a float's agent row shows the floats with it on top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_hovered_row_makes_its_session_active() {
+        // Given sessions 1 and 2 attached, session 1 active, session 2 hovered.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then session 2 is active.
+        assert_eq!(
+            state.sessions.active(),
+            Some(SessionId(2)),
+            "⏎ should make the hovered session active"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_hovered_row_shows_its_session() {
+        // Given sessions 1 and 2 attached, session 1 active, session 2 hovered.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the right side shows session 2.
+        assert_eq!(
+            state.shown_session(),
+            Some(SessionId(2)),
+            "⏎ should switch the right side to the hovered session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_hovered_row_keeps_the_cursor_on_its_entered_row() {
+        // Given sessions 1 and 2 attached, session 1 active, session 2 hovered.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the cursor is on session 2's entered row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(state.entry_row(SessionId(2))),
+            "⏎ should leave the hover on the entered row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_puts_the_cursor_on_the_active_row() {
+        // Given the keys in active session 2's pane, the cursor on thread 1.
+        let mut state = jumping(Focus::Pane, &[2], &[]);
+        state.sessions.cursor = Some(on_thread(1));
+        let active_row = state.active_row();
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the cursor is on the active row.
+        assert_eq!(
+            state.sessions.cursor, active_row,
+            "leaving a pane should hover the active row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_on_an_unattached_row_enters_the_active_session() {
+        // Given session 1 attached and active, unattached thread 2 hovered.
+        let mut state = left_pane_showing_1(&[1], 2);
+        let active_row = state.active_row();
+
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then the keys are in session 1 with the cursor on its active row.
+        assert_eq!(
+            (state.focus, state.sessions.cursor),
+            (Focus::Pane, active_row),
+            "<C-S-l> should fall back to the active session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_keeps_the_cursor_when_the_active_row_is_filtered_out() {
+        // Given the keys in alpha's thread 11, the sidebar filtered to beta
+        // with the cursor on thread 21.
+        let mut state = two_projects(Some(2), on_thread(21));
+        state
+            .layouts
+            .insert(SessionId(11), SessionLayout::of(test_entry(11)));
+        state.attached.insert(SessionId(11));
+        state.sessions.enter(SessionId(11));
+        state.focus = Focus::Pane;
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the cursor stays on thread 21.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(21)),
+            "a filtered-out active row should not take the hover"
+        );
+    }
+}

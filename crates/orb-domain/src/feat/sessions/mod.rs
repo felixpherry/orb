@@ -12,6 +12,7 @@
 //! cursor on the match or back where it was.
 
 pub mod child_env;
+pub(crate) mod intent;
 pub mod pane_status;
 pub mod sessions_actor;
 pub mod state;

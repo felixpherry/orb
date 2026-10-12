@@ -1,7 +1,7 @@
 //! Ids for tests, each kind in its own range, so a test that mixes up a
 //! thread, a session and a pane id fails instead of passing by accident.
 
-use super::state::{PaneId, SessionId, ThreadId};
+use crate::ids::{PaneId, SessionId, ThreadId};
 
 /// Agent (thread) `n`, for `n < 100`: 100 + n.
 pub(crate) fn agent(n: i64) -> ThreadId {

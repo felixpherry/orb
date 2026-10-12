@@ -175,9 +175,9 @@ mod tests {
     use orb_domain::AppState;
     use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus,
+        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
     };
+    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
 

@@ -7,8 +7,9 @@
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{FolderKind, ProjectKind, SessionId, SidebarItem, folder_slug};
+use crate::feat::sessions::state::{FolderKind, ProjectKind, SidebarItem, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
+use crate::ids::SessionId;
 
 /// Why making a session in a new folder from the name box can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -301,10 +302,11 @@ mod tests {
         validate_toggle_settle, validate_unfold,
     };
     use crate::feat::sessions::state::{
-        FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
-        SidebarItem, Thread, ThreadId, ThreadStatus, layouts_for, sessions_for,
+        FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
+        layouts_for, sessions_for,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use crate::{AppState, TextInput};
 
     #[rstest::rstest]

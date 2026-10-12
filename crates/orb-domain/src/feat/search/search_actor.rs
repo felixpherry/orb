@@ -415,10 +415,10 @@ mod tests {
     use crate::feat::picker::state::PickerState;
     use crate::feat::search::index::SearchIndex;
     use crate::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus, sessions_for,
+        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
     };
     use crate::feat::sessions::transcript::Role;
+    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use crate::{AppState, Focus};
 
     /// A prompt line the user typed.

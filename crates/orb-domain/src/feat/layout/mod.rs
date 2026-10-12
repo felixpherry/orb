@@ -3,6 +3,7 @@
 //! a tab is zoomed onto it, and each session's floating panes over its tabs.
 
 pub mod floats;
+pub(crate) mod intent;
 pub mod state;
 pub mod tree;
 pub mod validator;

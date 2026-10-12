@@ -623,10 +623,10 @@ mod tests {
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{
-        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind,
-        Sessions, Thread, ThreadId, ThreadStatus,
+        PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions, Thread, ThreadStatus,
     };
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
+    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;

@@ -48,6 +48,10 @@ Entries are added or amended **only with human approval**.
 - (identity) A thread is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
+- (arch) The ids of agents, sessions, panes and projects live in one shared module, `orb_domain::ids`.
+- (arch) Each arm of the `IntentHandler`'s match is a one-line call into the owning feature's `intent.rs`; only quitting stays a small function beside the match.
+- (arch) The `SessionsActor`'s methods are split by concern across files under `feat/sessions/sessions_actor/`.
+- (arch) The frontend loop's report handling and its pane lifecycle live in their own files under `crates/orb-tui/src/run/`.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.
 - (arch) While orb waits on a zmx, git or `du` command, it checks whether the command has ended every millisecond for its first 20 ms and every 10 ms after, so one that ends at once holds orb up for only a millisecond or two.
 - (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
@@ -322,7 +326,7 @@ Entries are added or amended **only with human approval**.
 - (store) A database from a newer orb stops orb from starting with `orb's saved data is from a newer orb (version N; this orb knows M).` followed by `Quit, then put back <copy> as <database> to use this orb.` naming the newest copy this orb can open, or `No copy from before that upgrade was found.`; nothing is copied or changed.
 - (store) An orb not run from cargo's bin directory (`$CARGO_HOME/bin`, default `~/.cargo/bin`), such as a build in a worktree's `target/`, does not start on an older database: it shows `this test build won't upgrade orb's saved data from version N to M; start it with --upgrade-data to allow it (a copy is kept first)`, writes it to the log, and leaves the database and its copies untouched; started with `--upgrade-data` it upgrades like the installed orb. It opens a current database and creates a fresh one normally.
 - (repo) Every layout operation that keeps its panes (30 of them, in `tree_operation_loses_no_pane`) has a test that no pane is lost, closing a pane or a tab has a test that only its panes go (`closing_loses_only_the_closed_panes`), and every layout save path (split, stack, float, close, partial load) has a test that every saved pane row is still held by a tab, a float or a tab whose tree didn't read (`layout_save_leaves_every_pane_row_held`).
-- (repo) `just lint` fails when a file's count of `zmx list` call sites differs from the reviewed list (orb-tui's run.rs 4, the sessions actor 2), where each site is noted with why a failed list keeps the panes and the test that guards it.
+- (repo) `just lint` fails when a file's count of `zmx list` call sites differs from the reviewed list (the loop's pane code in run/panes.rs 4, the sessions actor 2: its poll and its kill of settled sessions), where each site is noted with why a failed list keeps the panes and the test that guards it.
 - (pane) A pane that stopped showing after an error and is then closed in its layout has its zmx session killed, like any other closed pane; detaching its session leaves its program running. (Adds to the Phase 3 crash entry.)
 - (panes) Each pane's facts (where it runs, its name, its resume command) are kept once, in its session's layout; panes orb couldn't read at start keep their saved rows until their tab reads again.
 - (panes) A saved pane row that no tab or float held at start, in a session whose tabs all read, is dropped by that session's next layout save, and settling, deleting or moving the session still kills its program.
@@ -343,3 +347,5 @@ Entries are added or amended **only with human approval**.
 - (sessions) A finished restore, move, branch switch to the project's checkout or new session (Research and Learn ones too) opens if the session that was active when it was asked for is still active, even if the cursor moved; opening another session meanwhile cancels it, and a session deleted meanwhile never opens.
 - (tui) When an error and a notice arrive in the same moment, the message box shows the error.
 - (projects) The projects screen re-sorts by recency while it is open.
+- (repo) `just lint` fails when a Rust file's production part (lines before its first `#[cfg(test)]`) passes 2,000 lines, unless the file is on the ratchet list and hasn't grown; test-only files (`tests.rs`, `test_support.rs`) have no production part.
+- (repo) No Rust source file over 2,000 lines keeps its tests inline; they live in a sibling `<file>/tests.rs`.

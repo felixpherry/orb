@@ -76,7 +76,7 @@ pub fn validate_submit_message(state: &AppState) -> Result<(), SubmitMessageErro
 
 - All validators take `&AppState` as input
 - Each fallible intent has a custom error enum describing why it cannot proceed
-- On validation failure, the `IntentHandler` match arm does nothing (no-op)
+- On validation failure, the intent's function does nothing (no-op)
 
 ### Trait Usage
 
@@ -214,7 +214,7 @@ let c = {
   Keymap → Intent
          │
          ▼
-  IntentHandler (sync): validate → mutate AppState → return commands
+  IntentHandler (sync, one match; each arm calls its feature's intent.rs): validate → mutate AppState → return commands
          │
          ▼
   Frontend loop: pane commands run here; each actor's commands → one tell → that actor
@@ -235,11 +235,11 @@ let c = {
 
 **Actors write the `AppState` fields they own, then send a report** (`Outcome`, through their `Reporter`). The reports, terminal input and the pane threads (output, clipboard, exit) all feed one channel (`LoopEvent`). The loop handles everything pending, reconciles the panes against the layouts, then draws one frame. There is no fixed tick: besides that channel, the loop wakes only for a pane's held screen update, a spinner frame, or the message box running out.
 
-**The loop owns every pane's attach client** (`App.panes`). It decides which pane clients close and which reconnect, and kills the pane sessions that left every layout (`reconcile`, `classify_exits`, `reattach_live` in run.rs). Actors change the layouts; the loop makes the panes match. (The sessions actor also kills a session's panes itself when it settles or deletes that session.)
+**The loop owns every pane's attach client** (`App.panes`). It decides which pane clients close and which reconnect, and kills the pane sessions that left every layout (`reconcile`, `classify_exits`, `reattach_live` in run/panes.rs). Actors change the layouts; the loop makes the panes match. (The sessions actor also kills a session's panes itself when it settles or deletes that session.)
 
 **Commands go out, reports come back.** Commands go frontend → actor, one list per actor. Reports come back actor → loop on one channel. Durable facts (sessions, statuses, layouts, worktrees) live in `AppState`, written by their owner; reports say what changed or what the screen should do. Workers never write the picker or the message box.
 
-**One loop function applies the reports** (`apply` and `show` in run.rs). It:
+**One loop function applies the reports** (`apply` and `show` in run/report.rs). It:
 
 - opens a ready session (a new, restored, moved or switched one) while the session active when it was asked for is still active, even if the cursor moved, and once the keys are back in the sidebar;
 - shows an error or a notice in the message box (the same error doesn't pop again until a key or a success, and an error isn't hidden by a notice in the same turn);
@@ -522,7 +522,7 @@ When implementing features, locate each concern by convention rather than hardco
 
 1. **Add Intent variant** — find the `Intent` enum and add a variant.
 2. **Add validator** — co-locate a `validator.rs` in the relevant feature directory. Infallible intents don't need a validator. Fallible ones return `Result<(), SpecificError>`.
-3. **Add handler match arm** — find the `IntentHandler`: call validator (if any), mutate `AppState`, return commands.
+3. **Add handler match arm** — add a function in `feat/<feature>/intent.rs` (validator call, `AppState` change, commands) and a one-line arm calling it.
 4. **Add keymap binding** — bind key to `Intent` variant in the appropriate `Scope`.
 5. **Add Command/Event if needed** — define domain structs alongside the relevant `Command` or `Event` enum. Forgetting the enum variant is the most common oversight — the struct alone is not enough.
 6. **Add domain actor logic if needed** — find the appropriate actor within the relevant feature directory and subscribe to the new command/event.

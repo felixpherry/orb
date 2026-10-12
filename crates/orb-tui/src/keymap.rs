@@ -613,9 +613,9 @@ mod tests {
 
     use crate::test_support::{layouts_for, sessions_for};
     use orb_domain::feat::sessions::state::{
-        FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
-        SidebarItem, Thread, ThreadId, ThreadStatus,
+        FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
     };
+    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
     use orb_domain::{Focus, Intent, PaneMode};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui_which_key::{Key, NodeResult};
