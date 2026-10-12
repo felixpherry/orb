@@ -304,7 +304,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
 - (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-S-l>`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell or the card is folded, and it follows every focus change inside the session.
-- (sidebar) The hovered row has a filled background, and the active row has a blue bar at its left edge and a bold first line.
+- (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
 - (sidebar) Deleting or settling the active session leaves no active session.
 - (layout) When orb can't read its saved layouts at start, or any saved tab's split tree, the message box says `couldn't fully read orb's saved layouts (<reason>); orb keeps what it couldn't read`.

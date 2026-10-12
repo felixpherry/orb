@@ -11,8 +11,8 @@
 //! one row per agent pane hanging one level under that line, with its
 //! status, name or title and harness mark. A card with agent rows ends its
 //! last line with `⌄`, or with `›` while folded and its rows hidden. The
-//! hovered row's first line is highlighted, and the active row (the one the
-//! right side shows) has a blue bar at its left edge and a bold first line.
+//! hovered row's first line is highlighted, and the active row's (the one the
+//! right side shows) title is blue and bold.
 //! Settled sessions fold into a shelf at the bottom, drawn as one-line rows
 //! while it's open. The sidebar scrolls to keep the whole selected row in
 //! view, unless the wheel scrolled it while the keys are elsewhere.
@@ -112,8 +112,7 @@ impl SidebarScroll {
 /// layout, and the search text's cursor while there is a search. An idle
 /// agent of a session in `attached` shows a filled circle; an agent row reads
 /// its pane's name from `layouts` and ends with its harness's mark from
-/// `harnesses`. The active row (`active`) has a blue bar at its left edge
-/// and a bold first line.
+/// `harnesses`. The active row's (`active`) title is blue and bold.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sidebar's inputs plus the scroll and hit map it updates"
@@ -331,20 +330,11 @@ fn render_list(
             let ends_shelf = !placed
                 .get(index + 1)
                 .is_some_and(|(row, _)| matches!(row, SidebarRow::Settled { .. }));
+            let is_active = Some(row.item()) == active;
             render_row(
-                sessions, attached, harnesses, layouts, home, row, ends_shelf, now, row_area,
-                &mut list,
+                sessions, attached, harnesses, layouts, home, row, ends_shelf, is_active, now,
+                row_area, &mut list,
             );
-            if Some(row.item()) == active {
-                list.set_style(
-                    Rect {
-                        height: 1,
-                        ..row_area
-                    },
-                    Style::new().add_modifier(Modifier::BOLD),
-                );
-                list.set_string(row_area.x, row_area.y, ACTIVE_BAR, Style::new().fg(BLUE));
-            }
         }
         list
     };
@@ -435,8 +425,9 @@ fn height(row: &SidebarRow<'_>) -> u16 {
     }
 }
 
-/// One row; `ends_shelf` says no settled session follows it. Titles show
-/// where the search matched them.
+/// One row; `ends_shelf` says no settled session follows it, and `active`
+/// lights a card's or agent row's title. Titles show where the search
+/// matched them.
 #[expect(
     clippy::too_many_arguments,
     reason = "the row plus the frame inputs every node takes"
@@ -449,6 +440,7 @@ fn render_row(
     home: &Path,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
+    active: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -461,6 +453,7 @@ fn render_row(
             attached.contains(&session.id),
             layouts,
             home,
+            active,
             now,
             area,
             buf,
@@ -483,6 +476,7 @@ fn render_row(
                 label,
                 *last,
                 attached.contains(&session.id),
+                active,
                 now,
                 area,
                 buf,
@@ -496,7 +490,8 @@ fn render_row(
 /// project (behind a Research or Learn session's kind icon) and the status
 /// word; the branch, or a Research or Learn session's folder as a `~/…`
 /// path. With agent rows, the last line ends with one status icon per agent
-/// (at most 8, then `+N`) and `⌄` while they show or `›` while folded.
+/// (at most 8, then `+N`) and `⌄` while they show or `›` while folded. The
+/// title is blue and bold while the card is `active`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the card's parts plus the frame inputs every node takes"
@@ -508,6 +503,7 @@ fn render_card(
     attached: bool,
     layouts: &Layouts,
     home: &Path,
+    active: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -528,7 +524,7 @@ fn render_card(
         Line::from(
             [span(format!(" {glyph} "), colour)]
                 .into_iter()
-                .chain(highlight(&title, &matched, |_| FG))
+                .chain(title_spans(&title, &matched, active))
                 .collect::<Vec<_>>(),
         ),
         Line::from(vec![span(format!("{pin} "), ORANGE), span(time, COMMENT)]),
@@ -585,7 +581,8 @@ fn render_card(
 /// An agent pane's row, hanging under its card's last line: the tree guide
 /// (`└╴` on the last),
 /// its status icon (the idle circle filled while `attached`), `label` with
-/// where the search matched it, and its harness mark on the right.
+/// where the search matched it (blue and bold while `active`), and its
+/// harness mark on the right.
 #[expect(
     clippy::too_many_arguments,
     reason = "the row's parts plus the frame inputs every node takes"
@@ -597,6 +594,7 @@ fn render_agent(
     label: &str,
     last: bool,
     attached: bool,
+    active: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -612,7 +610,7 @@ fn render_agent(
         Line::from(
             [span(guide, GUTTER), span(format!("{glyph} "), colour)]
                 .into_iter()
-                .chain(highlight(label, &matched, |_| FG))
+                .chain(title_spans(label, &matched, active))
                 .collect::<Vec<_>>(),
         ),
         Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
@@ -758,6 +756,19 @@ fn when(agent: &Agent, now: SystemTime) -> String {
     match (agent.status, agent.turn_started_at) {
         (AgentStatus::Working, Some(at)) => working_label(since(now, at)),
         _ => ago_label(since(now, agent.last_activity_at)),
+    }
+}
+
+/// A row's title spans, showing where the search `matched` it: blue and bold
+/// while the row is `active`, else in `FG`.
+fn title_spans(text: &str, matched: &[usize], active: bool) -> Vec<Span<'static>> {
+    if active {
+        highlight(text, matched, |_| BLUE)
+            .into_iter()
+            .map(|span| span.patch_style(Style::new().add_modifier(Modifier::BOLD)))
+            .collect()
+    } else {
+        highlight(text, matched, |_| FG)
     }
 }
 
@@ -1006,8 +1017,6 @@ const AGENT_ICONS: usize = 8;
 const FOLD_OPEN: &str = "\u{f47c}";
 /// A folded card (`nf-oct-chevron_right`).
 const FOLD_CLOSED: &str = "\u{f460}";
-/// The active row's bar at its left edge (`▎`, left one-quarter block).
-const ACTIVE_BAR: &str = "\u{258e}";
 /// The tree guide before a node's middle line and a settled row.
 const GUIDE: &str = " ├╴";
 /// The tree guide before a node's last line and the last settled row.

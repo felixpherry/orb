@@ -1985,36 +1985,154 @@ fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
     buf
 }
 
+/// Whether every cell from `xs` on line `y` is drawn in `fg`.
+fn all_fg(buf: &Buffer, xs: std::ops::RangeInclusive<u16>, y: u16, fg: Color) -> bool {
+    xs.into_iter()
+        .all(|x| buf.cell((x, y)).is_some_and(|cell| cell.fg == fg))
+}
+
+/// Whether every cell from `xs` on line `y` is bold.
+fn all_bold(buf: &Buffer, xs: std::ops::RangeInclusive<u16>, y: u16) -> bool {
+    xs.into_iter().all(|x| {
+        buf.cell((x, y))
+            .is_some_and(|cell| cell.modifier.contains(Modifier::BOLD))
+    })
+}
+
 #[rstest::rstest]
-fn active_row_starts_with_a_blue_bar() {
+fn active_agent_row_has_no_bar() {
     // Given the hover on agent 1's card and its agent row active.
     let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw_active(&sessions, agent_one());
 
-    // Then the agent row's first cell is a blue bar.
+    // Then the agent row's first cell is blank.
     assert_eq!(
-        glyph(&buf, 0, 6),
-        Some(("\u{258e}".to_owned(), BLUE)),
-        "active row's first cell"
+        buf.cell((0, 6)).map(Cell::symbol),
+        Some(" "),
+        "active agent row's first cell"
     );
 }
 
 #[rstest::rstest]
-fn active_rows_first_line_is_bold() {
+fn active_card_has_no_bar() {
+    // Given agent 1's card active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, SidebarItem::Session(SessionId(1)));
+
+    // Then the card's first cell is blank.
+    assert_eq!(
+        buf.cell((0, 3)).map(Cell::symbol),
+        Some(" "),
+        "active card's first cell"
+    );
+}
+
+#[rstest::rstest]
+fn active_agent_rows_title_is_blue() {
     // Given the hover on agent 1's card and its agent row active.
     let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw_active(&sessions, agent_one());
 
-    // Then every cell of the agent row's line is bold.
+    // Then the agent row's title is blue.
     assert!(
-        (1..31).all(|x| buf
-            .cell((x, 6))
-            .is_some_and(|cell| cell.modifier.contains(Modifier::BOLD))),
-        "active row's line should be bold"
+        all_fg(&buf, 8..=14, 6, BLUE),
+        "line was '{}'",
+        line(&buf, 6)
+    );
+}
+
+#[rstest::rstest]
+fn active_agent_rows_title_is_bold() {
+    // Given the hover on agent 1's card and its agent row active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, agent_one());
+
+    // Then the agent row's title is bold.
+    assert!(all_bold(&buf, 8..=14, 6), "line was '{}'", line(&buf, 6));
+}
+
+#[rstest::rstest]
+fn active_cards_title_is_blue() {
+    // Given agent 1's card active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, SidebarItem::Session(SessionId(1)));
+
+    // Then the card's title is blue.
+    assert!(all_fg(&buf, 3..=9, 3, BLUE), "line was '{}'", line(&buf, 3));
+}
+
+#[rstest::rstest]
+fn active_cards_title_is_bold() {
+    // Given agent 1's card active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, SidebarItem::Session(SessionId(1)));
+
+    // Then the card's title is bold.
+    assert!(all_bold(&buf, 3..=9, 3), "line was '{}'", line(&buf, 3));
+}
+
+#[rstest::rstest]
+fn active_rows_status_icon_keeps_its_colour() {
+    // Given agent 1's agent row, drawn once active and once with its card
+    // active instead.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+    let resting = draw_active(&sessions, SidebarItem::Session(SessionId(1)));
+
+    // When rendering the sidebar with the agent row active.
+    let buf = draw_active(&sessions, agent_one());
+
+    // Then its status icon keeps the colour and weight it has while resting.
+    assert_eq!(
+        buf.cell((6, 6)).map(|cell| (cell.fg, cell.modifier)),
+        resting.cell((6, 6)).map(|cell| (cell.fg, cell.modifier)),
+        "active row's status icon"
+    );
+}
+
+#[rstest::rstest]
+fn inactive_rows_title_is_fg() {
+    // Given agent 1's card active, not its agent row.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, SidebarItem::Session(SessionId(1)));
+
+    // Then the agent row's title is in the plain colour and not bold.
+    assert!(
+        all_fg(&buf, 8..=14, 6, FG) && !(8..=14).any(|x| all_bold(&buf, x..=x, 6)),
+        "line was '{}'",
+        line(&buf, 6)
+    );
+}
+
+#[rstest::rstest]
+fn search_match_in_the_active_title_stays_blue1() {
+    // Given a search for "gent" and agent 1's agent row active.
+    let sessions = searching(
+        select(sessions(vec![agent(1, AgentStatus::Idle)]), 1),
+        "gent",
+    );
+
+    // When rendering the sidebar.
+    let buf = draw_active(&sessions, agent_one());
+
+    // Then the matched characters of its title keep the search's blue.
+    assert!(
+        all_fg(&buf, 9..=12, 6, BLUE1),
+        "line was '{}'",
+        line(&buf, 6)
     );
 }
 
