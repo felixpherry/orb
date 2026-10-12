@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use ratatui::layout::Rect;
 
 use super::floats::Floats;
-use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
+use super::tree::{
+    Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction, stack_list_rows,
+};
 use crate::feat::sessions::state::{NEW_THREAD, PaneId, SessionId, Thread};
 use crate::feat::zmx::zmx_service::ZmxSession;
 
@@ -109,6 +111,19 @@ impl Tab {
         }
         self.hand_changed = false;
         self.zoomed = false;
+    }
+
+    /// Closes `pane`, leaving any zoom; a tab not changed by hand is re-tiled in
+    /// its swap layout, else the closed pane's neighbour takes its space.
+    /// Whether it closed (a tab's only pane doesn't).
+    fn close_and_retile(&mut self, pane: PaneId) -> bool {
+        let closed = self.tree.close_pane(pane);
+        match (closed, self.hand_changed) {
+            (false, _) => {}
+            (true, true) => self.zoomed = false,
+            (true, false) => self.relayout(None),
+        }
+        closed
     }
 
     /// Adds pane `id`, focused, and shows every pane: an untouched tab
@@ -428,12 +443,15 @@ where
     let stacks = stacks
         .into_iter()
         .map(|stack| {
-            let fits = stack
-                .panes
-                .len()
-                .min(usize::from(stack.area.height / 2))
-                .max(1);
-            let rows = u16::try_from(fits).unwrap_or(u16::MAX);
+            let (rows, start) = stack_list_rows(
+                stack.panes.len(),
+                stack.area.height,
+                stack
+                    .panes
+                    .iter()
+                    .position(|id| *id == stack.expanded)
+                    .unwrap_or_default(),
+            );
             let area = {
                 let width = list_width(&stack.panes)
                     .min(stack.area.width.saturating_sub(4))
@@ -454,16 +472,6 @@ where
                 floating: false,
                 pinned: false,
             });
-            let start = if stack.panes.len() > fits {
-                stack
-                    .panes
-                    .iter()
-                    .position(|id| *id == stack.expanded)
-                    .unwrap_or_default()
-                    .saturating_sub(fits - 1)
-            } else {
-                0
-            };
             let rows = stack
                 .panes
                 .iter()
@@ -742,13 +750,8 @@ impl Layouts {
             return false;
         };
         let pane = tab.tree.focused();
-        if tab.pane_count() < 2 || !tab.tree.close_pane(pane) {
+        if tab.pane_count() < 2 || !tab.close_and_retile(pane) {
             return false;
-        }
-        if tab.hand_changed {
-            tab.zoomed = false;
-        } else {
-            tab.relayout(None);
         }
         layout.floats.add(pane, body);
         true
@@ -801,13 +804,8 @@ impl Layouts {
             return;
         };
         let pane = tab.tree.focused();
-        if tab.tree.pane_ids().len() < 2 || !tab.tree.close_pane(pane) {
+        if tab.tree.pane_ids().len() < 2 || !tab.close_and_retile(pane) {
             return;
-        }
-        if tab.hand_changed {
-            tab.zoomed = false;
-        } else {
-            tab.relayout(None);
         }
         layout.tabs.push(Tab::new(pane));
         layout.active = layout.tabs.len() - 1;
@@ -835,14 +833,10 @@ impl Layouts {
         let Some(index) = layout.tabs.iter().position(|tab| tab.holds(pane)) else {
             return;
         };
-        let emptied = layout.tabs.get_mut(index).is_some_and(|tab| {
-            tab.zoomed = false;
-            let closed = tab.tree.close_pane(pane);
-            if closed && !tab.hand_changed {
-                tab.relayout(None);
-            }
-            !closed
-        });
+        let emptied = layout
+            .tabs
+            .get_mut(index)
+            .is_some_and(|tab| !tab.close_and_retile(pane));
         if emptied {
             layout.remove_tab(index);
         }
@@ -884,7 +878,7 @@ impl Layouts {
         let Some(tab) = layout.tab_mut() else {
             return FocusMove::Stuck;
         };
-        let panes = tab.tree.panes(body);
+        let panes = tab.tree.nav_panes(body);
         let neighbour = panes
             .iter()
             .find(|info| info.is_focused)
@@ -901,7 +895,7 @@ impl Layouts {
         layout.active = target;
         if let Some(tab) = layout.tab_mut()
             && !tab.zoomed
-            && let Some(id) = entry_pane(&tab.tree.panes(body), nav)
+            && let Some(id) = entry_pane(&tab.tree.nav_panes(body), nav)
         {
             tab.tree.focus_pane(id);
         }
@@ -1158,7 +1152,7 @@ mod tests {
     use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::floats::{Float, FloatLayout, FloatRect, Floats};
-    use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
+    use crate::feat::layout::tree::{NavDirection, Node, Split, SwapLayout, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId, Thread, ThreadId, ThreadStatus};
     use crate::feat::sessions::test_ids::{pane, session};
     use std::time::UNIX_EPOCH;
@@ -1472,6 +1466,56 @@ mod tests {
             .map(|stack| stack.shown)
     }
 
+    /// Session 1's one tab, changed by hand: panes 301, 302 and 303 stacked
+    /// on the top half with pane `300 + shown` shown, over pane 304 on the
+    /// bottom half, which has the focus.
+    fn stack_over_pane(shown: i64) -> Layouts {
+        let tree = TileLayout::from_saved(
+            Node::Split {
+                split: Split::Down,
+                ratio: 0.5,
+                first: Box::new(Node::Stack {
+                    panes: vec![pane(1), pane(2), pane(3)],
+                    expanded: pane(shown),
+                }),
+                second: Box::new(Node::Pane(pane(4))),
+            },
+            pane(4),
+        );
+        let mut layouts = Layouts::default();
+        layouts.insert(
+            OWNER,
+            SessionLayout::restore(
+                vec![Tab::restore(None, tree, SwapLayout::Base, true)],
+                0,
+                (1..=4).map(|n| entry(pane(n).0)).collect(),
+                Floats::default(),
+            ),
+        );
+        layouts.fit_to(BODY);
+        layouts
+    }
+
+    #[rstest::rstest]
+    #[case::first(1)]
+    #[case::middle(2)]
+    #[case::last(3)]
+    fn up_from_below_a_stack_lands_on_its_shown_pane(#[case] shown: i64) {
+        // Given panes 301, 302 and 303 stacked over pane 304, pane `300 + shown`
+        // shown and pane 304 focused.
+        let mut layouts = stack_over_pane(shown);
+
+        // When moving the focus up.
+        layouts.move_focus(OWNER, NavDirection::Up);
+
+        // Then the stack's shown pane, drawn right above pane 304, has the focus.
+        assert_eq!(
+            focused(&layouts),
+            Some(pane(shown)),
+            "moving up from below a stack should land on the pane it shows"
+        );
+    }
+
     #[rstest::rstest]
     fn split_in_a_stacked_tab_splits_the_whole_stack() {
         // Given eleven tiled panes, one stack.
@@ -1520,6 +1564,29 @@ mod tests {
             (focused(&layouts), expanded(&layouts)),
             (Some(PaneId(13)), Some(PaneId(13))),
             "the pane below should take the focus and the rows"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::up(NavDirection::Up, 1)]
+    #[case::down(NavDirection::Down, 3)]
+    fn up_and_down_inside_the_focused_stack_step_in_list_order(
+        #[case] nav: NavDirection,
+        #[case] expected: i64,
+    ) {
+        // Given panes 301, 302 and 303 stacked over pane 304, pane 302 shown
+        // and focused.
+        let mut layouts = stack_over_pane(2);
+        layouts.focus_pane(OWNER, pane(2));
+
+        // When moving the focus `nav`.
+        layouts.move_focus(OWNER, nav);
+
+        // Then the stacked pane next to 302 in the list has the focus.
+        assert_eq!(
+            focused(&layouts),
+            Some(pane(expected)),
+            "a move inside the focused stack should step through its list in order"
         );
     }
 

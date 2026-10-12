@@ -254,6 +254,61 @@ impl TileLayout {
         stacks
     }
 
+    /// Where each pane sits for a focus move or a move-mode step in `area`:
+    /// a stack holding the focus keeps its rows in list order, so a move
+    /// inside it steps through the list; every other stack sits as drawn,
+    /// its list rows on top and its shown pane below them.
+    pub fn nav_panes(&self, area: Rect) -> Vec<PaneInfo> {
+        let drawn: Vec<StackInfo> = self
+            .stacks(area)
+            .into_iter()
+            .filter(|stack| !stack.panes.contains(&self.focus))
+            .collect();
+        let mut panes: Vec<PaneInfo> = self
+            .panes(area)
+            .into_iter()
+            .filter(|info| !drawn.iter().any(|stack| stack.panes.contains(&info.id)))
+            .collect();
+        for stack in drawn {
+            let a = stack.area;
+            let at = stack
+                .panes
+                .iter()
+                .position(|id| *id == stack.expanded)
+                .unwrap_or_default();
+            let (rows, start) = stack_list_rows(stack.panes.len(), a.height, at);
+            // ponytail: a list row counts as the stack's full width; the drawn
+            // list is only as wide as its names, which only the frontend knows.
+            // Pass the list width in if a pane overlapping only the stack's
+            // edges must skip the list.
+            panes.extend(
+                stack
+                    .panes
+                    .iter()
+                    .skip(start)
+                    .zip(a.y..a.y.saturating_add(rows))
+                    .map(|(id, y)| PaneInfo {
+                        id: *id,
+                        rect: Rect::new(a.x, y, a.width, 1),
+                        is_focused: false,
+                        collapsed: true,
+                    }),
+            );
+            panes.push(PaneInfo {
+                id: stack.expanded,
+                rect: Rect::new(
+                    a.x,
+                    a.y.saturating_add(rows),
+                    a.width,
+                    a.height.saturating_sub(rows),
+                ),
+                is_focused: false,
+                collapsed: false,
+            });
+        }
+        panes
+    }
+
     /// Every pane id, in tree order.
     pub fn pane_ids(&self) -> Vec<PaneId> {
         let mut ids = Vec::new();
@@ -474,7 +529,7 @@ impl TileLayout {
     /// Move mode's step: swaps the focused pane with the pane `dir` of it,
     /// the one a directional focus move would reach. Whether it moved.
     pub fn swap_toward(&mut self, body: Rect, dir: NavDirection) -> bool {
-        let panes = self.panes(body);
+        let panes = self.nav_panes(body);
         let target = panes
             .iter()
             .find(|info| info.is_focused)
@@ -1091,6 +1146,20 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             }
         }
     }
+}
+
+/// A stack's drawn list for `len` panes in a stack `height` rows tall, the
+/// shown pane at list index `at`: how many rows it takes (at most half the
+/// stack, at least one) and the first pane it lists, scrolled so the shown
+/// pane stays listed.
+pub(super) fn stack_list_rows(len: usize, height: u16, at: usize) -> (u16, usize) {
+    let fits = len.min(usize::from(height / 2)).max(1);
+    let start = if len > fits {
+        at.saturating_sub(fits - 1)
+    } else {
+        0
+    };
+    (u16::try_from(fits).unwrap_or(u16::MAX), start)
 }
 
 fn stacks_in(node: &Node, area: Rect, stacks: &mut Vec<StackInfo>) {
@@ -3114,6 +3183,56 @@ mod tests {
 
         // Then nothing moved.
         assert!(!moved, "a lone pane has nothing to swap with");
+    }
+
+    #[rstest::rstest]
+    fn move_mode_up_from_below_a_stack_swaps_with_its_shown_pane() {
+        // Given panes 1, 2 and 3 stacked over pane 4, pane 2 shown and pane 4
+        // focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Down,
+                0.5,
+                stack_of(&[1, 2, 3], 2),
+                Node::Pane(pane(4)),
+            ),
+            pane(4),
+        );
+
+        // When moving pane 4 up.
+        layout.swap_toward(AREA, NavDirection::Up);
+
+        // Then pane 4 takes the shown pane 2's place in the stack.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(1), pane(4), pane(3)]],
+            "a move up from below a stack should swap with the pane it shows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_mode_up_from_below_a_one_row_stack_swaps_with_its_shown_pane() {
+        // Given panes 1, 2 and 3 stacked in one row over pane 4, pane 2 shown
+        // and pane 4 focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Down,
+                0.25,
+                stack_of(&[1, 2, 3], 2),
+                Node::Pane(pane(4)),
+            ),
+            pane(4),
+        );
+
+        // When moving pane 4 up in a body three rows tall.
+        layout.swap_toward(Rect::new(0, 0, 100, 3), NavDirection::Up);
+
+        // Then pane 4 takes the shown pane 2's place in the stack.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(1), pane(4), pane(3)]],
+            "a one-row stack should still swap with the pane it shows"
+        );
     }
 
     #[rstest::rstest]

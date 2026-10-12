@@ -245,6 +245,9 @@ Entries are added or amended **only with human approval**.
 - (layout) `<C-g> p s` stacks a new pane with the focused one and shows it.
 - (layout) `<C-g> p s` on a pane outside every stack starts a new stack, so a tab can hold several, each with its own list.
 - (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
+- (layout) Moving the focus up into a stack from the pane below it lands on the stack's shown pane, the one drawn touching it.
+- (layout) Inside the focused stack, Cmd j and Cmd k step to the next and previous pane in the stack's list.
+- (layout) Move mode's direction keys swap the focused tiled pane with the pane a focus move that way would reach inside its tab.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane, or its whole stack, and share the space evenly among the panes split in that direction.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
