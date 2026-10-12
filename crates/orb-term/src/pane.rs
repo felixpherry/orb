@@ -19,26 +19,31 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Color;
 use wherror::Error;
 
 use crate::emulator::{Emulator, Notify, lock};
+use crate::graphics::GraphicsFrame;
 
-/// The pane's size in character cells.
+/// The pane's size in character cells, and each cell's size in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneSize {
     /// Width in columns.
     pub cols: u16,
     /// Height in rows.
     pub rows: u16,
+    /// Each cell's pixels.
+    pub cell: CellSize,
 }
 
-impl From<Rect> for PaneSize {
-    /// The size of `area`, at least 2 columns by 1 row so the child always has
-    /// a usable screen.
-    fn from(area: Rect) -> Self {
+impl PaneSize {
+    /// The size of `area`, at least 2 columns by 1 row so the child always
+    /// has a usable screen, with cells of `cell` pixels.
+    pub fn new(area: Rect, cell: CellSize) -> Self {
         Self {
             cols: area.width.max(2),
             rows: area.height.max(1),
+            cell,
         }
     }
 }
@@ -57,6 +62,40 @@ impl Dimensions for PaneSize {
     }
 }
 
+/// One character cell in pixels; zero when the outer terminal doesn't say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CellSize {
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+}
+
+/// Whether the images a pane's child sends can reach the screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GraphicsSupport {
+    /// The outer terminal shows no kitty images: queries get an error, the
+    /// rest is dropped.
+    #[default]
+    None,
+    /// The outer terminal is kitty; `transient` (0.48.0 and later) keeps
+    /// forwarded images in memory only.
+    Kitty { transient: bool },
+}
+
+/// The colours a pane's child is told when it asks. A colour that isn't RGB,
+/// or a palette entry that is `None`, goes unanswered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneColors {
+    /// The colour default text shows in (OSC 10).
+    pub foreground: Color,
+    /// The colour default backgrounds show in (OSC 11).
+    pub background: Color,
+    /// The colours a pane's ANSI colours 0–15 show in (OSC 4); `None` where
+    /// the outer terminal didn't say.
+    pub palette: [Option<Color>; 16],
+}
+
 /// What the pane runs, where, and with which environment.
 #[derive(Debug, Clone)]
 pub struct PaneCommand {
@@ -66,6 +105,11 @@ pub struct PaneCommand {
     pub cwd: PathBuf,
     /// The child's complete environment; nothing is inherited from orb.
     pub env: Vec<(OsString, OsString)>,
+    /// Whether this pane's images reach the outer terminal.
+    pub graphics: GraphicsSupport,
+    /// What the child is told its colours are; `None` leaves colour queries
+    /// unanswered.
+    pub colors: Option<PaneColors>,
 }
 
 /// Something the pane reports to its owner.
@@ -106,6 +150,8 @@ pub struct Pane {
     started: Instant,
     /// Whether the child has printed anything yet.
     spoke: Arc<AtomicBool>,
+    /// The pane's image model's id, read once at spawn.
+    graphics_instance: u64,
 }
 
 impl Pane {
@@ -146,8 +192,16 @@ impl Pane {
         // Our copy of the slave would keep the PTY open after the child exits.
         drop(pair.slave);
         let notify: Notify = Arc::new(notify);
+        let emulator = Emulator::new(
+            size,
+            writer,
+            notify.clone(),
+            command.graphics,
+            command.colors,
+        );
         let pane = Self {
-            emulator: Arc::new(Mutex::new(Emulator::new(size, writer, notify.clone()))),
+            graphics_instance: emulator.graphics_instance(),
+            emulator: Arc::new(Mutex::new(emulator)),
             master: pair.master,
             killer: child.clone_killer(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -166,8 +220,9 @@ impl Pane {
         Ok(pane)
     }
 
-    /// Resizes the screen and tells the child. Does nothing if the size is
-    /// unchanged, so it's cheap to call on every frame.
+    /// Resizes the screen and tells the child, also when only the cells'
+    /// pixels changed. Does nothing if the size is unchanged, so it's cheap
+    /// to call on every frame.
     pub fn resize(&mut self, size: PaneSize) {
         if size == self.size {
             return;
@@ -272,6 +327,44 @@ impl Pane {
     /// is when the child shows it.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         lock(&self.emulator).render(area, buf)
+    }
+
+    /// Draws the child's screen into `area` of `buf` and, under the same
+    /// lock, takes its images for this frame: the bytes waiting for kitty
+    /// and where its placements show. A drawn pane's bytes go out with its
+    /// cells, so a child's frame never reaches kitty half done. Returns
+    /// where the cursor is when the child shows it, and the images.
+    pub fn render_with_graphics(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+    ) -> (Option<Position>, GraphicsFrame) {
+        lock(&self.emulator).render_with_graphics(area, buf)
+    }
+
+    /// Takes the bytes the pane's images have waiting for kitty. A pane
+    /// that isn't drawn hands them over this way, so its images keep
+    /// arriving while hidden.
+    pub fn take_graphics_output(&self) -> Vec<u8> {
+        lock(&self.emulator).take_graphics_output()
+    }
+
+    /// The kitty id of every image the pane holds, for freeing them once
+    /// the pane is gone.
+    pub fn live_images(&self) -> Vec<u32> {
+        lock(&self.emulator).live_images()
+    }
+
+    /// The pane's image model's id, different for every pane ever made.
+    pub fn graphics_instance(&self) -> u64 {
+        self.graphics_instance
+    }
+
+    /// Starts or stops telling the child that images work. Stopped, its
+    /// image questions hear "no graphics" and the images it sends never
+    /// show; the ones it already sent are freed.
+    pub fn answer_graphics(&self, on: bool) {
+        lock(&self.emulator).answer_graphics(on);
     }
 
     /// The cursor style the child asked for.
@@ -401,8 +494,8 @@ fn pty_size(size: PaneSize) -> PtySize {
     PtySize {
         rows: size.rows,
         cols: size.cols,
-        pixel_width: 0,
-        pixel_height: 0,
+        pixel_width: size.cols.saturating_mul(size.cell.width),
+        pixel_height: size.rows.saturating_mul(size.cell.height),
     }
 }
 
@@ -429,10 +522,22 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{Pane, PaneCommand, PaneError, PaneEvent, PaneSize, read_into};
+    use super::{
+        CellSize, GraphicsSupport, Pane, PaneCommand, PaneError, PaneEvent, PaneSize, read_into,
+    };
     use crate::emulator::lock;
 
-    const SIZE: PaneSize = PaneSize { cols: 80, rows: 24 };
+    /// The outer terminal didn't say its cells' pixels.
+    const NO_PIXELS: CellSize = CellSize {
+        width: 0,
+        height: 0,
+    };
+
+    const SIZE: PaneSize = PaneSize {
+        cols: 80,
+        rows: 24,
+        cell: NO_PIXELS,
+    };
 
     /// Runs `argv` in `/` with exactly `env`.
     fn command(argv: &[&str], env: &[(&str, &str)]) -> PaneCommand {
@@ -443,6 +548,8 @@ mod tests {
                 .iter()
                 .map(|(key, value)| (key.into(), value.into()))
                 .collect(),
+            graphics: GraphicsSupport::None,
+            colors: None,
         }
     }
 
@@ -555,6 +662,7 @@ mod tests {
         pane.resize(PaneSize {
             cols: 100,
             rows: 30,
+            cell: NO_PIXELS,
         });
         pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -562,6 +670,44 @@ mod tests {
         assert!(
             wait_until(|| screen(&pane).contains("30 100")),
             "stty should report the new size, got {:?}",
+            screen(&pane)
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn cell_size_change_alone_resizes_the_pty_in_pixels() -> Result<(), Report<PaneError>> {
+        // Given an 80×24 pane with cells of 10×20 pixels whose child prints
+        // the pty's pixel size after a line of input.
+        let command = command(
+            &[
+                "/bin/sh",
+                "-c",
+                "read x; /usr/bin/python3 -c \"import fcntl,struct,termios; \
+                 r,c,w,h=struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8))); \
+                 print(w, h)\"",
+            ],
+            &[],
+        );
+        let cell = CellSize {
+            width: 10,
+            height: 20,
+        };
+        let mut pane = Pane::spawn(&command, PaneSize { cell, ..SIZE }, |_| {})?;
+
+        // When only the cells grow to 12×24 pixels and the user presses
+        // Enter.
+        let cell = CellSize {
+            width: 12,
+            height: 24,
+        };
+        pane.resize(PaneSize { cell, ..SIZE });
+        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Then the child sees 960×576 pixels.
+        assert!(
+            wait_until(|| screen(&pane).contains("960 576")),
+            "the pty should carry the new pixels, got {:?}",
             screen(&pane)
         );
         Ok(())

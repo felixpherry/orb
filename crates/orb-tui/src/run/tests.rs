@@ -40,17 +40,18 @@ use orb_domain::{
     AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter, Services,
     SessionsCommand, State,
 };
-use orb_term::PaneEvent;
+use orb_term::{CellSize, PaneEvent};
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::layout::Rect;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
+use crate::outer_terminal::OuterTerminal;
 use crate::test_support::{FakeZmx, NoGit, layouts_for, pane, session as session_id, sessions_for};
 
 use super::panes::{
     AttachPlan, ExitOutcome, PaneExit, attach_at_start, attach_or_restore, broken_pane_message,
-    classify_exit, clear_detached, closed_in_layouts, exit_outcome, pane_error_after,
+    classify_exit, clear_detached, closed_in_layouts, exit_outcome, holds_agent, pane_error_after,
     present_at_start, reattachable, resume_plan, stale_sessions, to_drop, to_kill, to_spawn,
 };
 use super::report::{StartedAttach, show, started_attach};
@@ -1037,6 +1038,53 @@ fn resume_plan_never_types_a_command_with_a_control_character() {
     );
 }
 
+/// Session 1 with pane 1 bringing back `resume`, and project alpha whose
+/// agent runs in pane 1 when `agent_row`.
+fn pane_1_with(agent_row: bool, resume: Option<&str>) -> AppState {
+    let mut project = project_active_at(1, "alpha", 0);
+    for agent in &mut project.agents {
+        agent.pane = agent_row.then_some(PaneLaunch {
+            pane: PaneId(1),
+            session: SessionId(1),
+        });
+    }
+    let mut layouts = Layouts::default();
+    layouts.insert(
+        SessionId(1),
+        SessionLayout::of(PaneEntry {
+            resume: resume.map(str::to_owned),
+            ..entry(1)
+        }),
+    );
+    AppState {
+        sessions: Sessions {
+            projects: vec![project],
+            ..Sessions::default()
+        },
+        layouts,
+        ..AppState::default()
+    }
+}
+
+#[rstest::rstest]
+#[case::plain_shell(false, None, false)]
+#[case::agent_running(true, None, true)]
+#[case::agent_to_bring_back(false, Some("pi --session-id aa"), true)]
+fn pane_holds_an_agent_when_one_runs_or_comes_back_there(
+    #[case] agent_row: bool,
+    #[case] resume: Option<&str>,
+    #[case] expected: bool,
+) {
+    // Given pane 1 with or without an agent row and a resume command.
+    let state = pane_1_with(agent_row, resume);
+
+    // When asking whether it holds an agent.
+    let held = holds_agent(&state, PaneId(1));
+
+    // Then it does exactly when an agent runs or comes back there.
+    assert_eq!(held, expected, "pane 1 holds an agent");
+}
+
 /// Session 1's pane 1, in `orb-p1` on `/zmx`.
 fn start_pane() -> [(SessionId, ZmxSession); 1] {
     [(
@@ -1398,8 +1446,9 @@ fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Resul
         Log::default(),
         tx,
         TimeZone::UTC,
+        OuterTerminal::default(),
     );
-    app.measure(Rect::new(0, 0, 120, 40));
+    app.measure(Rect::new(0, 0, 120, 40), CellSize::default());
     Ok(LoopTest {
         app,
         state,

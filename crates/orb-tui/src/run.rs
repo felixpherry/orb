@@ -3,7 +3,8 @@
 //! Terminal input, the pane's background threads, and the actors' state
 //! changes all feed one channel. The loop sleeps until something arrives,
 //! handles everything pending, and then draws a single frame, so bursts of
-//! output cost one redraw. The only tick is every spinner frame (100 ms)
+//! output cost one redraw. The panes' kitty images are placed in the same
+//! screen update as the cells. The only tick is every spinner frame (100 ms)
 //! while an agent is working or a session is starting, so the spinners turn
 //! and a working agent's elapsed time counts up.
 //!
@@ -93,7 +94,7 @@ use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::{SoundService, sound_for};
 use orb_domain::feat::picker::state::{PickerKind, worktree_items};
 use orb_domain::feat::search::search_actor::SearchActor;
-use orb_domain::feat::sessions::child_env::pane_env;
+use orb_domain::feat::sessions::child_env::{pane_env, terminal_browser_env};
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
 use orb_domain::feat::sessions::state::Notice;
 use orb_domain::feat::sessions::validator::validate_new_session;
@@ -104,8 +105,8 @@ use orb_domain::ids::{AgentId, PaneId, SessionId};
 use orb_domain::{
     AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, Reporter, SessionsCommand, State,
 };
-use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
-use ratatui::DefaultTerminal;
+use orb_term::{CellSize, GraphicsSupport, Pane, PaneColors, PaneCommand, PaneEvent, PaneSize};
+use ratatui::backend::Backend;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
@@ -114,12 +115,14 @@ use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdat
 use ratatui::layout::{Margin, Position, Rect};
 use wherror::Error;
 
+use crate::graphics::Compositor;
 use crate::keymap::{self, Keys, Route, Scope};
 use crate::mouse::{self, Clicks, HitMap, MouseRoute};
+use crate::outer_terminal::{self, OrbTerminal, OuterTerminal};
 use crate::picker::PickerScroll;
-use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
+use crate::sidebar::{FG, SPINNER_FRAME, SidebarScroll};
 use crate::toast::Toasts;
-use crate::{outer_terminal, render, tabs};
+use crate::{render, tabs};
 
 mod control;
 mod panes;
@@ -188,13 +191,15 @@ impl Frontend {
     /// Session commands go to `sessions`; worktree commands go to
     /// `worktrees`; search commands go to `search`; an agent whose worktree
     /// under `worktrees_root` is gone has it recreated before attaching; the
-    /// branch picker's refs come from `git`; panes run with `env` and attach
+    /// branch picker's refs come from `git`; panes run with `env`, plus
+    /// terminal-browser's settings while orb runs in kitty, and attach
     /// through `zmx`; notices play a sound through `sounds` unless the
     /// user is looking at that agent's finished turn, and are announced
     /// through `notifier` while orb's terminal isn't focused;
     /// problems are written to `log`. The first frame is drawn before the
-    /// panes of open sessions reconnect. The terminal is restored on exit and
-    /// on panic.
+    /// panes of open sessions reconnect. Before anything reads input, the
+    /// outer terminal is asked what it is. The terminal is restored on exit
+    /// and on panic.
     ///
     /// # Errors
     ///
@@ -216,9 +221,14 @@ impl Frontend {
         log: Log,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
-        ratatui::run(|terminal| -> io::Result<()> {
+        outer_terminal::run(|terminal, outer| {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook(log.clone());
+            let env = [
+                env,
+                terminal_browser_env(matches!(outer.graphics, GraphicsSupport::Kitty { .. })),
+            ]
+            .concat();
             let result = App::new(
                 state,
                 sessions,
@@ -235,6 +245,7 @@ impl Frontend {
                 log,
                 tx,
                 tz,
+                outer,
             )
             .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
@@ -349,6 +360,9 @@ struct App {
     tz: TimeZone,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
+    /// One outer cell in pixels, as panes are told; zero when the outer
+    /// terminal doesn't say.
+    cell: CellSize,
     /// The cursor style last sent to the outer terminal.
     cursor_style: SetCursorStyle,
     sidebar_scroll: SidebarScroll,
@@ -362,6 +376,10 @@ struct App {
     focused: bool,
     /// The agent the session picker's preview was last read for, and when.
     last_preview: Option<(AgentId, Instant)>,
+    /// What the outer terminal said at start-up.
+    outer: OuterTerminal,
+    /// Keeps the panes' images on the outer screen in step with each frame.
+    compositor: Compositor,
 }
 
 impl App {
@@ -381,6 +399,7 @@ impl App {
         log: Log,
         tx: Sender<LoopEvent>,
         tz: TimeZone,
+        outer: OuterTerminal,
     ) -> Self {
         let scope = {
             let state = state.read();
@@ -414,6 +433,7 @@ impl App {
             tz,
             tx,
             pane_area: Rect::default(),
+            cell: CellSize::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
             sidebar_scroll: SidebarScroll::default(),
             picker_scroll: PickerScroll::default(),
@@ -421,18 +441,22 @@ impl App {
             clicks: Clicks::default(),
             focused: true,
             last_preview: None,
+            outer,
+            compositor: Compositor::default(),
         }
     }
 
-    fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
+    fn run(mut self, terminal: &mut OrbTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
-        self.measure(terminal.size()?.into());
+        let cell = outer_terminal::cell_size(terminal.backend_mut().window_size().ok());
+        self.measure(terminal.size()?.into(), cell);
         let mut last_cursor = None;
         // The loop's own draw stores the layout this first frame returns.
         self.draw(terminal, &mut last_cursor)?;
         self.reattach_live();
         loop {
-            self.measure(terminal.size()?.into());
+            let cell = outer_terminal::cell_size(terminal.backend_mut().window_size().ok());
+            self.measure(terminal.size()?.into(), cell);
             let placed = {
                 let state = self.state.read();
                 state
@@ -442,7 +466,7 @@ impl App {
             };
             for place in &placed {
                 if let Some(pane) = self.panes.get_mut(&place.pane) {
-                    pane.resize(PaneSize::from(place.content()));
+                    pane.resize(PaneSize::new(place.content(), self.cell));
                 }
             }
             let (sidebar_layout, picker_page) = self.draw(terminal, &mut last_cursor)?;
@@ -522,7 +546,9 @@ impl App {
 
     /// Lays the screen of `size` out: the tab body becomes the pane area,
     /// and the layouts measure their focus moves and resizes against it.
-    fn measure(&mut self, size: Rect) {
+    /// Panes are told their cells are `cell` pixels.
+    fn measure(&mut self, size: Rect, cell: CellSize) {
+        self.cell = cell;
         let [_, right, _] = render::layout(size, &self.state.read().sidebar);
         let [_, body] = tabs::areas(right);
         self.pane_area = body;
@@ -863,18 +889,20 @@ impl App {
         }
     }
 
-    /// Draws one frame. The terminal shows only the finished frame, and a
+    /// Draws one frame. The terminal shows only the finished frame, the
+    /// panes' images placed in the same update as the cells, and a
     /// hidden cursor goes back to `last_cursor`, where it last showed, so it
     /// never visibly moves. Returns the sidebar's layout and the picker's page.
     fn draw(
         &mut self,
-        terminal: &mut DefaultTerminal,
+        terminal: &mut OrbTerminal,
         last_cursor: &mut Option<Position>,
     ) -> io::Result<(Option<SidebarLayout>, Option<usize>)> {
         let now = SystemTime::now();
         let mut drawn = (None, None, None);
         self.sidebar_scroll
             .follow_keys(self.state.read().focus == Focus::Sidebar);
+        let mut images = Vec::new();
         ratatui::crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
         terminal.draw(|frame| {
             let state = self.state.read();
@@ -890,8 +918,11 @@ impl App {
                 &mut self.sidebar_scroll,
                 &mut self.picker_scroll,
                 &mut self.hits,
+                &mut images,
             );
         })?;
+        self.compositor
+            .compose(terminal.backend_mut(), &images, &self.panes)?;
         let (sidebar_layout, picker_page, cursor) = drawn;
         match (cursor, *last_cursor) {
             (Some(_), _) => *last_cursor = cursor,

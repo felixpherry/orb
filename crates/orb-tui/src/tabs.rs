@@ -7,7 +7,9 @@
 //! `>` outside the left bar on the shown one, above the shown pane. Floats
 //! are drawn last, over the tiled panes and stack lists; a pinned float
 //! stays drawn while the floats are hidden. While a float has the keys, the
-//! tab bar names the floats' layout instead of the tab's.
+//! tab bar names the floats' layout instead of the tab's. Each drawn pane's
+//! images are recorded for the compositor, which places them on the outer
+//! screen.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -20,11 +22,13 @@ use orb_domain::ids::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 
+use crate::graphics::DrawnImages;
 use crate::mouse::HitMap;
+use crate::render::IMAGE_HOLE;
 use crate::session_picker::cut_right;
 use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, PIN};
 
@@ -45,8 +49,9 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 /// floats (or only the pinned ones while hidden) over them, each on a cleared
 /// area, a pinned one with a pin at the right of its top border. Records each
 /// pane's screen, and whether its program reads the mouse, and each drawn
-/// float's frame in `hits`. Returns the focused pane's cursor while
-/// `keys_in_pane`.
+/// float's frame in `hits`, and each drawn pane's images in `images`, ranked
+/// by its place in the drawing order. Returns the focused pane's cursor
+/// while `keys_in_pane`.
 pub(crate) fn render(
     state: &AppState,
     layout: &SessionLayout,
@@ -55,13 +60,15 @@ pub(crate) fn render(
     right: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
+    images: &mut Vec<DrawnImages>,
 ) -> Option<Position> {
     let [bar, body] = areas(right);
     tab_bar(state, layout, keys_in_pane, bar, buf, hits);
     let placement = placement(state, layout, body);
     let mut cursor = None;
-    for place in placement.panes.iter().filter(|place| !place.floating) {
-        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
+    let ranked = || placement.panes.iter().enumerate();
+    for (rank, place) in ranked().filter(|(_, place)| !place.floating) {
+        cursor = draw_pane(state, place, rank, panes, keys_in_pane, buf, hits, images).or(cursor);
     }
     for stack in &placement.stacks {
         let lit = keys_in_pane
@@ -77,23 +84,28 @@ pub(crate) fn render(
         stack_list(state, stack, left, lit, buf, hits);
         hits.record_stack(stack.area, stack.panes.clone(), stack.shown);
     }
-    for place in placement.panes.iter().filter(|place| place.floating) {
+    for (rank, place) in ranked().filter(|(_, place)| place.floating) {
         Clear.render(place.area, buf);
         hits.record_float(place.area, place.pane);
-        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
+        cursor = draw_pane(state, place, rank, panes, keys_in_pane, buf, hits, images).or(cursor);
     }
     cursor
 }
 
-/// Draws one placed pane's client (when `panes` has one) inside its frame and
-/// records its screen in `hits`. Returns its cursor while it has the keys.
+/// Draws one placed pane's client (when `panes` has one) inside its frame,
+/// records its screen in `hits` and its images, at `rank`, in `images`, and
+/// marks the cells over its visible images that have no background of their
+/// own as holes the images show through. Returns its cursor while it has the
+/// keys.
 fn draw_pane(
     state: &AppState,
     place: &Placed,
+    rank: usize,
     panes: &HashMap<PaneId, Pane>,
     keys_in_pane: bool,
     buf: &mut Buffer,
     hits: &mut HitMap,
+    images: &mut Vec<DrawnImages>,
 ) -> Option<Position> {
     let lit = place.focused && keys_in_pane;
     let content = place.content();
@@ -102,7 +114,18 @@ fn draw_pane(
     let drawn = panes
         .get(&place.pane)
         .filter(|_| !content.is_empty())
-        .and_then(|pane| pane.render(content, buf));
+        .and_then(|pane| {
+            let (cursor, frame) = pane.render_with_graphics(content, buf);
+            for position in frame.holes.iter().copied().flat_map(Rect::positions) {
+                if let Some(cell) = buf.cell_mut(position)
+                    && cell.bg == Color::Reset
+                {
+                    cell.bg = IMAGE_HOLE;
+                }
+            }
+            images.push((pane.graphics_instance(), rank, frame));
+            cursor
+        });
     let (border, title) = match (lit, place.focused) {
         (true, _) => (BLUE, Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
         (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
@@ -454,6 +477,7 @@ mod tests {
                 right,
                 &mut buf,
                 &mut HitMap::default(),
+                &mut Vec::new(),
             );
             buf
         });
@@ -493,6 +517,7 @@ mod tests {
                 right,
                 &mut buf,
                 &mut HitMap::default(),
+                &mut Vec::new(),
             );
             buf
         });

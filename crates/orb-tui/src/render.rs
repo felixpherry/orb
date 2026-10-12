@@ -14,7 +14,9 @@
 //! shown panes, the pickers' rows and the rename box, so a click maps back
 //! to them.
 //! Whatever is left on the terminal's default background gets orb's navy, so
-//! a transparent terminal doesn't show through.
+//! a transparent terminal doesn't show through, except the cells over a
+//! pane's visible image, which keep the terminal's default background so the
+//! image shows.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -31,6 +33,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Color;
 
 use crate::dashboard;
+use crate::graphics::DrawnImages;
 use crate::keymap::Keys;
 use crate::mode_line;
 use crate::mouse::HitMap;
@@ -46,7 +49,12 @@ use crate::worktree_picker;
 
 /// Behind everything that doesn't set its own background (tokyonight-moon's
 /// `bg`).
-const BACKGROUND: Color = Color::Rgb(0x22, 0x24, 0x36);
+pub(crate) const BACKGROUND: Color = Color::Rgb(0x22, 0x24, 0x36);
+
+/// Marks the cells over a pane's visible image until the final pass gives
+/// them the terminal's default background.
+// ponytail: one reserved RGB marks image holes; a child painting exactly this colour gets the default background there.
+pub(crate) const IMAGE_HOLE: Color = Color::Rgb(0x01, 0x02, 0x03);
 
 /// Splits the screen into `[sidebar, right side, mode line]`, the sidebar
 /// `sidebar.width` columns wide, or none while it's hidden.
@@ -65,11 +73,12 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// side shows the start screen, with `pane_error` saying why the session
 /// couldn't start. While the sidebar has the keys, the cursor sits on the
 /// first cell of its selected row. `toast` shows in the message box, and the
-/// mode line's clock shows `now` in `tz`. Returns the sidebar's layout unless it's hidden, how
+/// mode line's clock shows `now` in `tz`. Each drawn pane's images go into
+/// `images`. Returns the sidebar's layout unless it's hidden, how
 /// many rows the picker fits when it's open, and where the cursor shows, if anywhere.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the frame's inputs, the two frontend view states it updates, and the hit map it fills"
+    reason = "the frame's inputs, the two frontend view states it updates, the hit map it fills, and the frame's pane images"
 )]
 pub(crate) fn render(
     frame: &mut Frame,
@@ -83,6 +92,7 @@ pub(crate) fn render(
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
     hits: &mut HitMap,
+    images: &mut Vec<DrawnImages>,
 ) -> (Option<SidebarLayout>, Option<usize>, Option<Position>) {
     let mut cursor = None;
     let [sidebar_area, right, mode_area] = layout(frame.area(), &state.sidebar);
@@ -116,6 +126,7 @@ pub(crate) fn render(
                 right,
                 frame.buffer_mut(),
                 hits,
+                images,
             ) {
                 cursor = Some(pane_cursor);
             }
@@ -171,9 +182,11 @@ pub(crate) fn render(
         toast::render(toast, right, frame.buffer_mut());
     }
     for cell in &mut frame.buffer_mut().content {
-        if cell.bg == Color::Reset {
-            cell.bg = BACKGROUND;
-        }
+        cell.bg = match cell.bg {
+            Color::Reset => BACKGROUND,
+            IMAGE_HOLE => Color::Reset,
+            other => other,
+        };
     }
     (sidebar_layout, picker_page, cursor)
 }

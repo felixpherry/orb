@@ -2,11 +2,17 @@
 //! the replies it expects.
 //!
 //! Output from the child updates the screen. Queries the child sends (device
-//! attributes, kitty keyboard flags, mode reports) are answered straight back
-//! to the child, and clipboard copies are reported to the caller. A
-//! synchronized update stays hidden until the child ends it or its deadline
-//! passes and the caller flushes it. User input is encoded for the modes the
-//! child currently has on.
+//! attributes, kitty keyboard flags, mode reports, its size and cell size in
+//! pixels, its colours, and the terminal's name, which is orb's own) are
+//! answered straight back to the child, and clipboard copies are reported to
+//! the caller. Size queries go unanswered while the cells' pixels are unknown,
+//! and colour queries while the pane wasn't told its colours. The pane
+//! holds a synchronized update itself, in the order the child wrote it: it
+//! stays hidden until the child ends it, its text passes 2 MiB, or its
+//! deadline passes and the caller flushes it. Kitty graphics commands are
+//! kept out of the screen and handed to the pane's own image model, at the
+//! cursor the text before them left; its answers go straight back to the
+//! child. User input is encoded for the modes the child currently has on.
 //!
 //! The screen keeps a history the wheel scrolls back through, and a text
 //! selection the mouse drags out and copies. Keys and pastes bring the view
@@ -17,20 +23,23 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode, viewport_to_point};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Color;
 
 use crate::encode::{encode_focus, encode_key, encode_mouse, encode_paste};
-use crate::pane::{PaneEvent, PaneSize};
+use crate::graphics::{GraphicsFrame, PaneGraphics};
+use crate::pane::{GraphicsSupport, PaneColors, PaneEvent, PaneSize};
 use crate::render::{cursor_style, render_term};
+use crate::splitter::{Piece, Splitter};
 
 /// Lines of output a pane keeps above its screen.
 const HISTORY: usize = 10_000;
@@ -43,6 +52,17 @@ const MULTI_CLICK: Duration = Duration::from_millis(500);
 const EDGE_SCROLL: Duration = Duration::from_millis(10);
 /// What ends a double-click's word: whitespace and brackets.
 const WORD_ENDS: &str = " \t[]{}<>()";
+/// How long a child's synchronized update is held before it shows anyway.
+const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+/// Held text past this shows at once, torn; graphics commands don't count.
+const SYNC_TEXT_CAP: usize = 2 * 1024 * 1024;
+/// What orb calls itself when a pane's child asks (XTVERSION); never kitty,
+/// so programs keep their generic paths.
+const VERSION_REPLY: &str = concat!("\x1bP>|orb(", env!("CARGO_PKG_VERSION"), ")\x1b\\");
+/// The colour index the child asks for its default text colour (OSC 10).
+const FOREGROUND: usize = NamedColor::Foreground as usize;
+/// The colour index the child asks for its default background (OSC 11).
+const BACKGROUND: usize = NamedColor::Background as usize;
 
 /// Called with everything the pane reports to its owner.
 pub(crate) type Notify = Arc<dyn Fn(PaneEvent) + Send + Sync>;
@@ -55,6 +75,27 @@ type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 struct Listener {
     writer: SharedWriter,
     notify: Notify,
+    /// The pane's current size, which the emulator keeps up to date.
+    size: Arc<Mutex<PaneSize>>,
+    /// What the child is told its colours are.
+    colors: Option<PaneColors>,
+}
+
+impl Listener {
+    /// The colour at `index` the child asked for, when the pane was told it
+    /// as RGB.
+    fn color(&self, index: usize) -> Option<Rgb> {
+        let colors = self.colors?;
+        let color = match index {
+            FOREGROUND => Some(colors.foreground),
+            BACKGROUND => Some(colors.background),
+            index => colors.palette.get(index).copied().flatten(),
+        };
+        match color? {
+            Color::Rgb(r, g, b) => Some(Rgb { r, g, b }),
+            _ => None,
+        }
+    }
 }
 
 impl EventListener for Listener {
@@ -63,6 +104,23 @@ impl EventListener for Listener {
             Event::PtyWrite(reply) => write_to(&self.writer, reply.as_bytes()),
             Event::ClipboardStore(ClipboardType::Clipboard, text) => {
                 (self.notify)(PaneEvent::Clipboard(text));
+            }
+            Event::TextAreaSizeRequest(format) => {
+                let size = *lock(&self.size);
+                if size.cell.width > 0 && size.cell.height > 0 {
+                    let window = WindowSize {
+                        num_lines: size.rows,
+                        num_cols: size.cols,
+                        cell_width: size.cell.width,
+                        cell_height: size.cell.height,
+                    };
+                    write_to(&self.writer, format(window).as_bytes());
+                }
+            }
+            Event::ColorRequest(index, format) => {
+                if let Some(color) = self.color(index) {
+                    write_to(&self.writer, format(color).as_bytes());
+                }
             }
             _ => {}
         }
@@ -74,11 +132,47 @@ pub(crate) struct Emulator {
     term: Term<Listener>,
     parser: Processor,
     writer: SharedWriter,
+    /// The pane's current size, shared with the listener's size answers.
+    size: Arc<Mutex<PaneSize>>,
     /// The last press that started a selection, for counting double and
     /// triple clicks.
     press: Option<Press>,
     /// When dragging past an edge last scrolled the view.
     edge_scrolled: Option<Instant>,
+    /// Picks the sequences the pane handles itself out of the child's output.
+    splitter: Splitter,
+    /// The synchronized update being held, if any.
+    hold: Option<Hold>,
+    /// The child's kitty images.
+    graphics: PaneGraphics,
+}
+
+/// A synchronized update being held: the child's output in order, how much
+/// of it is text, and when it shows anyway.
+struct Hold {
+    pieces: Vec<Piece<'static>>,
+    text_bytes: usize,
+    deadline: Instant,
+}
+
+impl Hold {
+    /// An empty hold that shows at `deadline`.
+    fn new(deadline: Instant) -> Self {
+        Self {
+            pieces: Vec::new(),
+            text_bytes: 0,
+            deadline,
+        }
+    }
+
+    /// Keeps `piece` for later; true once the held text is past the cap.
+    fn keep(&mut self, piece: Piece<'_>) -> bool {
+        if let Piece::Text(text) = &piece {
+            self.text_bytes += text.len();
+        }
+        self.pieces.push(piece.into_owned());
+        self.text_bytes > SYNC_TEXT_CAP
+    }
 }
 
 /// A press that started a selection: its cell, when, and how many quick
@@ -91,8 +185,16 @@ struct Press {
 }
 
 impl Emulator {
-    /// A blank screen of `size` whose replies and input go to `writer`.
-    pub(crate) fn new(size: PaneSize, writer: Box<dyn Write + Send>, notify: Notify) -> Self {
+    /// A blank screen of `size` whose replies and input go to `writer`, with
+    /// images reaching the outer terminal as `graphics` says and colour
+    /// queries answered from `colors`.
+    pub(crate) fn new(
+        size: PaneSize,
+        writer: Box<dyn Write + Send>,
+        notify: Notify,
+        graphics: GraphicsSupport,
+        colors: Option<PaneColors>,
+    ) -> Self {
         let writer: SharedWriter = Arc::new(Mutex::new(writer));
         let config = Config {
             scrolling_history: HISTORY,
@@ -100,39 +202,154 @@ impl Emulator {
             kitty_keyboard: true,
             ..Config::default()
         };
+        let shared_size = Arc::new(Mutex::new(size));
         let listener = Listener {
             writer: writer.clone(),
             notify,
+            size: shared_size.clone(),
+            colors,
         };
         Self {
             term: Term::new(config, &size, listener),
             parser: Processor::new(),
             writer,
+            size: shared_size,
             press: None,
             edge_scrolled: None,
+            splitter: Splitter::default(),
+            hold: None,
+            graphics: PaneGraphics::new(graphics),
         }
     }
 
-    /// Processes output from the child.
+    /// Processes output from the child, holding what comes inside a
+    /// synchronized update until it ends.
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        let now = Instant::now();
+        for piece in self.splitter.split(bytes) {
+            let Some(hold) = &mut self.hold else {
+                self.apply(piece, now);
+                continue;
+            };
+            match piece {
+                Piece::SyncStart => hold.deadline = now + SYNC_TIMEOUT,
+                Piece::SyncEnd => self.release(now),
+                piece => {
+                    if hold.keep(piece) {
+                        self.release(now);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Acts on one piece of the child's output that isn't held.
+    fn apply(&mut self, piece: Piece<'_>, now: Instant) {
+        match piece {
+            // ponytail: a switch is seen only when one run of text ends on
+            // the other screen; leaving and re-entering within one run keeps
+            // the alternate screen's images until the next switch.
+            Piece::Text(text) => {
+                let alt = self.alt_screen();
+                self.parser.advance(&mut self.term, &text);
+                if self.alt_screen() != alt {
+                    self.graphics.switched_screen();
+                }
+            }
+            Piece::SyncStart => self.hold = Some(Hold::new(now + SYNC_TIMEOUT)),
+            // Ends an update the parser started from a combined form
+            // (`CSI ? 2026 ; 1049 h`), which reaches it unchanged.
+            Piece::SyncEnd => {
+                if self.parser.sync_timeout().sync_timeout().is_some() {
+                    self.parser.stop_sync(&mut self.term);
+                }
+            }
+            Piece::Graphics(body) => {
+                let cursor = self.term.grid().cursor.point;
+                let column = u16::try_from(cursor.column.0).unwrap_or(u16::MAX);
+                let mut replies = Vec::new();
+                self.graphics.command(
+                    &body,
+                    cursor.line.0,
+                    column,
+                    self.alt_screen(),
+                    &mut replies,
+                );
+                self.write(&replies);
+            }
+            Piece::ClearedScreen => self.graphics.cleared_screen(self.alt_screen()),
+            Piece::Reset => self.graphics.reset(),
+            Piece::CellSizeQuery => {
+                let cell = lock(&self.size).cell;
+                if cell.width > 0 && cell.height > 0 {
+                    self.write(format!("\x1b[6;{};{}t", cell.height, cell.width).as_bytes());
+                }
+            }
+            Piece::VersionQuery => self.write(VERSION_REPLY.as_bytes()),
+        }
+    }
+
+    /// Whether the child is on its alternate screen.
+    fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Takes the bytes the pane's images have waiting for the outer
+    /// terminal.
+    pub(crate) fn take_graphics_output(&mut self) -> Vec<u8> {
+        self.graphics.take_out()
+    }
+
+    /// The outer id of every image the pane holds.
+    pub(crate) fn live_images(&self) -> Vec<u32> {
+        self.graphics.live_images()
+    }
+
+    /// The pane's image model's id, different for every pane ever made.
+    pub(crate) fn graphics_instance(&self) -> u64 {
+        self.graphics.instance()
+    }
+
+    /// Starts or stops telling the child that images work (see
+    /// [`PaneGraphics::answer`]).
+    pub(crate) fn answer_graphics(&mut self, on: bool) {
+        self.graphics.answer(on);
+    }
+
+    /// Shows the held synchronized update, in the order the child wrote it.
+    fn release(&mut self, now: Instant) {
+        for piece in self.hold.take().map(|hold| hold.pieces).unwrap_or_default() {
+            self.apply(piece, now);
+        }
     }
 
     /// Reflows the screen to `size`.
     pub(crate) fn resize(&mut self, size: PaneSize) {
+        *lock(&self.size) = size;
         self.term.resize(size);
     }
 
     /// When the pending synchronized update must be shown even if the child
     /// never ends it; `None` when no update is pending.
     pub(crate) fn sync_deadline(&self) -> Option<Instant> {
-        self.parser.sync_timeout().sync_timeout()
+        let held = self.hold.as_ref().map(|hold| hold.deadline);
+        held.into_iter()
+            .chain(self.parser.sync_timeout().sync_timeout())
+            .min()
     }
 
     /// Shows the pending synchronized update if its deadline is at or before
     /// `now`.
     pub(crate) fn flush_expired_sync(&mut self, now: Instant) {
-        if self.sync_deadline().is_some_and(|deadline| deadline <= now) {
+        if self.hold.as_ref().is_some_and(|hold| hold.deadline <= now) {
+            self.release(now);
+        }
+        if self
+            .parser
+            .sync_timeout()
+            .sync_timeout()
+            .is_some_and(|deadline| deadline <= now)
+        {
             self.parser.stop_sync(&mut self.term);
         }
     }
@@ -193,7 +410,7 @@ impl Emulator {
         };
         if self.reads_mouse() {
             self.mouse(event, area);
-        } else if self.term.mode().contains(TermMode::ALT_SCREEN) {
+        } else if self.alt_screen() {
             let code = if up { KeyCode::Up } else { KeyCode::Down };
             let arrow = KeyEvent::new(code, KeyModifiers::NONE);
             for _ in 0..WHEEL_LINES {
@@ -311,6 +528,24 @@ impl Emulator {
         render_term(&self.term, area, buf)
     }
 
+    /// Draws the screen into `area` of `buf` and takes the pane's images
+    /// for it: the bytes waiting for kitty and where its placements show,
+    /// at the cell size the child was told. Returns the visible cursor's
+    /// position and the images.
+    pub(crate) fn render_with_graphics(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+    ) -> (Option<Position>, GraphicsFrame) {
+        let cursor = render_term(&self.term, area, buf);
+        let cell = lock(&self.size).cell;
+        let alt = self.alt_screen();
+        let frame = self
+            .graphics
+            .frame(area, cell, self.term.grid().display_offset(), alt);
+        (cursor, frame)
+    }
+
     /// The cursor style the child asked for.
     pub(crate) fn cursor_style(&self) -> SetCursorStyle {
         cursor_style(&self.term)
@@ -345,10 +580,10 @@ mod tests {
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::{Position, Rect};
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     use super::{Emulator, lock};
-    use crate::pane::{PaneEvent, PaneSize};
+    use crate::pane::{CellSize, GraphicsSupport, PaneColors, PaneEvent, PaneSize};
 
     /// An in-memory child input that tests can read back.
     #[derive(Clone, Default)]
@@ -373,15 +608,62 @@ mod tests {
 
     /// A 20×5 emulator, what it wrote to the child, and what it reported.
     fn emulator() -> (Emulator, SharedBuf, Arc<Mutex<Vec<PaneEvent>>>) {
+        emulator_in(GraphicsSupport::None, CellSize::default(), None)
+    }
+
+    /// A 20×5 emulator with cells of 10×20 pixels in a kitty that keeps
+    /// images in memory only, and what it wrote to the child.
+    fn kitty_emulator() -> (Emulator, SharedBuf) {
+        let cell = CellSize {
+            width: 10,
+            height: 20,
+        };
+        let (emulator, input, _) =
+            emulator_in(GraphicsSupport::Kitty { transient: true }, cell, None);
+        (emulator, input)
+    }
+
+    /// A 20×5 emulator told [`colors`], and what it wrote to the child.
+    fn colored_emulator() -> (Emulator, SharedBuf) {
+        let (emulator, input, _) =
+            emulator_in(GraphicsSupport::None, CellSize::default(), Some(colors()));
+        (emulator, input)
+    }
+
+    /// Test colours: palette entry 1 unknown, 15 apart from the rest.
+    fn colors() -> PaneColors {
+        PaneColors {
+            foreground: Color::Rgb(0xc8, 0xd3, 0xf5),
+            background: Color::Rgb(0x22, 0x24, 0x36),
+            palette: std::array::from_fn(|index| match index {
+                1 => None,
+                15 => Some(Color::Rgb(0xff, 0xee, 0xdd)),
+                _ => Some(Color::Rgb(0x11, 0x22, 0x33)),
+            }),
+        }
+    }
+
+    /// A 20×5 emulator with cells of `cell` pixels whose images reach the
+    /// outer terminal as `graphics` says and that was told `colors`, what it
+    /// wrote to the child, and what it reported.
+    fn emulator_in(
+        graphics: GraphicsSupport,
+        cell: CellSize,
+        colors: Option<PaneColors>,
+    ) -> (Emulator, SharedBuf, Arc<Mutex<Vec<PaneEvent>>>) {
         let input = SharedBuf::default();
         let events = Arc::new(Mutex::new(Vec::new()));
         let notify = {
             let events = events.clone();
             Arc::new(move |event| lock(&events).push(event))
         };
-        let size = PaneSize { cols: 20, rows: 5 };
+        let size = PaneSize {
+            cols: 20,
+            rows: 5,
+            cell,
+        };
         (
-            Emulator::new(size, Box::new(input.clone()), notify),
+            Emulator::new(size, Box::new(input.clone()), notify, graphics, colors),
             input,
             events,
         )
@@ -399,6 +681,21 @@ mod tests {
         let mut buf = Buffer::empty(AREA);
         emulator.render(AREA, &mut buf);
         buf
+    }
+
+    /// An image of 10×20 pixels the child sends and places at its cursor.
+    const PLACED_IMAGE: &[u8] = b"\x1b_Ga=T,f=32,s=10,v=20,t=s,i=1,p=1,C=1,q=2;bmFtZQ==\x1b\\";
+
+    /// The emulator drawn into [`AREA`] with its images: the first row's
+    /// symbols without trailing blanks, and how many placements show.
+    fn shown(emulator: &mut Emulator) -> (String, usize) {
+        let mut buf = Buffer::empty(AREA);
+        let (_, frame) = emulator.render_with_graphics(AREA, &mut buf);
+        let row: String = (0..AREA.width)
+            .filter_map(|x| buf.cell((x, 0)))
+            .map(Cell::symbol)
+            .collect();
+        (row.trim_end().to_owned(), frame.visible.len())
     }
 
     /// The symbols of the emulator's row `y`, concatenated, without
@@ -560,6 +857,72 @@ mod tests {
         assert!(
             first_row(&emulator).contains("hi"),
             "an expired synchronized update should be shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn synchronized_text_shows_once_the_update_ends() {
+        // Given a synchronized update holding text.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b[?2026hhi");
+
+        // When the child ends the update.
+        emulator.feed(b"\x1b[?2026l");
+
+        // Then the text is on screen.
+        assert!(
+            first_row(&emulator).contains("hi"),
+            "an ended synchronized update should be shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn nested_sync_start_moves_the_deadline() {
+        // Given a synchronized update started a moment ago.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b[?2026h");
+        let first = emulator.sync_deadline();
+        std::thread::sleep(Duration::from_millis(5));
+
+        // When the child starts another one inside it.
+        emulator.feed(b"\x1b[?2026h");
+
+        // Then the update shows later than first planned.
+        assert!(
+            emulator.sync_deadline() > first,
+            "a nested start should move the deadline on"
+        );
+    }
+
+    #[rstest::rstest]
+    fn held_text_past_two_mib_shows_without_the_end() {
+        // Given a synchronized update holding text.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b[?2026hhi");
+
+        // When more than 2 MiB of further text arrives without an end.
+        emulator.feed(&vec![b'\r'; 2 * 1024 * 1024]);
+
+        // Then the text is on screen.
+        assert!(
+            first_row(&emulator).contains("hi"),
+            "an oversized synchronized update should be shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn combined_sync_start_ends_on_the_plain_end() {
+        // Given a synchronized update started together with another mode.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b[?7;2026hhi");
+
+        // When the child ends it with the plain end.
+        emulator.feed(b"\x1b[?2026l");
+
+        // Then the text is on screen.
+        assert!(
+            first_row(&emulator).contains("hi"),
+            "the plain end should end a combined start"
         );
     }
 
@@ -911,5 +1274,410 @@ mod tests {
 
         // Then the blank rows below it are gone.
         assert_eq!(text, "hi", "trailing blanks are dropped");
+    }
+
+    #[rstest::rstest]
+    fn direct_graphics_query_is_answered_ok() {
+        // Given a pane in kitty.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When the child asks whether direct images work.
+        emulator.feed(b"\x1b_Ga=q,t=d,i=7,s=1,v=1,f=24;AAAA\x1b\\");
+
+        // Then it hears OK.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b_Gi=7;OK\x1b\\",
+            "graphics query reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn graphics_query_for_other_media_gets_an_error() {
+        // Given a pane in kitty.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When the child asks whether shared-memory images work.
+        emulator.feed(b"\x1b_Ga=q,t=s,i=7,s=1,v=1,f=24;bmFtZQ==\x1b\\");
+
+        // Then it hears an error.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b_Gi=7;EINVAL:orb answers only direct queries\x1b\\",
+            "shared-memory query reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn graphics_query_without_kitty_gets_an_error() {
+        // Given a pane whose outer terminal shows no images.
+        let (mut emulator, input, _) = emulator();
+
+        // When the child asks whether direct images work.
+        emulator.feed(b"\x1b_Ga=q,t=d,i=7,s=1,v=1,f=24;AAAA\x1b\\");
+
+        // Then it hears an error.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b_Gi=7;EINVAL:no graphics\x1b\\",
+            "graphics query reply without kitty"
+        );
+    }
+
+    #[rstest::rstest]
+    fn graphics_query_is_refused_while_answers_are_off() {
+        // Given a pane in kitty that stopped answering image questions.
+        let (mut emulator, input) = kitty_emulator();
+        emulator.answer_graphics(false);
+
+        // When the child asks whether direct images work.
+        emulator.feed(b"\x1b_Ga=q,t=d,i=7,s=1,v=1,f=24;AAAA\x1b\\");
+
+        // Then it hears that there are no graphics.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b_Gi=7;EINVAL:no graphics\x1b\\",
+            "graphics query reply while answers are off"
+        );
+    }
+
+    #[rstest::rstest]
+    fn transmit_is_dropped_while_answers_are_off() {
+        // Given a pane in kitty that stopped answering image questions.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.answer_graphics(false);
+
+        // When the child sends and places an image.
+        emulator.feed(PLACED_IMAGE);
+
+        // Then nothing waits for kitty.
+        assert_eq!(
+            String::from_utf8_lossy(&emulator.take_graphics_output()),
+            "",
+            "an image sent while answers are off stays out of kitty"
+        );
+    }
+
+    #[rstest::rstest]
+    fn transmit_that_asked_gets_an_ok_reply() {
+        // Given a pane in kitty.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When the child transmits image 5 without silencing replies.
+        emulator.feed(b"\x1b_Ga=t,f=24,s=1,v=1,i=5;AAAA\x1b\\");
+
+        // Then it hears OK for image 5.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b_Gi=5;OK\x1b\\",
+            "transmit reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leaving_the_alternate_screen_frees_its_images() {
+        // Given a child that sent an image on the alternate screen.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[?1049h\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAAA\x1b\\");
+
+        // When it leaves the alternate screen.
+        emulator.feed(b"\x1b[?1049l");
+
+        // Then the pane holds no images.
+        assert!(
+            emulator.live_images().is_empty(),
+            "alternate-screen images should be freed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn clearing_the_screen_frees_its_images() {
+        // Given a child that placed an image on the main screen.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b_Ga=T,f=24,s=1,v=1,i=1,q=2;AAAA\x1b\\");
+
+        // When it clears the screen.
+        emulator.feed(b"\x1b[2J");
+
+        // Then the pane holds no images.
+        assert!(
+            emulator.live_images().is_empty(),
+            "a cleared screen's images should be freed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reset_frees_every_image() {
+        // Given a child that sent an image.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAAA\x1b\\");
+
+        // When it resets the terminal.
+        emulator.feed(b"\x1bc");
+
+        // Then the pane holds no images.
+        assert!(
+            emulator.live_images().is_empty(),
+            "a reset should free every image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn text_area_size_query_is_answered_in_pixels() {
+        // Given a 20×5 pane with cells of 10×20 pixels.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When the child asks for its size in pixels.
+        emulator.feed(b"\x1b[14t");
+
+        // Then it hears 100 pixels high by 200 wide.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[4;100;200t",
+            "text area size reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn text_area_size_follows_a_resize() {
+        // Given a 20×5 pane with cells of 10×20 pixels.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When it is resized to 30×6 and the child asks for its size in
+        // pixels.
+        emulator.resize(PaneSize {
+            cols: 30,
+            rows: 6,
+            cell: CellSize {
+                width: 10,
+                height: 20,
+            },
+        });
+        emulator.feed(b"\x1b[14t");
+
+        // Then it hears the new size: 120 pixels high by 300 wide.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[4;120;300t",
+            "text area size reply after a resize"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cell_size_query_is_answered() {
+        // Given a pane with cells of 10×20 pixels.
+        let (mut emulator, input) = kitty_emulator();
+
+        // When the child asks for its cell size.
+        emulator.feed(b"\x1b[16t");
+
+        // Then it hears 20 pixels high by 10 wide.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            "\x1b[6;20;10t",
+            "cell size reply"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::text_area(b"\x1b[14t")]
+    #[case::cell(b"\x1b[16t")]
+    fn size_queries_wait_without_a_cell_size(#[case] query: &[u8]) {
+        // Given a pane whose cells' pixels are unknown.
+        let (mut emulator, input, _) = emulator();
+
+        // When the child asks for a size in pixels.
+        emulator.feed(query);
+
+        // Then it hears nothing.
+        assert!(
+            input.contents().is_empty(),
+            "a size query without a cell size gets no reply"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::foreground("10", "rgb:c8c8/d3d3/f5f5")]
+    #[case::background("11", "rgb:2222/2424/3636")]
+    fn default_colour_query_is_answered(#[case] code: &str, #[case] color: &str) {
+        // Given a pane told its colours.
+        let (mut emulator, input) = colored_emulator();
+
+        // When the child asks for a default colour.
+        emulator.feed(format!("\x1b]{code};?\x07").as_bytes());
+
+        // Then it hears that colour.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            format!("\x1b]{code};{color}\x07"),
+            "default colour reply"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::first(0, "rgb:1111/2222/3333")]
+    #[case::last(15, "rgb:ffff/eeee/dddd")]
+    fn palette_colour_query_is_answered(#[case] index: usize, #[case] color: &str) {
+        // Given a pane told its palette.
+        let (mut emulator, input) = colored_emulator();
+
+        // When the child asks for a palette colour.
+        emulator.feed(format!("\x1b]4;{index};?\x1b\\").as_bytes());
+
+        // Then it hears that colour.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            format!("\x1b]4;{index};{color}\x1b\\"),
+            "palette colour reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unanswered_palette_colour_gets_no_reply() {
+        // Given a pane whose palette colour 1 is unknown.
+        let (mut emulator, input) = colored_emulator();
+
+        // When the child asks for palette colour 1.
+        emulator.feed(b"\x1b]4;1;?\x1b\\");
+
+        // Then it hears nothing.
+        assert!(
+            input.contents().is_empty(),
+            "an unknown palette colour gets no reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn version_query_is_answered_with_orbs_own_name() {
+        // Given a fresh emulator.
+        let (mut emulator, input, _) = emulator();
+
+        // When the child asks for the terminal's name and version.
+        emulator.feed(b"\x1b[>0q");
+
+        // Then it hears orb's own name and version.
+        assert_eq!(
+            String::from_utf8_lossy(&input.contents()),
+            concat!("\x1bP>|orb(", env!("CARGO_PKG_VERSION"), ")\x1b\\"),
+            "version reply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn graphics_command_lands_at_the_cursor_cell() {
+        // Given a 120×40 pane in kitty drawn five columns and three rows in.
+        let (mut emulator, _) = kitty_emulator();
+        let cell = CellSize {
+            width: 10,
+            height: 20,
+        };
+        emulator.resize(PaneSize {
+            cols: 120,
+            rows: 40,
+            cell,
+        });
+        let area = Rect::new(5, 3, 120, 40);
+
+        // When the child moves to row 35, column 101 and places an image.
+        emulator.feed(b"\x1b[35;101H");
+        emulator.feed(PLACED_IMAGE);
+
+        // Then the image shows at that cell of the outer screen.
+        let mut buf = Buffer::empty(area);
+        let (_, frame) = emulator.render_with_graphics(area, &mut buf);
+        let at: Vec<_> = frame.visible.iter().map(|visible| visible.at).collect();
+        assert_eq!(at, vec![Position::new(105, 37)], "the image's outer cell");
+    }
+
+    #[rstest::rstest]
+    fn held_update_shows_no_new_text_or_image() {
+        // Given a pane in kitty.
+        let (mut emulator, _) = kitty_emulator();
+
+        // When the child starts a synchronized update, writes text and
+        // places an image.
+        emulator.feed(b"\x1b[?2026hhi");
+        emulator.feed(PLACED_IMAGE);
+
+        // Then neither the text nor the image shows.
+        assert_eq!(
+            shown(&mut emulator),
+            (String::new(), 0),
+            "a held update shows nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ended_update_shows_text_and_image_together() {
+        // Given a synchronized update holding text and an image.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[?2026hhi");
+        emulator.feed(PLACED_IMAGE);
+
+        // When the child ends the update.
+        emulator.feed(b"\x1b[?2026l");
+
+        // Then one draw shows both.
+        assert_eq!(
+            shown(&mut emulator),
+            ("hi".to_owned(), 1),
+            "an ended update shows its text and image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn expired_update_shows_text_and_image() {
+        // Given a synchronized update holding text and an image that the
+        // child never ends.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[?2026hhi");
+        emulator.feed(PLACED_IMAGE);
+
+        // When flushing well after its deadline.
+        emulator.flush_expired_sync(Instant::now() + Duration::from_secs(1));
+
+        // Then one draw shows both.
+        assert_eq!(
+            shown(&mut emulator),
+            ("hi".to_owned(), 1),
+            "an expired update shows its text and image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn render_drains_the_queued_output() {
+        // Given a pane in kitty whose child sent an image.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(PLACED_IMAGE);
+
+        // When drawing the pane.
+        let mut buf = Buffer::empty(AREA);
+        let (_, frame) = emulator.render_with_graphics(AREA, &mut buf);
+
+        // Then the draw carries the transmit and leaves nothing behind.
+        assert_eq!(
+            (frame.out.is_empty(), emulator.take_graphics_output()),
+            (false, Vec::new()),
+            "the draw takes the waiting bytes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hidden_pane_hands_over_queued_output() {
+        // Given a pane in kitty whose child sent an image.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(PLACED_IMAGE);
+
+        // When taking its waiting bytes twice, as for a pane not drawn.
+        let first = emulator.take_graphics_output();
+        let second = emulator.take_graphics_output();
+
+        // Then the transmit comes out once.
+        assert!(
+            first.windows(8).any(|bytes| bytes == b"bmFtZQ==") && second.is_empty(),
+            "first {:?}, second {:?}",
+            String::from_utf8_lossy(&first),
+            String::from_utf8_lossy(&second)
+        );
     }
 }

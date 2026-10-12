@@ -66,10 +66,11 @@ impl App {
             .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no live pane"))
     }
 
-    /// Types `line` as a run does, unless a line already waits in pane `id`
-    /// (a restored agent's resume command): then `pane_busy`.
+    /// Types `line`, an agent's start line, as a run does, unless a line
+    /// already waits in pane `id` (a restored agent's resume command): then
+    /// `pane_busy`. From then on the pane tells its child images don't work.
     fn launch(&mut self, id: PaneId, line: String) -> PaneReply {
-        self.live_pane(id)?;
+        self.live_pane(id)?.answer_graphics(false);
         if self.typing.contains_key(&id) {
             return Err(ApiError::new(
                 ErrorCode::PaneBusy,

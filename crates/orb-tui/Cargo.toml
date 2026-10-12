@@ -15,6 +15,7 @@ base64 = { workspace = true }
 kameo = { workspace = true }
 ratatui-which-key = { workspace = true }
 unicode-segmentation = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

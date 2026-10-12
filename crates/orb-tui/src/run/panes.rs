@@ -24,6 +24,17 @@ pub(super) fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan
     }
 }
 
+/// Whether pane `id` holds an agent: one runs there, or the pane brings one
+/// back. Such a pane tells its child images don't work, so agents look as
+/// they always did.
+pub(super) fn holds_agent(state: &AppState, id: PaneId) -> bool {
+    state.sessions.agent_in(id).is_some()
+        || state
+            .layouts
+            .entry(id)
+            .is_some_and(|entry| entry.resume.is_some())
+}
+
 /// Each pane of an unsettled session, with its owner and zmx session: what
 /// start-up attaches again when zmx still runs it.
 pub(super) fn reattachable(state: &AppState) -> Vec<(SessionId, ZmxSession)> {
@@ -360,8 +371,10 @@ impl App {
     /// within [`EARLY_EXIT`] of starting leaves `session <title> exited at
     /// start` on the start screen, and that line in the log. Every pane of an attached session gets a client;
     /// when one can't start, its session leaves `attached` and `couldn't
-    /// start zmx attach` shows on the start screen. If the keys were in a
-    /// pane and no layout is shown any more, they go to the sidebar.
+    /// start zmx attach` shows on the start screen. A pane holding an agent
+    /// (see [`holds_agent`]) stops answering image questions before the
+    /// agent's resume command is typed. If the keys were in a pane and no
+    /// layout is shown any more, they go to the sidebar.
     pub(super) fn reconcile(&mut self) {
         let ended = self.classify_exits();
         let (keep, all, edited, titles) = {
@@ -456,9 +469,23 @@ impl App {
                 }
             }
         }
+        self.quiet_agent_panes();
         let mut app = self.state.write();
         if app.focus == Focus::Pane && app.shown_layout().is_none() {
             app.focus = after_pane(app.focus);
+        }
+    }
+
+    /// Stops every pane holding an agent (see [`holds_agent`]) from
+    /// answering image questions.
+    // ponytail: stays off for the pane's life once it held an agent; turn it
+    // back on when its agent goes if a browser in such a pane matters.
+    fn quiet_agent_panes(&self) {
+        let app = self.state.read();
+        for (id, pane) in &self.panes {
+            if holds_agent(&app, *id) {
+                pane.answer_graphics(false);
+            }
         }
     }
 
@@ -597,6 +624,12 @@ impl App {
             argv: (self.attach)(session),
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
+            graphics: self.outer.graphics,
+            colors: Some(PaneColors {
+                foreground: self.outer.foreground.unwrap_or(FG),
+                background: render::BACKGROUND,
+                palette: self.outer.palette,
+            }),
         };
         let area = {
             let state = self.state.read();
@@ -612,7 +645,7 @@ impl App {
                     place.content()
                 })
         };
-        Pane::spawn(&command, PaneSize::from(area), move |event| {
+        Pane::spawn(&command, PaneSize::new(area, self.cell), move |event| {
             let _ = tx.send(LoopEvent::Pane(id, event));
         })
         .inspect_err(|report| {

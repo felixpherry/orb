@@ -52,7 +52,7 @@
 ### Claude's own keys (avoid collisions)
 - Option/Alt: `Alt+B/F/D/Y` (word nav/delete/paste-cycle), `Option+P` model, `Option+T` thinking, `Option+O` fast mode, `Alt+M`/`Alt+V` (Windows). `Ctrl+W` delete-back-to-whitespace. `Shift+Tab` cycle permission modes. `Ctrl+O` transcript. `Esc` interrupt / vim NORMAL. `←` on empty prompt → agent view. **[docs: code.claude.com/docs/en/interactive-mode]**
 - Vim editor mode: `/config` → Editor mode, or `"editorMode": "vim"` in settings; `vimInsertModeRemaps` e.g. `{"jj": "<Esc>"}`. The user's settings already contain `editorMode`. **[docs/verified]**
-- Claude probes kitty graphics (plain `claude`) and has `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`; unanswered probes fall back, so orb's emulator needs no graphics support. **[verified: probe + bundle]**
+- Claude probes kitty graphics (plain `claude`) and has `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`; unanswered probes fall back~~, so orb's emulator needs no graphics support~~. **[verified: probe + bundle]** *Since terminal-browser support (2026-10-12) orb answers the graphics query and XTVERSION. Claude still draws no images in orb's panes: it trusts the graphics reply only when XTVERSION names kitty or ghostty (§23).*
 
 ## 2. Transcript JSONL — `~/.claude/projects/<escaped-cwd>/<sessionId>.jsonl`
 
@@ -147,7 +147,7 @@ Tags: **probe** = PTY byte capture on this machine · **bundle** = read from Cla
 
 ### Plain `claude`
 - Round 1: `CSI > 0 q`, `CSI ? u`, DA1. **[verified: probe]**
-- Round 2 runs only if XTVERSION was answered and `TERM_PROGRAM` isn't `Apple_Terminal`: `CSI ? 2026 $ p`, a kitty graphics query (`ESC _ G i=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`), `CSI 16 t`, `CSI ? 1016 $ p`, DA1. **[verified: probe + bundle]**
+- Round 2 runs only if XTVERSION was answered and `TERM_PROGRAM` isn't `Apple_Terminal`: `CSI ? 2026 $ p`, a kitty graphics query (`ESC _ G i=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`), `CSI 16 t`, `CSI ? 1016 $ p`, DA1. **[verified: probe + bundle]** *Since terminal-browser support (2026-10-12) orb answers XTVERSION, so Claude runs round 2 in orb's panes (§23).*
 - Each round waits up to 2000 ms for the DA1 sentinel. **[verified: bundle]**
 - It sends the kitty push after a `CSI ? 0 u` reply. **[verified: probe]**
 
@@ -1020,3 +1020,70 @@ Vertical: columns left to right, panes per column. Horizontal: rows top to botto
 - A marked tab re-applies its layout on the first `Cmd ]`/`Cmd [` and steps on the second.
 - Marked `Cmd n`: zellij's thresholds with ratio 2 (kitty's 8×16-style cells). It halves only the focused pane, with no even spread over the run.
 - A 1-pane tab has no swap layout name in zellij's tab bar.
+
+## 23. terminal-browser in panes (verified 2026-10-12, terminal-browser 0.13.4, kitty 0.48.2, Claude Code 2.1.296, pi 1.0.0)
+
+Sources: the kitty graphics spec (https://sw.kovidgoyal.net/kitty/graphics-protocol/) and kitty's source at tag v0.48.2 (github.com/kovidgoyal/kitty); terminal-browser's source (github.com/zenbu-labs/terminal-browser, and the source maps in the installed `~/.local/share/terminal-browser/app`); byte captures from a pty harness that answered like kitty 0.48.2 (120×40 cells, 12×24 px cells), and the same harness answering like orb. Tags as in §6.
+
+### Presenter and env **[source: terminal-browser `pixel/engine/crates/pixel-core/src/terminal/present/mod.rs` `select()`, `shared/config/settings.ts`]**
+- terminal-browser reads `TERMINAL_BROWSER_PRESENT` (`auto`, `full`, `patched`, `animation`) and `TERMINAL_BROWSER_FRAMES` (`auto`, `shared`, `file`, `inline`).
+- A forced `patched` picks the patched presenter whatever terminal it thinks it is in, except under tmux. A forced `shared` skips the shared-memory and file probes.
+- Left on `auto`, the replies decide, not the env. With no answer to its shared-memory and file probes it sends whole zlib frames inline, about 27 fps and a first frame about 1.1 s late. **[verified]**
+- Behind orb's answers with both forced, every run sent patched shared-memory frames: all ~500 transmits `t=s`, about 70% of them patches. **[verified]**
+- Each image is a new POSIX shared-memory object. kitty `shm_unlink`s every `t=s` object it reads, whoever sent the command (kitty `graphics.c:597`), so the child's names can go straight to the outer kitty. **[source]**
+
+### Frames **[verified]**
+- Every frame is one synchronized update (`CSI ? 2026 h … l`) of 1 to about 58 commands. Each image is a cursor move, then `a=T,…,t=s,C=1,X=,Y=,z=…,q=2`, with sub-cell offsets `X`/`Y`.
+- Layers: a base image `i=1,z=0` over the whole pane, about 24 tiles of 256×256 (`i=100000…`, `z=1`), and patches with recycled ids 2 to ~100, `p=1` and a climbing z (seen up to 3531). A patch is retired with `a=d,d=I`.
+- A full redraw (after a resize, or when ids or budget run out) sends `d=I` for every id, `d=A`, `CSI 2J`, spaces over every row, then the base and tiles again.
+- Rates in bare kitty: about 110 fps on a CSS animation at about 361 bytes of escapes per frame; about 105 fps while wheel scrolling, about 450 MB/s of pixels through shared memory; up to about 121 images held at once (45–64 MB).
+
+### `N=1` transient hint **[source: kitty v0.48.2 `docs/changelog.rst`, `kitty/disk-cache.c`; terminal-browser `present/mod.rs` `transient_images()`]**
+- kitty added `N=1` in 0.48.0 ("Graphics protocol: Add a new transient usage hint", PR #10092). Such an image stays in memory. Without it kitty copies every frame to a disk cache from a background thread, XOR-scrambled on macOS.
+- terminal-browser adds `N=1` only when XTVERSION says kitty 0.48.0 or later. Behind orb it never sees that name, so orb adds `N=1` itself when the outer kitty is 0.48.0 or later. **[verified: no `N=1` in any run without a kitty XTVERSION answer]**
+
+### Draw order **[source: kitty v0.48.2 `kitty/shaders.c` `draw_cells_with_layers`, `kitty/graphics.c` `grman_update_layers`]**
+- kitty draws: default cell background → images with z below −1,073,741,824 (`INT32_MIN/2`) → non-default cell backgrounds → images with negative z → text → images with z ≥ 0. Equal z: the lower internal image id first.
+- So an image in the lowest band shows only where cells keep the default background; any cell with its own background covers it.
+- kitty clips a placement only to its window. A source rect (`x,y,w,h`) crops it. Placing the same image and placement id again moves it in place, without flicker.
+
+### What frees images **[source: kitty v0.48.2 `kitty/screen.c`, `kitty/graphics.c` `grman_clear`, `handle_delete_command`; spec]**
+- `CSI 2J` and `CSI 3J` take every placement off the screen (3J: scrollback too) and free every image left without one, including images only transmitted. RIS clears both screens.
+- `CSI J` (erase below), `CSI 1J`, `CSI K`, IL and DL leave placements alone. Spec: "other commands to erase text must have no effect on graphics".
+- ratatui's resize clear is `CSI 2J` (ratatui-core 0.1.2 `resize.rs`, `buffers.rs` `clear_viewport`; crossterm `ClearType::All`), so a plain ratatui resize frees every forwarded image.
+- A lowercase delete (`d=i`) keeps the image data; an uppercase one (`d=I`) frees an image left without placements. The main and alternate screens hold separate images, and entering `?1049` clears the alternate set. The storage cap is 320 MB per screen.
+
+### Replies and `q=2` **[source: kitty v0.48.2 `graphics.c` `finish_command_response`; crossterm 0.29 `src/event/sys/unix/parse.rs`]**
+- kitty replies only to a command with `i` or `I`. `q=1` drops the OK, `q=2` drops every reply, and `a=d` never replies.
+- Replies go to kitty's child, which is orb's stdin. crossterm reads `ESC _` as Alt+`_` and every byte after it as a key. So every command orb forwards carries `q=2`, and orb answers a pane's graphics query itself.
+
+### Chunks stay together **[source: kitty v0.48.2 `graphics.c` `handle_add_command`; spec]**
+- kitty has one load slot per screen. Any `t=d` command that arrives during a chunked upload counts as its next chunk, and any `a=d` aborts it. Spec: "The client must finish sending all chunks for a single image before sending any other graphics related escape codes".
+- Re-sending an existing id drops its placements at the first chunk; the new placement comes after the last.
+- So orb forwards a pane's chunked upload only once it is complete, as one contiguous run.
+
+### alacritty_terminal 0.26 and vte 0.15 **[source]**
+- vte drops APC strings (`lib.rs:182`, `377`), so graphics commands never reach the emulator.
+- While `?2026` is set, vte buffers raw bytes until `?2026l`, 150 ms or 2 MiB (`ansi.rs:36-39`, `298-420`), and has no APC callback. So orb cuts graphics and `?2026` out of a pane's output before vte and holds the frame itself.
+- `CSI 16 t` and XTVERSION are not handled; `CSI 14 t` and OSC 10/11/4 need caller replies (§6).
+
+### Start-up stalls **[verified: harness answering like orb, 2026-10-12]**
+terminal-browser's engine probes `?1049h ?25l ?1003h ?1006h ?1016h ?1004h ?2004h ?2048h >1u ?u ?1016$p`, then `?5522$p >0q ?2031$p`, OSC 10, OSC 11, OSC 4;0–15, `16t <u >27u`, then sends the first frame.
+
+| Answers given | First frame | Runs |
+|---|---|---|
+| No XTVERSION, no OSC 4 | 0.218–0.225 s | 5 |
+| XTVERSION as kitty, no OSC 4 | 0.065–0.067 s | 4 |
+| OSC 4 only | 0.156–0.158 s | 4 |
+| XTVERSION as kitty + OSC 4 (bare kitty) | 0.005–0.006 s | 4 |
+| XTVERSION as `orb(0.1.0)`, no OSC 4 | 0.066 s | 3 |
+| XTVERSION as `orb(0.1.0)` + OSC 4 | 0.004–0.005 s | 3 |
+
+- An unanswered XTVERSION costs a fixed 151 ms before the engine's next write; an unanswered OSC 4, a fixed 61 ms before `CSI 16 t`. Unanswered `?2048`, `?5522` and `?2031` cost nothing.
+- Any XTVERSION name ends the stall; it doesn't have to be kitty.
+- The pane's `terminal-browser open` first sends a direct graphics query (`i=4207,a=q,t=d`) plus DA1 and waits up to 500 ms for `OK`, then asks `CSI 14 t`, also up to 500 ms. **[source: `pixel/terminal/graphics.js:17-29`]** With shared frames forced, that is the only graphics query.
+
+### Agents **[verified: a pty answering like orb in kitty, and orb's build under a fake kitty]**
+- Claude 2.1.296: with XTVERSION answered it runs round 2 (§6), and its graphics query gets `OK`, but it still draws no images. It trusts the reply only when XTVERSION names kitty or ghostty; its debug line reads `kittyGraphics=no (probe: graphics reply OK, terminal orb(0.1.0))`. Its bytes and pane text are otherwise unchanged.
+- pi 1.0.0 decides on images from the env: `TERM_PROGRAM=WezTerm` means kitty images. It sends `a=T,f=100,C=1,c=60,r=15` (chunked) for every image, plus `a=d,d=A` at start and exit, whatever the terminal answers. Forwarded, those images show in its pane.
+- The colour answers changed nothing on pi's start screen.

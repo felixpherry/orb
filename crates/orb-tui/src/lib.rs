@@ -2,6 +2,7 @@
 //! terminal pane, and draws [`AppState`](orb_domain::AppState).
 
 mod dashboard;
+mod graphics;
 mod keymap;
 mod mode_line;
 mod mouse;

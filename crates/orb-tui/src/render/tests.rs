@@ -20,7 +20,7 @@ use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
 use orb_domain::feat::zmx::zmx_service::ZmxSession;
 use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
 use orb_domain::{AppState, Focus, PaneMode, TextInput};
-use orb_term::{Pane, PaneCommand, PaneSize};
+use orb_term::{CellSize, GraphicsSupport, Pane, PaneCommand, PaneSize};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
@@ -35,6 +35,7 @@ use crate::keymap::{Keys, LEADER, Scope, keymap, press};
 use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::SidebarScroll;
+use crate::toast::{Toast, ToastKind};
 
 /// `sessions` with the sessions its projects' agents run in.
 fn fill(sessions: Sessions) -> Sessions {
@@ -123,6 +124,7 @@ fn frame(
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
     terminal
@@ -138,8 +140,15 @@ fn pane_with_text() -> Option<Pane> {
         ],
         cwd: "/".into(),
         env: vec![("PATH".into(), "/bin:/usr/bin".into())],
+        graphics: GraphicsSupport::None,
+        colors: None,
     };
-    let pane = Pane::spawn(&command, PaneSize { cols: 48, rows: 7 }, |_| {}).ok()?;
+    let size = PaneSize {
+        cols: 48,
+        rows: 7,
+        cell: CellSize::default(),
+    };
+    let pane = Pane::spawn(&command, size, |_| {}).ok()?;
     let area = Rect::new(0, 0, 48, 7);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -147,6 +156,43 @@ fn pane_with_text() -> Option<Pane> {
         pane.render(area, &mut buffer);
         if text(&buffer, area).contains("PANE-TEXT") {
             return Some(pane);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+/// Agent 1's pane: a live pane in kitty with 10x20 pixel cells that showed
+/// an image covering its whole 48x7 screen, then printed `PANE-TEXT`.
+fn image_pane() -> Option<HashMap<PaneId, Pane>> {
+    let command = PaneCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            r"printf '\033_Ga=T,f=32,s=480,v=140,t=s,i=1,C=1,q=2;AAAA\033\\'; printf PANE-TEXT; sleep 5"
+                .into(),
+        ],
+        cwd: "/".into(),
+        env: vec![("PATH".into(), "/bin:/usr/bin".into())],
+        graphics: GraphicsSupport::Kitty { transient: true },
+        colors: None,
+    };
+    let size = PaneSize {
+        cols: 48,
+        rows: 7,
+        cell: CellSize {
+            width: 10,
+            height: 20,
+        },
+    };
+    let pane = Pane::spawn(&command, size, |_| {}).ok()?;
+    let area = Rect::new(0, 0, 48, 7);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let mut buffer = Buffer::empty(area);
+        pane.render(area, &mut buffer);
+        if text(&buffer, area).contains("PANE-TEXT") {
+            return Some(HashMap::from([(PaneId(1), pane)]));
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -168,6 +214,16 @@ fn right_side_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Stri
 
 /// Draws `state` on an 80x8 screen with `panes` running.
 fn draw_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Buffer {
+    draw_with_pane_and_toast(state, panes, None)
+}
+
+/// Draws `state` on an 80x8 screen with `panes` running and `toast` in the
+/// message box.
+fn draw_with_pane_and_toast(
+    state: &AppState,
+    panes: &HashMap<PaneId, Pane>,
+    toast: Option<&Toast>,
+) -> Buffer {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
     let keys = Keys::new(keymap(), Scope::Sidebar);
     let Ok(_) = terminal.draw(|frame| {
@@ -176,13 +232,14 @@ fn draw_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Buffer {
             state,
             panes,
             None,
-            None,
+            toast,
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
     terminal.backend().buffer().clone()
@@ -401,6 +458,7 @@ fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
                 &mut hits,
+                &mut Vec::new(),
             );
         });
         terminal.backend().buffer().clone()
@@ -504,6 +562,51 @@ fn attached_pane_default_background_gets_orbs() {
     assert_eq!(bg, Some(BACKGROUND), "the pane's background");
 }
 
+#[rstest::rstest]
+fn image_hole_cells_get_the_default_background() {
+    // Given a live pane showing an image over its whole screen.
+    let panes = image_pane();
+    let state = shown(Focus::Pane);
+
+    // When drawing a frame while attached.
+    let buffer = panes.as_ref().map(|panes| draw_with_pane(&state, panes));
+
+    // Then a cell inside the pane's content keeps the terminal's default
+    // background, so the image shows through it.
+    let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &SidebarView::default());
+    let bg = buffer.and_then(|buffer| buffer.cell((right.x + 2, right.y + 3)).map(|cell| cell.bg));
+    assert_eq!(bg, Some(Color::Reset), "the background over the image");
+}
+
+#[rstest::rstest]
+fn overlay_over_an_image_keeps_its_background() {
+    // Given a live pane showing an image over its whole screen, and a
+    // message over the pane.
+    let panes = image_pane();
+    let state = shown(Focus::Pane);
+    let toast = Toast::new(
+        ToastKind::Info,
+        "COVER",
+        Instant::now() + Duration::from_secs(5),
+    );
+
+    // When drawing a frame while attached.
+    let buffer = panes
+        .as_ref()
+        .map(|panes| draw_with_pane_and_toast(&state, panes, Some(&toast)));
+
+    // Then the message's cells over the image keep a background of their
+    // own, so the message covers the image.
+    let bg = buffer.and_then(|buffer| {
+        let at = find(&buffer, "COVER")?;
+        buffer.cell(at).map(|cell| cell.bg)
+    });
+    assert!(
+        bg.is_some_and(|bg| bg != Color::Reset),
+        "the message's background over the image was {bg:?}"
+    );
+}
+
 /// Agent 1 selected, with the rename box open on it holding "Fix" and
 /// the keys in `focus`.
 fn renaming(focus: Focus) -> AppState {
@@ -572,6 +675,7 @@ fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
 
@@ -605,6 +709,7 @@ fn leader_popup_sits_above_the_mode_line() {
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
 
@@ -715,6 +820,7 @@ fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
     terminal
@@ -1620,6 +1726,7 @@ fn draw_hits(state: &AppState) -> (Buffer, HitMap) {
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut hits,
+            &mut Vec::new(),
         );
     });
     (terminal.backend().buffer().clone(), hits)
@@ -1826,6 +1933,7 @@ fn hidden_sidebar_returns_no_layout() {
             &mut SidebarScroll::default(),
             &mut PickerScroll::default(),
             &mut HitMap::default(),
+            &mut Vec::new(),
         );
     });
 

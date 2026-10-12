@@ -178,6 +178,7 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 - A pane closes when its program exits, a tab closes with its last pane, and a session whose last pane closes gets a new shell tab in its directory in its place, with the keys in it, and stays where it was in the sidebar.
 - Each pane keeps 10 000 lines of history, from what orb saw after it attached (zmx sends the screen on reattach, not the history). The wheel over a pane goes to its program while it tracks the mouse, sends arrow keys on the alternate screen, and otherwise scrolls the history.
 - Copy on select follows zellij: a left drag in a pane whose program doesn't track the mouse selects text, and the release copies it through OSC 52. A double-click selects a word, a triple-click a line, and dragging past the top or bottom edge scrolls. A press on another pane starts a selection only when its program doesn't track the mouse; otherwise it only focuses.
+- Browser panes: while orb runs in kitty, `terminal-browser open <url>` in any pane draws the page the way it does in bare kitty, through shared memory. Its images follow the pane when it moves, resizes or splits, stay inside it, go away when it closes or is hidden, and come back at once when it shows again. orb's own UI (sidebar, pickers, toasts, which-key, floats) stays on top of the page. Panes holding an agent don't show images, so Claude and pi look as before (decisions: Kitty graphics in panes).
 
 ### Agents controlling orb
 

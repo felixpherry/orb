@@ -14,7 +14,13 @@
 
 mod emulator;
 mod encode;
+mod graphics;
 mod pane;
 mod render;
+mod splitter;
 
-pub use pane::{PANE_READER_THREAD, Pane, PaneCommand, PaneError, PaneEvent, PaneSize};
+pub use graphics::{GraphicsFrame, Visible};
+pub use pane::{
+    CellSize, GraphicsSupport, PANE_READER_THREAD, Pane, PaneColors, PaneCommand, PaneError,
+    PaneEvent, PaneSize,
+};

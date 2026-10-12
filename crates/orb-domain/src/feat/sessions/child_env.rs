@@ -14,6 +14,10 @@
 //! variables go too: with `ZMX_SESSION` set, `zmx attach` switches the
 //! enclosing session's client and exits, so an orb started inside a pane
 //! could never attach its own.
+//!
+//! While orb runs in kitty, pane programs also get terminal-browser's own
+//! settings for its fast path: whole frames patched in place through shared
+//! memory. They steer terminal-browser only.
 
 use std::ffi::OsString;
 
@@ -99,6 +103,20 @@ pub fn pane_env(env: &[(OsString, OsString)], pane: PaneId) -> Vec<(OsString, Os
         .collect()
 }
 
+/// The settings that put terminal-browser on its fast path (patched frames
+/// through shared memory) while orb shows kitty images; none otherwise.
+pub fn terminal_browser_env(kitty_images: bool) -> Vec<(OsString, OsString)> {
+    if !kitty_images {
+        return Vec::new();
+    }
+    [
+        ("TERMINAL_BROWSER_PRESENT", "patched"),
+        ("TERMINAL_BROWSER_FRAMES", "shared"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()))
+    .into()
+}
+
 fn is_scrubbed(key: &str) -> bool {
     key == ORB_PANE_ID
         || SESSION_VARS.contains(&key)
@@ -113,7 +131,7 @@ fn is_scrubbed(key: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{ORB_PANE_ID, child_env, pane_env};
+    use super::{ORB_PANE_ID, child_env, pane_env, terminal_browser_env};
     use crate::ids::PaneId;
 
     fn env_of(vars: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -261,6 +279,39 @@ mod tests {
         assert!(
             values_of(&env, ORB_PANE_ID).is_empty(),
             "an inherited ORB_PANE_ID should be removed"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case("TERMINAL_BROWSER_PRESENT", "patched")]
+    #[case("TERMINAL_BROWSER_FRAMES", "shared")]
+    fn terminal_browser_vars_are_set_with_kitty_images(#[case] key: &str, #[case] value: &str) {
+        // Given orb shows kitty images.
+        let kitty_images = true;
+
+        // When building terminal-browser's settings.
+        let env = terminal_browser_env(kitty_images);
+
+        // Then the setting is there, once.
+        assert_eq!(
+            values_of(&env, key),
+            [&OsString::from(value)],
+            "{key} should be set once to {value}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn terminal_browser_vars_are_absent_without_kitty_images() {
+        // Given orb shows no kitty images.
+        let kitty_images = false;
+
+        // When building terminal-browser's settings.
+        let env = terminal_browser_env(kitty_images);
+
+        // Then there are none.
+        assert!(
+            env.is_empty(),
+            "no terminal-browser settings without kitty images"
         );
     }
 }
