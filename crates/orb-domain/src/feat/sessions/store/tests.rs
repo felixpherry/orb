@@ -37,6 +37,7 @@ fn insert_agent(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<S
         Path::new("/tmp/orb"),
         None,
         None,
+        None,
         1_000,
     )?;
     store.save_layout(
@@ -587,6 +588,7 @@ const LIVE_SCHEMA: &[(&str, &[&str])] = &[
             "active_tab",
             "float_layout",
             "floats_hand_changed",
+            "parent_id",
         ],
     ),
     ("sqlite_sequence", &["name", "seq"]),
@@ -747,7 +749,10 @@ fn live_values(path: &Path) -> Result<Vec<Vec<String>>, Report<StoreError>> {
                     last_activity_at, last_visited_at, ai_titled, model, renamed_title, harness,
                     pane_id, orb_session_id
              FROM threads ORDER BY id",
-        "SELECT 'sessions', * FROM sessions ORDER BY id",
+        "SELECT 'sessions', id, project_id, kind, dir, name, branch, created_at, pinned_at,
+                    settled_override, settled_at, unsettled_at, last_activity_at,
+                    last_visited_at, active_tab, float_layout, floats_hand_changed
+             FROM sessions ORDER BY id",
         "SELECT 'tabs', * FROM tabs ORDER BY id",
         "SELECT 'panes', id, session_id, cwd, zmx_name, zmx_dir, resume, name
              FROM panes ORDER BY id",
@@ -829,11 +834,11 @@ fn upgrading_a_v13_database_gives_it_the_live_schema() -> Result<(), Report<Stor
     // When opening the store.
     drop(Store::open(&path)?);
 
-    // Then it's at version 14 with exactly the live tables and columns.
+    // Then it's at the latest version with exactly the live tables and columns.
     assert_eq!(
         (user_version(&path)?, schema(&path)?),
-        (14, live_schema()),
-        "the upgrade should reach version 14 and drop every leftover table and column"
+        (MIGRATIONS.len(), live_schema()),
+        "the upgrade should reach the latest version and drop every leftover table and column"
     );
     Ok(())
 }
@@ -852,6 +857,7 @@ fn upgrading_a_v13_database_keeps_new_pane_ids_above_old_ones() -> Result<(), Re
         Path::new("/work/orb"),
         None,
         None,
+        None,
         2_000,
     )?;
 
@@ -860,6 +866,67 @@ fn upgrading_a_v13_database_keeps_new_pane_ids_above_old_ones() -> Result<(), Re
         pane.0 > 150,
         "a pane made after the upgrade should get an id above 150, got {}",
         pane.0
+    );
+    Ok(())
+}
+
+/// A v14 database at `path` with one project and four sessions: 1 plain,
+/// 2 research, 3 learn, 4 incognito.
+fn v14_database(path: &Path) -> Result<(), Report<StoreError>> {
+    database_at(path, 14)?;
+    Connection::open(path)
+        .and_then(|conn| {
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/work/orb', 'orb', 100);
+                 INSERT INTO sessions (id, project_id, kind, dir, created_at)
+                 VALUES (1, 1, 'plain', '/work/orb', 1000),
+                        (2, 1, 'research', '/r/papers', 1100),
+                        (3, 1, 'learn', '/l/rust', 1200),
+                        (4, 1, 'incognito', '/tmp/orb-incognito', 1300);",
+            )
+        })
+        .change_context(StoreError)
+}
+
+#[rstest::rstest]
+fn upgrading_a_v14_database_makes_research_and_learn_sessions_colonies()
+-> Result<(), Report<StoreError>> {
+    // Given a v14 database with a plain, a research, a learn and an incognito session.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    v14_database(&path)?;
+
+    // When opening the store.
+    drop(Store::open(&path)?);
+
+    // Then all four sessions are kept, and the research and learn ones are colonies.
+    assert_eq!(
+        rows(&path, "SELECT id, kind FROM sessions ORDER BY id")?,
+        [(1, "plain"), (2, "colony"), (3, "colony"), (4, "incognito")]
+            .map(|(id, kind)| vec![format!("Integer({id})"), format!("Text({kind:?})")]),
+        "the upgrade should keep every session and turn Research and Learn into colonies"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn upgrading_a_v14_database_leaves_every_session_top_level() -> Result<(), Report<StoreError>> {
+    // Given a v14 database with four sessions.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    v14_database(&path)?;
+
+    // When opening the store.
+    drop(Store::open(&path)?);
+
+    // Then no session has a parent.
+    assert_eq!(
+        value::<i64>(
+            &path,
+            "SELECT COUNT(*) FROM sessions WHERE parent_id IS NOT NULL"
+        )?,
+        0,
+        "upgraded sessions should all be top level"
     );
     Ok(())
 }
@@ -1021,6 +1088,110 @@ fn incognito_project_kind_loads_back() -> Result<(), Report<StoreError>> {
         kinds,
         vec![ProjectKind::Incognito],
         "an Incognito project should load back as Incognito"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::shared(ProjectKind::SharedWorld)]
+#[case::fresh(ProjectKind::FreshWorld)]
+fn world_project_kinds_load_back(#[case] kind: ProjectKind) -> Result<(), Report<StoreError>> {
+    // Given a store with a world of `kind`.
+    let store = Store::open_in_memory()?;
+    store.add_project(Path::new("/tmp/world"), "world", kind, 500)?;
+
+    // When loading.
+    let kinds: Vec<ProjectKind> = store
+        .load()?
+        .0
+        .into_iter()
+        .map(|project| project.kind)
+        .collect();
+
+    // Then its kind loads back unchanged.
+    assert_eq!(kinds, vec![kind], "a world should load back as {kind:?}");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn inserted_sessions_parent_loads_back() -> Result<(), Report<StoreError>> {
+    // Given a store with session A.
+    let store = Store::open_in_memory()?;
+    let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+    let (parent, _) = store.insert_session(
+        project,
+        SessionKind::Colony,
+        Path::new("/tmp/orb"),
+        None,
+        None,
+        None,
+        1_000,
+    )?;
+
+    // When inserting session B made by A.
+    let (child, _) = store.insert_session(
+        project,
+        SessionKind::Plain,
+        Path::new("/tmp/orb"),
+        None,
+        None,
+        Some(parent),
+        1_100,
+    )?;
+
+    // Then B loads back with A as its parent.
+    let parents: Vec<(SessionId, Option<SessionId>)> = store
+        .layouts()?
+        .sessions
+        .into_iter()
+        .map(|row| (row.id, row.parent))
+        .collect();
+    assert_eq!(
+        parents,
+        vec![(parent, None), (child, Some(parent))],
+        "the colonist's parent should load back"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn deleting_a_session_clears_its_colonists_parent() -> Result<(), Report<StoreError>> {
+    // Given session A and session B made by A.
+    let store = Store::open_in_memory()?;
+    let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+    let (parent, _) = store.insert_session(
+        project,
+        SessionKind::Colony,
+        Path::new("/tmp/orb"),
+        None,
+        None,
+        None,
+        1_000,
+    )?;
+    let (child, _) = store.insert_session(
+        project,
+        SessionKind::Plain,
+        Path::new("/tmp/orb"),
+        None,
+        None,
+        Some(parent),
+        1_100,
+    )?;
+
+    // When deleting A.
+    store.delete_session(parent)?;
+
+    // Then B is left with no parent.
+    let parents: Vec<(SessionId, Option<SessionId>)> = store
+        .layouts()?
+        .sessions
+        .into_iter()
+        .map(|row| (row.id, row.parent))
+        .collect();
+    assert_eq!(
+        parents,
+        vec![(child, None)],
+        "deleting a session should clear its colonists' parent"
     );
     Ok(())
 }
@@ -1295,6 +1466,7 @@ fn insert_session_saves_one_shell_pane_and_no_tab() -> Result<(), Report<StoreEr
         Path::new("/tmp/orb"),
         None,
         None,
+        None,
         1_000,
     )?;
 
@@ -1327,12 +1499,13 @@ fn insert_session_saves_its_kind_and_branch() -> Result<(), Report<StoreError>> 
     let store = Store::open_in_memory()?;
     let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
-    // When inserting a Research session on `orb/0a1b2c3d`.
+    // When inserting a colony on `orb/0a1b2c3d`.
     let (session, _) = store.insert_session(
         project,
-        SessionKind::Research,
+        SessionKind::Colony,
         Path::new("/tmp/orb/wt"),
         Some("orb/0a1b2c3d"),
+        None,
         None,
         1_000,
     )?;
@@ -1348,7 +1521,7 @@ fn insert_session_saves_its_kind_and_branch() -> Result<(), Report<StoreError>> 
         rows,
         vec![(
             session,
-            SessionKind::Research,
+            SessionKind::Colony,
             Some("orb/0a1b2c3d".to_owned()),
             PathBuf::from("/tmp/orb/wt"),
             1_000
@@ -1367,6 +1540,7 @@ fn move_session_sets_dir_branch_and_pane_cwds() -> Result<(), Report<StoreError>
         project,
         SessionKind::Plain,
         Path::new("/tmp/orb"),
+        None,
         None,
         None,
         1_000,
@@ -1431,6 +1605,7 @@ fn jumps_round_trip_agent_rows() -> Result<(), Report<StoreError>> {
         project,
         SessionKind::Plain,
         Path::new("/tmp/orb"),
+        None,
         None,
         None,
         1_000,
@@ -2391,7 +2566,7 @@ fn migrating_v10_makes_an_incognito_agents_session_incognito() -> Result<(), Rep
 
 #[rstest::rstest]
 #[case::feature(6, "plain")]
-#[case::research(9, "research")]
+#[case::research(9, "colony")]
 fn migrating_v10_maps_group_kinds(
     #[case] agent: i64,
     #[case] expected: &str,
@@ -2407,7 +2582,8 @@ fn migrating_v10_maps_group_kinds(
         &format!("SELECT kind FROM sessions WHERE id = {session}"),
     )?;
 
-    // Then it is the group's kind, a Feature becoming plain.
+    // Then it is the group's kind, a Feature becoming plain and a Research
+    // group becoming a colony.
     assert_eq!(
         kind, expected,
         "a group's kind should map to a session kind"

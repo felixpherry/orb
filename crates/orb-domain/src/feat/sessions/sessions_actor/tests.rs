@@ -536,7 +536,7 @@ fn seed_with(
     short_id: &str,
     created_at: i64,
 ) -> Result<Seeded, Report<StoreError>> {
-    let (session, pane) = store.insert_session(project, kind, dir, None, None, created_at)?;
+    let (session, pane) = store.insert_session(project, kind, dir, None, None, None, created_at)?;
     store.save_layout(
         session,
         0,
@@ -2028,7 +2028,7 @@ fn research_sessions(
             &store,
             "claude",
             project_id,
-            SessionKind::Research,
+            SessionKind::Colony,
             dir,
             short_id,
             now_ms() - HOUR_MS,
@@ -5011,6 +5011,100 @@ fn restore_un_removes_the_incognito_project() -> Result<(), Report<StoreError>> 
     Ok(())
 }
 
+/// The root of orb's own `kind` project the sidebar shows, if any.
+fn own_root(state: &State, kind: ProjectKind) -> Option<PathBuf> {
+    state
+        .read()
+        .sessions
+        .own_project(kind)
+        .map(|project| project.root.clone())
+}
+
+#[rstest::rstest]
+fn restore_adds_the_research_and_learn_projects() -> Result<(), Report<StoreError>> {
+    // Given an empty store and orb's folder in a temporary directory.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+
+    // When the actor starts.
+    let (_actor, state) = start_at(Store::open_in_memory()?, orb.path());
+
+    // Then Research and Learn exist, rooted under orb's folder.
+    assert_eq!(
+        (
+            own_root(&state, ProjectKind::Research),
+            own_root(&state, ProjectKind::Learn)
+        ),
+        (
+            Some(orb.path().join("research")),
+            Some(orb.path().join("learn"))
+        ),
+        "start should add orb's Research and Learn projects"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn restore_un_removes_the_research_project() -> Result<(), Report<StoreError>> {
+    // Given a removed Research project.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let store = Store::open_in_memory()?;
+    let id = store.add_project(
+        &orb.path().join("research"),
+        "Research",
+        ProjectKind::Research,
+        0,
+    )?;
+    store.remove_project(id, 1)?;
+
+    // When the actor starts.
+    let (_actor, state) = start_at(store, orb.path());
+
+    // Then it isn't removed.
+    assert_eq!(
+        removed_of(&state, id),
+        Some(false),
+        "start should bring back a removed Research project"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_a_session_clears_its_colonists_parent_in_the_sidebar()
+-> Result<(), Report<StoreError>> {
+    // Given saved session A and session B made by A.
+    let store = Store::open_in_memory()?;
+    let project = orb_project(&store)?;
+    let dir = Path::new(PROJECT_ROOT);
+    let (parent, _) =
+        store.insert_session(project, SessionKind::Colony, dir, None, None, None, 1_000)?;
+    let (child, _) = store.insert_session(
+        project,
+        SessionKind::Plain,
+        dir,
+        None,
+        None,
+        Some(parent),
+        1_100,
+    )?;
+    let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+    // When deleting A.
+    actor.delete_session(parent);
+
+    // Then B shows with no parent.
+    assert_eq!(
+        state
+            .read()
+            .sessions
+            .session(child)
+            .map(|session| session.parent),
+        Some(None),
+        "deleting a session should leave its colonists top level"
+    );
+    Ok(())
+}
+
 #[rstest::rstest]
 fn adding_a_removed_project_restores_it() -> Result<(), Report<StoreError>> {
     // Given a directory that's a removed project.
@@ -6530,22 +6624,22 @@ fn new_learn_session_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn new_research_session_is_a_research_session() -> Result<(), Report<StoreError>> {
+fn new_research_session_is_a_colony() -> Result<(), Report<StoreError>> {
     // Given no Research project.
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
     actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
-    // Then a Research session runs in its folder.
+    // Then a colony runs in its folder.
     let session = only_session(&state)?;
     assert_eq!(
         (session.kind, session.dir),
         (
-            SessionKind::Research,
+            SessionKind::Colony,
             orb_root.path().join("research/tokio-cancel")
         ),
-        "the session should be a Research one in its folder"
+        "the session should be a colony in its folder"
     );
     Ok(())
 }

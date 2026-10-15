@@ -1351,13 +1351,16 @@ fn settled_session_is_one_line() {
 }
 
 #[rstest::rstest]
-#[case::research(SessionKind::Research, BLUE2)]
-#[case::learn(SessionKind::Learn, PURPLE)]
-fn own_folder_session_shows_its_kind_icon(#[case] kind: SessionKind, #[case] colour: Color) {
-    // Given a `kind` session.
+#[case::research(ProjectKind::Research, BLUE2)]
+#[case::learn(ProjectKind::Learn, PURPLE)]
+fn own_folder_session_shows_its_kind_icon(#[case] kind: ProjectKind, #[case] colour: Color) {
+    // Given a colony in a `kind` project.
     let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
     if let Some(session) = sessions.sessions.first_mut() {
-        session.kind = kind;
+        session.kind = SessionKind::Colony;
+    }
+    if let Some(project) = sessions.projects.first_mut() {
+        project.kind = kind;
     }
 
     // When drawing the sidebar.
@@ -1498,11 +1501,14 @@ fn card_without_agents_shows_no_chevron() {
     );
 }
 
-/// `sessions` with session 1 a Learn session in `~/.orb/learn/<slug>`.
+/// `sessions` with session 1 a colony in Learn, in `~/.orb/learn/<slug>`.
 fn learning(mut sessions: Sessions, slug: &str) -> Sessions {
     if let Some(session) = sessions.sessions.first_mut() {
-        session.kind = SessionKind::Learn;
+        session.kind = SessionKind::Colony;
         session.dir = format!("{HOME}/.orb/learn/{slug}").into();
+    }
+    if let Some(project) = sessions.projects.first_mut() {
+        project.kind = ProjectKind::Learn;
     }
     sessions
 }

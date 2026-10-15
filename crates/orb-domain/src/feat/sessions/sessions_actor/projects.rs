@@ -195,7 +195,7 @@ fn show_project(
 
 /// orb's own folder for a `kind` session: its project's kind, its folder's
 /// name under orb's directory, and its project's title.
-fn own_folder(kind: FolderKind) -> (ProjectKind, &'static str, &'static str) {
+pub(super) fn own_folder(kind: FolderKind) -> (ProjectKind, &'static str, &'static str) {
     match kind {
         FolderKind::Research => (ProjectKind::Research, "research", "Research"),
         FolderKind::Learn => (ProjectKind::Learn, "learn", "Learn"),

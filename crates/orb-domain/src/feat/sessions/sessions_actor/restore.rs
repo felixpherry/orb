@@ -8,8 +8,9 @@ impl SessionsActor {
     /// that's still shown and not removed, and selects its first row. Each
     /// project learns whether it is a git repository. The saved jump list comes back
     /// without the rows that no longer exist, and every session's layout comes
-    /// back as it was saved. orb's Incognito project is added
-    /// (or un-removed) and its folder made first.
+    /// back as it was saved. orb's Incognito, Research and Learn projects are
+    /// added (or un-removed) first, and Incognito's folder made; each is added
+    /// even when another fails.
     #[expect(
         clippy::too_many_lines,
         reason = "brings back every saved piece of the sidebar and layouts in one place"
@@ -34,12 +35,17 @@ impl SessionsActor {
                 &error,
             );
         }
-        let added = store.add_project(
-            &incognito_root,
-            "Incognito",
-            ProjectKind::Incognito,
-            now_ms(),
-        );
+        let added = {
+            let now = now_ms();
+            std::iter::once((incognito_root.clone(), "Incognito", ProjectKind::Incognito))
+                .chain(
+                    [FolderKind::Research, FolderKind::Learn]
+                        .map(own_folder)
+                        .map(|(kind, dir, title)| (orb_root.join(dir), title, kind)),
+                )
+                .map(|(root, title, kind)| store.add_project(&root, title, kind, now).map(drop))
+                .fold(Ok(()), Result::and)
+        };
         let RestoredLayouts {
             sessions: session_rows,
             layouts,

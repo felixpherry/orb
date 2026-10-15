@@ -117,6 +117,7 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH,
             pinned_at: None,
             settled_at: None,
+            parent: None,
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH + Duration::from_secs(activity),
         }

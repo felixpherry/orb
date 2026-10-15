@@ -132,6 +132,7 @@ fn session(id: i64, settled: bool) -> Session {
         created_at: UNIX_EPOCH,
         pinned_at: None,
         settled_at: settled.then_some(UNIX_EPOCH),
+        parent: None,
         active_since: UNIX_EPOCH,
         last_activity_at: UNIX_EPOCH,
     }

@@ -32,10 +32,8 @@ pub struct PaneLaunch {
 pub enum SessionKind {
     /// Work in a project's checkout or worktree.
     Plain,
-    /// A research folder of orb's own.
-    Research,
-    /// A learning folder of orb's own.
-    Learn,
+    /// A colony: runs in a world; Research and Learn sessions are colonies.
+    Colony,
     /// A chat outside any project, in orb's Incognito folder.
     Incognito,
 }
@@ -46,6 +44,9 @@ pub struct Session {
     pub id: SessionId,
     pub project: ProjectId,
     pub kind: SessionKind,
+    /// The session whose pane made it through `orb session create`, when that
+    /// was a colony or a colonist; `None` = top level.
+    pub parent: Option<SessionId>,
     /// Where its panes start.
     pub dir: PathBuf,
     /// The name the user gave with `r`; `None` = not renamed.
@@ -79,17 +80,40 @@ pub fn folder_slug(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
-/// Whether a project is one the user added, or one of orb's own folders.
+/// Whether a project is one the user added, a world colonies run in, or one
+/// of orb's own folders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectKind {
     /// A directory the user added.
     Normal,
-    /// orb's folder that holds Research sessions' folders.
+    /// orb's built-in fresh world whose colonies' folders are under `~/.orb/research`.
     Research,
-    /// orb's folder that holds Learn sessions' folders.
+    /// orb's built-in fresh world whose colonies' folders are under `~/.orb/learn`.
     Learn,
     /// orb's folder for chats outside any project (`/tmp/orb-incognito`).
     Incognito,
+    /// A world whose colonies all run in its folder.
+    SharedWorld,
+    /// A world whose colonies each run in their own copy of its kit.
+    FreshWorld,
+}
+
+impl ProjectKind {
+    /// Whether colonies run in it: Research, Learn and the user's worlds.
+    #[must_use]
+    pub fn is_world(self) -> bool {
+        matches!(
+            self,
+            Self::Research | Self::Learn | Self::SharedWorld | Self::FreshWorld
+        )
+    }
+
+    /// Whether each of its colonies gets its own folder: Research, Learn and
+    /// the user's fresh worlds.
+    #[must_use]
+    pub fn is_fresh_world(self) -> bool {
+        matches!(self, Self::Research | Self::Learn | Self::FreshWorld)
+    }
 }
 
 /// What an agent's session is doing.
@@ -998,9 +1022,10 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 id,
                 project: project.id,
                 kind: match project.kind {
-                    ProjectKind::Normal => SessionKind::Plain,
-                    ProjectKind::Research => SessionKind::Research,
-                    ProjectKind::Learn => SessionKind::Learn,
+                    ProjectKind::Normal | ProjectKind::SharedWorld => SessionKind::Plain,
+                    ProjectKind::Research | ProjectKind::Learn | ProjectKind::FreshWorld => {
+                        SessionKind::Colony
+                    }
                     ProjectKind::Incognito => SessionKind::Incognito,
                 },
                 dir: agent.cwd.clone(),
@@ -1009,6 +1034,7 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 created_at: agent.created_at,
                 pinned_at: None,
                 settled_at: None,
+                parent: None,
                 active_since: agent.created_at,
                 last_activity_at: agent.last_activity_at,
             });

@@ -139,6 +139,7 @@ mod settle;
 mod start;
 
 use self::poll::{agent_mut, display_title, show};
+use self::projects::own_folder;
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
 use self::start::{answer_name_box, current_branch, rename_hex_branch};
 
@@ -183,7 +184,7 @@ pub struct SessionsActorDeps {
 /// sessions with their names, pins and settles, the agents' statuses and
 /// titles, and the origin ref a start is fetching; it reports errors,
 /// notices and the session a start made ready to the frontend loop. It adds
-/// orb's Incognito project at start. It also restores the sidebar's width
+/// orb's Incognito, Research and Learn projects at start. It also restores the sidebar's width
 /// and project filter, and selects a new session. It loads every session's
 /// layout at start, adds the panes splits and new tabs make (it saves their
 /// store rows, so it gives them their ids), lays out a new session, drops a
@@ -836,13 +837,16 @@ fn agent(row: &AgentRow, status: AgentStatus, pane: Option<PaneLaunch>) -> Agent
     }
 }
 
-/// The kind of session a project's new agent gets.
+/// The kind of session a project's new session gets: a colony in Research
+/// and Learn, Incognito in Incognito, plain elsewhere (a colony in the
+/// user's worlds comes only from the new-colony key).
 fn session_kind(kind: ProjectKind) -> SessionKind {
     match kind {
-        ProjectKind::Normal => SessionKind::Plain,
-        ProjectKind::Research => SessionKind::Research,
-        ProjectKind::Learn => SessionKind::Learn,
+        ProjectKind::Research | ProjectKind::Learn => SessionKind::Colony,
         ProjectKind::Incognito => SessionKind::Incognito,
+        ProjectKind::Normal | ProjectKind::SharedWorld | ProjectKind::FreshWorld => {
+            SessionKind::Plain
+        }
     }
 }
 
@@ -854,6 +858,7 @@ fn show_session(row: &SessionRow) -> Session {
         id: row.id,
         project: row.project_id,
         kind: row.kind,
+        parent: row.parent,
         dir: row.dir.clone(),
         name: row.name.clone(),
         branch: row.branch.clone(),

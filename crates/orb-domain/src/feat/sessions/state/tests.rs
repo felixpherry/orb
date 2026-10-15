@@ -70,6 +70,7 @@ fn session(id: i64) -> Session {
         created_at: SystemTime::UNIX_EPOCH,
         pinned_at: None,
         settled_at: None,
+        parent: None,
         active_since: SystemTime::UNIX_EPOCH,
         last_activity_at: SystemTime::UNIX_EPOCH,
     }
@@ -2063,4 +2064,28 @@ fn runs_agent_is_false_for_a_closed_pane() {
 
     // Then it doesn't.
     assert!(!runs, "a closed pane runs no agent");
+}
+
+#[rstest::rstest]
+#[case::normal(ProjectKind::Normal, false)]
+#[case::research(ProjectKind::Research, true)]
+#[case::learn(ProjectKind::Learn, true)]
+#[case::incognito(ProjectKind::Incognito, false)]
+#[case::shared_world(ProjectKind::SharedWorld, true)]
+#[case::fresh_world(ProjectKind::FreshWorld, true)]
+fn project_kind_is_world(#[case] kind: ProjectKind, #[case] expected: bool) {
+    // Given a project kind; When asking whether it's a world; Then it matches.
+    assert_eq!(kind.is_world(), expected, "{kind:?} is_world");
+}
+
+#[rstest::rstest]
+#[case::normal(ProjectKind::Normal, false)]
+#[case::research(ProjectKind::Research, true)]
+#[case::learn(ProjectKind::Learn, true)]
+#[case::incognito(ProjectKind::Incognito, false)]
+#[case::shared_world(ProjectKind::SharedWorld, false)]
+#[case::fresh_world(ProjectKind::FreshWorld, true)]
+fn project_kind_is_fresh_world(#[case] kind: ProjectKind, #[case] expected: bool) {
+    // Given a project kind; When asking whether it's a fresh world; Then it matches.
+    assert_eq!(kind.is_fresh_world(), expected, "{kind:?} is_fresh_world");
 }

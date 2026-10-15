@@ -249,9 +249,10 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 id,
                 project: project.id,
                 kind: match project.kind {
-                    ProjectKind::Normal => SessionKind::Plain,
-                    ProjectKind::Research => SessionKind::Research,
-                    ProjectKind::Learn => SessionKind::Learn,
+                    ProjectKind::Normal | ProjectKind::SharedWorld => SessionKind::Plain,
+                    ProjectKind::Research | ProjectKind::Learn | ProjectKind::FreshWorld => {
+                        SessionKind::Colony
+                    }
                     ProjectKind::Incognito => SessionKind::Incognito,
                 },
                 dir: agent.cwd.clone(),
@@ -260,6 +261,7 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 created_at: agent.created_at,
                 pinned_at: None,
                 settled_at: None,
+                parent: None,
                 active_since: agent.created_at,
                 last_activity_at: agent.last_activity_at,
             });

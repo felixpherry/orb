@@ -300,12 +300,21 @@ impl SessionsActor {
         let now = now_ms();
         let (id, pane) = self
             .store
-            .insert_session(project, kind, dir, branch.as_deref(), name.as_deref(), now)
+            .insert_session(
+                project,
+                kind,
+                dir,
+                branch.as_deref(),
+                name.as_deref(),
+                None,
+                now,
+            )
             .map_err(|report| failed(&self.services.log, NEW_SESSION_UNSAVED, &report))?;
         let row = SessionRow {
             id,
             project_id: project,
             kind,
+            parent: None,
             name,
             branch,
             created_at: now,

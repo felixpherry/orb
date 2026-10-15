@@ -273,12 +273,17 @@ pub(crate) fn open_folder_name(state: &mut AppState, kind: FolderKind) -> Vec<Co
     vec![]
 }
 
-/// Whether deleting `session` also deletes its Research or Learn folder.
+/// Whether deleting `session` also deletes its folder: a colony in Research or Learn.
 fn deletes_folder(state: &AppState, session: SessionId) -> bool {
-    state
-        .sessions
-        .session(session)
-        .is_some_and(|session| matches!(session.kind, SessionKind::Research | SessionKind::Learn))
+    state.sessions.session(session).is_some_and(|session| {
+        session.kind == SessionKind::Colony
+            && state
+                .sessions
+                .project(session.project)
+                .is_some_and(|project| {
+                    matches!(project.kind, ProjectKind::Research | ProjectKind::Learn)
+                })
+    })
 }
 
 /// `⏎` in the name box for a new Research or Learn session: an empty name,
@@ -352,7 +357,9 @@ mod tests {
     use crate::command::{SessionsCommand, Workspace};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerKind;
-    use crate::feat::sessions::state::{AgentStatus, FolderKind, SidebarItem};
+    use crate::feat::sessions::state::{
+        AgentStatus, FolderKind, ProjectKind, SessionKind, SidebarItem,
+    };
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{PaneId, ProjectId, SessionId};
@@ -576,6 +583,31 @@ mod tests {
                 Some(&PickerItem::Confirm(false))
             )),
             "d should ask to delete the agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_on_a_research_colony_asks_to_delete_its_folder() {
+        // Given a selected colony in the Research project.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.kind = ProjectKind::Research;
+        }
+        if let Some(session) = state.sessions.sessions.first_mut() {
+            session.kind = SessionKind::Colony;
+        }
+
+        // When handling Delete.
+        IntentHandler::handle(&Intent::Delete, &mut state);
+
+        // Then its delete confirm says it takes the folder.
+        assert_eq!(
+            open_confirm(&state).map(|(kind, _)| kind),
+            Some(&PickerKind::DeleteSession {
+                session: SessionId(1),
+                folder: true
+            }),
+            "d on a Research colony should ask to delete its folder too"
         );
     }
 

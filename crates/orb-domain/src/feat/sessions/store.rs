@@ -143,6 +143,8 @@ pub struct SessionRow {
     pub id: SessionId,
     pub project_id: ProjectId,
     pub kind: SessionKind,
+    /// The session that made it, if it's a colonist.
+    pub parent: Option<SessionId>,
     /// The name the user gave with `r`.
     pub name: Option<String>,
     /// The branch it was last recorded on.
@@ -380,6 +382,10 @@ const MIGRATIONS: &[Migration] = &[
     ALTER TABLE projects DROP COLUMN last_harness;
     ALTER TABLE panes DROP COLUMN migrated_bg;
 "),
+    Migration::Sql("
+    ALTER TABLE sessions ADD COLUMN parent_id INTEGER;
+    UPDATE sessions SET kind = 'colony' WHERE kind IN ('research', 'learn');
+"),
 ];
 
 /// Takes the store at `path` for this process: an exclusive lock on the
@@ -563,7 +569,7 @@ impl Store {
     }
 
     /// Saves a new `kind` session of `project` named `name` in `dir` on
-    /// `branch`, last active and visited at `now`, with one shell pane in
+    /// `branch`, made by `parent` when it's a colonist, last active and visited at `now`, with one shell pane in
     /// `dir` and no tab: the caller saves its layout. Returns the session
     /// and its pane.
     ///
@@ -578,6 +584,7 @@ impl Store {
         dir: &Path,
         branch: Option<&str>,
         name: Option<&str>,
+        parent: Option<SessionId>,
         now: i64,
     ) -> Result<(SessionId, PaneId), Report<StoreError>> {
         let tx = self
@@ -589,15 +596,16 @@ impl Store {
             .query_row(
                 "INSERT INTO sessions
                    (project_id, kind, dir, name, branch, created_at, last_activity_at,
-                    last_visited_at, active_tab)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, 0) RETURNING id",
+                    last_visited_at, active_tab, parent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, 0, ?7) RETURNING id",
                 params![
                     project.0,
                     session_kind_text(kind),
                     utf8(dir)?,
                     name,
                     branch,
-                    now
+                    now,
+                    parent.map(|id| id.0)
                 ],
                 |row| row.get(0),
             )
@@ -621,7 +629,7 @@ impl Store {
             .query(
                 "SELECT id, dir, active_tab, pinned_at, settled_override, settled_at,
                         unsettled_at, last_activity_at, project_id, kind, name, branch,
-                        created_at, floats_hand_changed, float_layout
+                        created_at, floats_hand_changed, float_layout, parent_id
                  FROM sessions ORDER BY id",
                 |row| {
                     Ok(SessionRow {
@@ -643,6 +651,7 @@ impl Store {
                         created_at: row.get(12)?,
                         floats_hand_changed: row.get(13)?,
                         float_layout: float_layout(&row.get::<_, String>(14)?),
+                        parent: row.get::<_, Option<i64>>(15)?.map(SessionId),
                     })
                 },
             )
@@ -898,7 +907,7 @@ impl Store {
     }
 
     /// Deletes `session` with its tabs, floats and panes, and the agents that run
-    /// or ran in it.
+    /// or ran in it, and clears the parent of the sessions it made.
     ///
     /// # Errors
     ///
@@ -916,6 +925,7 @@ impl Store {
             "DELETE FROM tabs WHERE session_id = ?1",
             "DELETE FROM floats WHERE session_id = ?1",
             "DELETE FROM panes WHERE session_id = ?1",
+            "UPDATE sessions SET parent_id = NULL WHERE parent_id = ?1",
             "DELETE FROM sessions WHERE id = ?1",
         ]
         .into_iter()
@@ -1631,6 +1641,8 @@ fn project_kind_text(kind: ProjectKind) -> Option<&'static str> {
         ProjectKind::Research => Some("research"),
         ProjectKind::Learn => Some("learn"),
         ProjectKind::Incognito => Some("incognito"),
+        ProjectKind::SharedWorld => Some("shared-world"),
+        ProjectKind::FreshWorld => Some("fresh-world"),
     }
 }
 
@@ -1640,6 +1652,8 @@ fn project_kind(text: Option<&str>) -> ProjectKind {
         Some("research") => ProjectKind::Research,
         Some("learn") => ProjectKind::Learn,
         Some("incognito") => ProjectKind::Incognito,
+        Some("shared-world") => ProjectKind::SharedWorld,
+        Some("fresh-world") => ProjectKind::FreshWorld,
         _ => ProjectKind::Normal,
     }
 }
@@ -1683,8 +1697,7 @@ fn ui_row(row: &Row<'_>) -> rusqlite::Result<Ui> {
 fn session_kind_text(kind: SessionKind) -> &'static str {
     match kind {
         SessionKind::Plain => "plain",
-        SessionKind::Research => "research",
-        SessionKind::Learn => "learn",
+        SessionKind::Colony => "colony",
         SessionKind::Incognito => "incognito",
     }
 }
@@ -1692,8 +1705,7 @@ fn session_kind_text(kind: SessionKind) -> &'static str {
 /// The session kind saved as `text`; anything orb doesn't know is Plain.
 fn session_kind(text: &str) -> SessionKind {
     match text {
-        "research" => SessionKind::Research,
-        "learn" => SessionKind::Learn,
+        "colony" | "research" | "learn" => SessionKind::Colony,
         "incognito" => SessionKind::Incognito,
         _ => SessionKind::Plain,
     }

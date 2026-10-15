@@ -54,11 +54,11 @@ impl fmt::Display for KeyCategory {
 pub(crate) enum Selection {
     /// A session in a project's checkout or worktree.
     Session,
-    /// An Incognito, Research or Learn session, whose folder is orb's own.
+    /// An Incognito session or a colony, whose folder is orb's own.
     OwnFolderSession,
     /// An agent row of a session in a project's checkout or worktree.
     Agent,
-    /// An agent row of an Incognito, Research or Learn session.
+    /// An agent row of an Incognito session or a colony.
     OwnFolderAgent,
     /// No row, or the settled shelf's header.
     Nothing,
@@ -86,18 +86,18 @@ pub(crate) enum Scope {
     Sidebar,
     /// The sidebar with no session selected.
     SidebarEmpty,
-    /// The sidebar on an Incognito, Research or Learn session:
+    /// The sidebar on an Incognito session or a colony:
     /// [`Scope::Sidebar`]'s keys but `<C-g> w`/`<C-g> b`.
     SidebarIncognito,
     /// A pane of the shown session.
     Pane,
-    /// A pane of an Incognito, Research or Learn session: [`Scope::Pane`]'s
+    /// A pane of an Incognito session or a colony: [`Scope::Pane`]'s
     /// keys but `<C-g> w`/`<C-g> b`.
     PaneIncognito,
     /// The sidebar on an agent row: [`Scope::Sidebar`]'s keys but `p`/`s`.
     SidebarAgent,
-    /// The sidebar on an agent row of an Incognito, Research or Learn
-    /// session: [`Scope::SidebarAgent`]'s keys but `<C-g> w`/`<C-g> b`.
+    /// The sidebar on an agent row of an Incognito session or a colony:
+    /// [`Scope::SidebarAgent`]'s keys but `<C-g> w`/`<C-g> b`.
     SidebarAgentIncognito,
 }
 

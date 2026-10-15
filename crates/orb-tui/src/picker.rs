@@ -857,6 +857,7 @@ mod tests {
                 created_at: UNIX_EPOCH,
                 pinned_at: None,
                 settled_at: None,
+                parent: None,
                 active_since: UNIX_EPOCH,
                 last_activity_at: UNIX_EPOCH,
             }],

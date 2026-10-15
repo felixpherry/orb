@@ -30,8 +30,8 @@ use std::time::{Duration, SystemTime};
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::sessions::state::{
-    Agent, AgentStatus, FolderKind, Project, Session, SessionKind, Sessions, SidebarItem,
-    SidebarRow, most_urgent,
+    Agent, AgentStatus, FolderKind, Project, ProjectKind, Session, SessionKind, Sessions,
+    SidebarItem, SidebarRow, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::ids::SessionId;
@@ -487,8 +487,8 @@ fn render_row(
 
 /// A session's card: its most urgent agent's status icon (the idle circle
 /// without one, filled while `attached`), its title, pin and time; the
-/// project (behind a Research or Learn session's kind icon) and the status
-/// word; the branch, or a Research or Learn session's folder as a `~/…`
+/// project (behind a Research or Learn colony's world icon) and the status
+/// word; the branch, or a Research or Learn colony's folder as a `~/…`
 /// path. With agent rows, the last line ends with one status icon per agent
 /// (at most 8, then `+N`) and `⌄` while they show or `›` while folded. The
 /// title is blue and bold while the card is `active`.
@@ -531,7 +531,7 @@ fn render_card(
         line(0),
         buf,
     );
-    let look = session_look(session.kind);
+    let look = session_look(session.kind, project.kind);
     render_split(
         project_line(project, look),
         word.map(|word| Line::from(span(word, colour)))
@@ -628,13 +628,13 @@ pub(crate) fn kind_look(kind: FolderKind) -> (&'static str, Color) {
     }
 }
 
-/// A session kind's icon and colour, for the kinds that own their folder
-/// and show it: Research `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
-fn session_look(kind: SessionKind) -> Option<(&'static str, Color)> {
-    match kind {
-        SessionKind::Research => Some(kind_look(FolderKind::Research)),
-        SessionKind::Learn => Some(kind_look(FolderKind::Learn)),
-        SessionKind::Plain | SessionKind::Incognito => None,
+/// A colony's world icon and colour, for Research and Learn: Research
+/// `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
+fn session_look(kind: SessionKind, project: ProjectKind) -> Option<(&'static str, Color)> {
+    match (kind, project) {
+        (SessionKind::Colony, ProjectKind::Research) => Some(kind_look(FolderKind::Research)),
+        (SessionKind::Colony, ProjectKind::Learn) => Some(kind_look(FolderKind::Learn)),
+        _ => None,
     }
 }
 

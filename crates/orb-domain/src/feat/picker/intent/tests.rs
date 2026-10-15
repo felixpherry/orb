@@ -205,6 +205,7 @@ fn session_in(id: i64, project: i64, dir: &str) -> Session {
         created_at: SystemTime::UNIX_EPOCH,
         pinned_at: None,
         settled_at: None,
+        parent: None,
         active_since: SystemTime::UNIX_EPOCH,
         last_activity_at: SystemTime::UNIX_EPOCH,
     }

@@ -86,8 +86,9 @@ impl SessionsActor {
     }
 
     /// Deletes session `id`: kills every pane, deletes a Research or Learn
-    /// folder that is orb's own and no other session uses, then its tabs,
-    /// panes, agents (ended ones included) and row, and forgets them.
+    /// colony's folder that is orb's own and no other session uses, then its tabs,
+    /// panes, agents (ended ones included) and row, and forgets them. The
+    /// sessions it made become top-level.
     /// Claude transcripts, pi session files and worktrees stay. However it
     /// ends, the session is no longer hidden as being deleted.
     pub(super) fn delete_session(&mut self, id: SessionId) {
@@ -126,6 +127,13 @@ impl SessionsActor {
             self.forget_pane_report(pane);
         }
         self.sessions.remove(&id);
+        for row in self
+            .sessions
+            .values_mut()
+            .filter(|row| row.parent == Some(id))
+        {
+            row.parent = None;
+        }
         self.unread.remove(&id);
         {
             let mut app = self.state.write();
@@ -133,6 +141,13 @@ impl SessionsActor {
             app.attached.remove(&id);
             let sessions = &mut app.sessions;
             sessions.sessions.retain(|session| session.id != id);
+            for session in sessions
+                .sessions
+                .iter_mut()
+                .filter(|session| session.parent == Some(id))
+            {
+                session.parent = None;
+            }
             for project in &mut sessions.projects {
                 project.agents.retain(|agent| !agents.contains(&agent.id));
             }
@@ -224,17 +239,23 @@ impl SessionsActor {
         }
     }
 
-    /// Removes session `id`'s folder when it is a Research or Learn session
-    /// in orb's own folder for its kind and no other session uses it
+    /// Removes session `id`'s folder when it is a colony in Research or Learn,
+    /// in orb's own folder for it, and no other session uses it
     /// (already gone counts as done). The error is the message box text.
     fn clear_folder(&self, id: SessionId) -> Result<(), String> {
         let Some(row) = self.sessions.get(&id) else {
             return Ok(());
         };
-        let kind_dir = match row.kind {
-            SessionKind::Research => "research",
-            SessionKind::Learn => "learn",
-            SessionKind::Plain | SessionKind::Incognito => return Ok(()),
+        let project = self
+            .state
+            .read()
+            .sessions
+            .project(row.project_id)
+            .map(|project| project.kind);
+        let kind_dir = match (row.kind, project) {
+            (SessionKind::Colony, Some(ProjectKind::Research)) => "research",
+            (SessionKind::Colony, Some(ProjectKind::Learn)) => "learn",
+            _ => return Ok(()),
         };
         let shared = self
             .sessions
