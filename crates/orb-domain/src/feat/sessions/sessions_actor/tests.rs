@@ -1718,6 +1718,25 @@ async fn settling_with_colonists_settles_none_while_one_works() -> Result<(), Re
 
 #[rstest::rstest]
 #[tokio::test]
+async fn unsettling_a_colony_brings_its_colonists_back_under_it() -> Result<(), Report<StoreError>>
+{
+    // Given colony aa settled alone, its colonist bb lifted to the top level.
+    let (mut actor, ids) = colony_of_three(AgentStatus::Idle).await?;
+    actor.settle_session(ids[0]);
+
+    // When un-settling aa.
+    actor.unsettle_session(ids[0]);
+
+    // Then bb is under aa again.
+    assert!(
+        !actor.state.read().sessions.top(ids[1]),
+        "an un-settled colony's kept colonists move back under it"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
 async fn deleting_with_colonists_deletes_the_whole_subtree() -> Result<(), Report<StoreError>> {
     // Given colony aa with colonist bb, whose colonist is cc.
     let (mut actor, ids) = colony_of_three(AgentStatus::Idle).await?;
@@ -9147,6 +9166,45 @@ fn api_start_whose_parent_was_deleted_meanwhile_is_top_level() -> Result<(), Rep
     assert_eq!(
         parent, None,
         "a session made by a since-deleted session is top level"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn api_start_in_a_new_worktree_saves_its_parent() -> Result<(), Report<StoreError>> {
+    // Given the orb project and colony aa.
+    let (store, project) = store_with_project()?;
+    let colony = insert_agent(&store, "aa")?.session;
+    let (mut actor, state) = start_with(
+        store,
+        &listing(Vec::new()),
+        &FakeGit::local(),
+        Path::new(NO_CLAUDE_DIR),
+    );
+
+    // When an agent in aa asks for a session in a new worktree.
+    let start = ApiStart {
+        project,
+        worktree: true,
+        name: None,
+        parent: Some(colony),
+    };
+    let job = actor.api_start(start, None);
+    finish(&mut actor, job);
+
+    // Then the new session is aa's colonist.
+    let parents: Vec<Option<SessionId>> = state
+        .read()
+        .sessions
+        .sessions
+        .iter()
+        .filter(|session| session.id != colony)
+        .map(|session| session.parent)
+        .collect();
+    assert_eq!(
+        parents,
+        [Some(colony)],
+        "a worktree session an agent in a colony asks for is its colonist"
     );
     Ok(())
 }

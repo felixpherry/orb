@@ -4829,23 +4829,25 @@ fn picking_a_directory_for_a_world_asks_shared_or_fresh() {
 }
 
 #[rstest::rstest]
-fn picking_fresh_returns_add_world() {
-    // Given the Shared/Fresh pick for ~/dev with Fresh highlighted.
+#[case::fresh(true, ProjectKind::FreshWorld)]
+#[case::shared(false, ProjectKind::SharedWorld)]
+fn picking_a_world_kind_returns_add_world(#[case] fresh: bool, #[case] kind: ProjectKind) {
+    // Given the Shared/Fresh pick for ~/dev with `fresh` highlighted.
     let mut state = adding_a_world();
     IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-    highlight(&mut state, &PickerItem::WorldKind { fresh: true });
+    highlight(&mut state, &PickerItem::WorldKind { fresh });
 
     // When handling PickerConfirm.
     let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then ~/dev is added as a fresh world.
+    // Then ~/dev is added as a world of that kind.
     assert_eq!(
         commands,
         vec![Command::Sessions(SessionsCommand::AddWorld {
             root: Path::new(HOME).join("dev"),
-            kind: ProjectKind::FreshWorld,
+            kind,
         })],
-        "Fresh should add the folder as a fresh world"
+        "the picked kind should add the folder as that kind of world"
     );
 }
 

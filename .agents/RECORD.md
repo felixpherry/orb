@@ -61,7 +61,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) The poll asks `claude agents` only while a pane holds a Claude agent.
 - (sessions) An agent's elapsed time counts from when orb first saw its turn running.
 - (sessions) A Claude agent's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New agent".
-- (sidebar) The sidebar lists orb's sessions as one list across projects, each a three-line card (its most urgent agent's status icon, title and time; its project and status word; its branch), followed by one row per agent pane.
+- (sidebar) The sidebar lists orb's top-level sessions as one list across projects, each a two-line card (its most urgent agent's status icon, name and time; then its project, or a colony's world), with its agent rows and, for a session with colonists, a colonists row hanging off the second line.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of sessions, and the hovered row's first line highlighted.
 - (pane) Each pane is a `zmx attach orb-p<id>` client on `~/.orb/zmx`, in a PTY emulated by `alacritty_terminal`, drawn in the right-hand area.
 - (keybinds) `<C-g> n` in the sidebar or a pane opens the project picker; picking a project starts a new session in it.
@@ -73,26 +73,26 @@ Entries are added or amended **only with human approval**.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
-- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a Research or Learn session, its own folder; Claude transcripts, pi session files and worktrees stay.
+- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled session closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
 - (projects) The project picker lists projects by their agents' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
-- (projects) Projects are added only from the directory picker that `a` opens in the projects screen, except orb's `Research` and `Learn` projects, which the first `<C-g> g r`/`<C-g> g l` adds, and its `Incognito` project, which orb adds at start.
+- (projects) Projects are added only from the directory picker that `a` opens in the projects screen, except worlds, which `a` adds in the worlds screen, and orb's `Research`, `Learn` and `Incognito` projects, which orb adds at start.
 - (keybinds) In a picker other than the projects screen and the session and worktree pickers, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
-- (keybinds) The projects screen, the session picker and the worktree picker open in list mode, where `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>` move and `Esc` closes.
-- (keybinds) In the projects screen, the session picker and the worktree picker, `/` moves the keys to the input box, where typing filters, `⏎` picks, and `Esc` returns to the list keeping the typed text.
+- (keybinds) The projects screen, the worlds screen, the session picker and the worktree picker open in list mode, where `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>` move and `Esc` closes.
+- (keybinds) In the projects screen, the worlds screen, the session picker and the worktree picker, `/` moves the keys to the input box, where typing filters, `⏎` picks, and `Esc` returns to the list keeping the typed text.
 - (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells, except the cells over a pane's shown image, which keep the outer terminal's own background.
 - (tui) When the outer terminal's own background is exactly `#222436`, orb paints `#222437` in its place and answers a pane's background question with it, since kitty draws pane images over any cell of its own background colour.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every agent, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
-- (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule (a / prompt in the projects screen), numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
-- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, close-pane, delete-worktree and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the search picker shows no keys.
-- (picker) A list-mode picker's keys, while listing, are `↑↓/j/k rows · / search · a add · d remove · ⏎ new session · Esc close` in the projects screen, `↑↓/j/k rows · / search · d delete · Esc close` in the worktree picker and `↑↓/j/k rows · / search · a/b/w/i/s filter · d close · ⏎ open · Esc close` in the session picker; while searching, only `⏎ <verb> · Esc back` (`Esc back` in the worktree picker). The session and worktree pickers draw them left-aligned on the popup's bottom row, under both boxes.
-- (picker) A list-mode picker's input row starts with a / prompt: dim, with a dim `search projects`/`search worktrees`/`search sessions` placeholder or the kept text dim, while listing; bright, with bright text, while searching. Other pickers keep a cyan > prompt.
+- (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule (a / prompt in the projects and worlds screens), numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
+- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project or a world, `⏎ new colony · Esc close` in the world picker, `⏎ filter · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, close-pane, delete-worktree and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the search picker shows no keys.
+- (picker) A list-mode picker's keys, while listing, are `↑↓/j/k rows · / search · a add · d remove · ⏎ new session · Esc close` in the projects screen, `↑↓/j/k rows · / search · a add · d remove · ⏎ new colony · Esc close` in the worlds screen, `↑↓/j/k rows · / search · d delete · Esc close` in the worktree picker and `↑↓/j/k rows · / search · a/b/w/i/s filter · c colonists · d close · ⏎ open · Esc close` in the session picker (without `c colonists` in the Colonists picker); while searching, only `⏎ <verb> · Esc back` (`Esc back` in the worktree picker). The session and worktree pickers draw them left-aligned on the popup's bottom row, under both boxes.
+- (picker) A list-mode picker's input row starts with a / prompt: dim, with a dim `search projects`/`search worlds`/`search worktrees`/`search sessions` placeholder or the kept text dim, while listing; bright, with bright text, while searching. Other pickers keep a cyan > prompt.
 - (identity) **orb** is a terminal multiplexer that is mission control for Claude Code and pi agents across projects and git worktrees: a T3 Code-style sidebar of sessions beside each session's tabs of split panes, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<slug>` of the session's name when it was named and that branch doesn't exist, else `orb/<hex>`.
 - (worktrees) A new worktree starts from the base branch picked for it (the default branch listed first) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
@@ -108,13 +108,13 @@ Entries are added or amended **only with human approval**.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
-- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, and `r`/`d` on a card or an agent row.
+- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) While the sidebar has the keys, `Alt +`/`Alt =` widen it and `Alt -` narrows it, 4 columns a step, kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
-- (keybinds) `<C-g> f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `<C-g> g r`/`<C-g> g l` has added them, then Incognito, then the projects in `<C-g> n` order.
-- (sidebar) While a project filter is set, the sidebar lists only that project's sessions, and its input box shows the project after the > prompt.
+- (keybinds) `<C-g> f` in the sidebar opens the project filter: `All projects`, then the worlds in the worlds screen's order, then Incognito, then the projects in `<C-g> n` order.
+- (sidebar) While a project filter is set, the sidebar lists that project's sessions and every session under them, and its input box shows the project after the > prompt.
 - (sidebar) Picking a project in `<C-g> n` outside the project filter clears the filter.
 - (projects) A removed project is hidden from `<C-g> n`, the project filter and the projects screen; its sessions stay, and adding it again restores it.
 - (keybinds) `<C-g> P` opens the projects screen, which lists projects in `<C-g> n` order.
@@ -135,7 +135,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (keybinds) In the sidebar, `r` on a session opens a Rename Session box filled in with its title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
 - (keybinds) In the sidebar, `/` or `i` moves the keys to its input box; typing filters, `<C-j>`/`<C-k>` or `↓`/`↑` move between matches, wrapping from the last to the first and back, `⏎` clears the text and keeps the cursor on the match (or, with no match, acts as `Esc`), and `Esc` clears it and puts the cursor back where it was.
-- (sidebar) While searching, the sidebar lists the sessions whose title, or the name one of their agent rows shows, fuzzy-matches the typed text, in sidebar order and including settled ones, with matched characters highlighted.
+- (sidebar) While searching, the sidebar lists the sessions whose title, or the name one of their agent rows shows, fuzzy-matches the typed text, in sidebar order and including settled ones, with matched characters highlighted, and the sessions above a match shown as the way to it.
 - (sidebar) The input box shows the search text after the > prompt, after the filtered project if there is one.
 - (sidebar) While the sidebar has the keys, a steady block cursor sits on the first cell of the selected row.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
@@ -150,31 +150,30 @@ Entries are added or amended **only with human approval**.
 - (sidebar) While the list overflows the sidebar, the Settled header stays on its bottom row until scrolling brings it into view.
 - (sidebar) While a search lists settled matches, the Settled header shows the open folder.
 - (tui) Typed text too long for the sidebar search, a picker's input or the rename box shows its end, keeping the cursor in view.
-- (sessions) A Research or Learn session runs in its own folder, `~/.orb/research/<slug>/` or `~/.orb/learn/<slug>/`.
-- (keybinds) `<C-g> g r`/`<C-g> g l` in the sidebar or a pane take a name and make a Research/Learn session in a new folder, with one shell.
-- (keybinds) The new-folder name box is the rename box titled `New Research session` or `New Learn session`; after `⏎` it stays open until orb has made the session, and a refused name leaves it open with the reason in the message box.
-- (sessions) A new Research or Learn session's name is refused with `~/.orb/<kind>/<slug> already exists` when that folder exists.
-- (sessions) A Research or Learn session's folder is its name with each run of whitespace turned into `-`, case kept; a name using `/ \ ~ ^ : ? * [` or `..`, or starting with `-` or `.`, is refused with `Name can't use <char>`.
-- (sessions) Research and Learn sessions belong to orb's `Research` and `Learn` projects, which `<C-g> n` doesn't list.
-- (folders) A new Research or Learn folder is copied from `~/.orb/templates/<kind>/`, which orb writes from its built-in default when it's missing.
-- (sidebar) Making a Research or Learn session outside the project filter clears the filter; a refused name leaves it set.
+- (worlds) A colony in a fresh world runs in its own folder: `~/.orb/research/<name>/` or `~/.orb/learn/<name>/` in Research and Learn, `~/.orb/worlds/<world>/<name>/` in the user's own fresh worlds.
+- (keybinds) `<C-g> c` in the sidebar or a pane picks a world, takes a name in a `New colony` box and makes a colony there with one shell; the name is optional in a shared world and names the folder in a fresh one.
+- (keybinds) The `New colony` box is the rename box; after `⏎` it stays open until orb has made the colony, and a refused name leaves it open with the reason in the message box.
+- (worlds) A new colony's name in a fresh world is refused with `<folder> already exists` when its folder exists.
+- (worlds) A fresh-world colony's folder is its name with each run of whitespace turned into `-`, case kept; a name using `/ \ ~ ^ : ? * [` or `..`, or starting with `-` or `.`, is refused with `Name can't use <char>`.
+- (worlds) Worlds are projects of their own kind, shared or fresh, which `<C-g> n` and the projects screen don't list; Research and Learn are orb's built-in fresh worlds.
+- (folders) A new Research or Learn colony's folder is copied from `~/.orb/templates/<kind>/`, which orb writes from its built-in default when it's missing.
+- (sidebar) Making a colony outside the project filter clears the filter; a refused name leaves it set.
 - (sidebar) `l` on a session card shows its agent rows and `h` folds them away.
 - (sidebar) `h` on an agent row folds its card and moves the cursor to the card.
-- (sidebar) A card's third line ends with one status icon per agent, then `⌄` while open or `›` while folded.
-- (sidebar) A Research or Learn card's second line shows its kind icon before the project's name.
-- (sidebar) Every card starts open, and fold state is kept in memory only.
-- (sidebar) While a search has text, a folded card lists its agent rows as if open.
-- (sidebar) A cursor that lands on an agent row of a folded card, as when a search ends on one, unfolds the card.
-- (sidebar) A Research or Learn card's third line shows its folder as a `~/…` path.
-- (sidebar) A card's agent rows hang one level under its third line, which always closes the card's tree.
+- (sidebar) A card's second line ends with one status icon per agent pane, at most 8 then `+N`, then `⌄` while its agent rows show or `›` while folded, with no chevron on a colonist that shows no agent row.
+- (sidebar) A colony's second line shows its world's kind icon and name in the kind's colour; other cards show their project's name in plain `fg_dark`.
+- (sidebar) A card's agent rows start open and its colonists row starts folded, and fold state is kept in memory only.
+- (sidebar) While a search has text, a matching folded card lists its agent rows as if open, and a session shown only as the way to a match lists none.
+- (sidebar) A cursor that lands on a hidden agent row or colonist, as when a search ends on one, opens the folds that hid it.
+- (sidebar) A card's agent rows and colonists row hang off its second line, each level 4 columns in, with `├╴`/`└╴` guides and `│` carried down.
 - (sidebar) On the Settled shelf, a session is one line: its icon, title and the time since it settled.
 - (settle) Settling a session is refused with `Can't settle while a session is working` while any of its agent panes has a turn underway.
-- (picker) `d` on a session asks `Delete <name>?`, or `Delete <name> and its folder?` for a Research or Learn session, and on an agent row `Close <name>?`.
+- (picker) `d` on a session asks `Delete <name>?`, or `Delete <name> and its folder?` for a colony in a fresh world, and on an agent row `Close <name>?`.
 - (keybinds) In the sidebar or a pane, `<C-[>`/`<C-]>` move back/forward through the jump list, as `<C-o>`/`<C-i>` do in neovim.
 - (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
 - (jumps) Each agent is its own jump target: entering a session or picking it records the agent in its focused pane (its card when that pane is a shell), a session picker pick records the picked agent, a move between panes records the agent left and the agent entered (a shell pane records nothing), and a jump pressed in a pane starts from its focused agent.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one, and landing on an agent shows that agent's own pane; it never attaches or clears the project filter.
-- (jumps) Deleted rows, closed agents, rows hidden by the project filter, and the Settled header are skipped, and a folded card opens when a jump lands on one of its agent rows.
+- (jumps) Deleted rows, closed agents, rows hidden by the project filter, and the Settled header are skipped; a jump that lands under a folded card or colonists row opens it, and a jump to the agent of a one-agent colonist lands on the colonist.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table), an agent by its pane, dropping at start an agent whose pane is gone; a row already in the list moves to the newest slot.
 - (folders) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents for Claude Code and for pi, conventions its agents follow, a report template and an empty `SOURCES.md`.
 - (folders) The Research kit's pi subagents run through pi's `subagent` tool, from pi's example extension, which the user installs (filtering out pi-amplike's own `subagent` tool) and orb doesn't.
@@ -188,14 +187,14 @@ Entries are added or amended **only with human approval**.
 - (incognito) `<C-g> n` doesn't list orb's `Incognito` project.
 - (incognito) Incognito sessions settle, delete, rename and resume like any other session.
 - (keybinds) `<C-g> ␣` in the sidebar or a pane opens the session picker.
-- (picker) The session picker lists one row per agent pane in the sessions inside the project filter, newest chat first by the later of the agent's current turn start and its last turn end, leaving out sessions being deleted, sessions with no agents, and agents of settled sessions unless the settled filter is on.
+- (picker) The session picker lists one row per agent pane in the sessions inside the project filter, newest chat first by the later of the agent's current turn start and its last turn end, leaving out sessions being deleted, sessions with no agents, agents of colonists unless `c` shows them, and agents of settled sessions unless the settled filter is on.
 - (keybinds) In the session picker's list, `d` closes the selected agent after the sidebar agent row's confirm and returns to the list.
 - (keybinds) In the session picker's list, `a`, `b`, `w`, `i` and `s` show all, blocked (needing approval or input), working or idle agents, or only the agents of settled sessions, one filter at a time, judging each agent by its own status, and pressing the active filter's key again shows all.
-- (picker) The session picker opens on all agents, agents of settled sessions hidden, and shows its active filter in its title.
+- (picker) The session picker opens on all agents, with colonists' agents and agents of settled sessions hidden, and shows its active filter, and `· colonists` while `c` shows them, in its title.
 - (picker) A session picker row is labelled `<project>/<session>/<agent>`, where the agent is its pane's name, else its title, else `New agent`, and typed text fuzzy-matches the whole label.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on an agent closed or deleted since, or one Claude no longer knows, only closes it.
 - (picker) `⏎` in the session picker reveals the agent's session in the sidebar and moves the keys into the agent's pane, like `⏎` on its agent row.
-- (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
+- (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, Colonists or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
 - (picker) The session picker's preview shows the selected agent's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools the session ran, and the end of its last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
 - (picker) While the session picker is open, a growing transcript re-reads the preview at most once a second, and a newly selected agent's preview loads at once; a transcript that stopped growing is re-read within a second without a key press.
 - (mouse) orb captures the mouse from startup until it exits.
@@ -311,7 +310,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
 - (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
-- (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell or the card is folded, and it follows every focus change inside the session.
+- (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell, the card is folded or the card is a one-agent colonist, and it follows every focus change inside the session.
 - (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
 - (sidebar) Deleting or settling the active session leaves no active session.
@@ -353,7 +352,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Adding a project and switching a branch don't hold orb's shared state while git or the database runs.
 - (tui) Workers send typed reports on the frontend loop's channel (a change, a session ready to open, projects or worktrees changed, an error, a recovery, a notice, a desktop notice, search rows or preview), and one loop function applies them.
 - (tui) Workers never write the open picker; the loop fills it from their reports and drops search rows or previews that are stale.
-- (sessions) A finished restore, move, branch switch to the project's checkout or new session (Research and Learn ones too) opens if the session that was active when it was asked for is still active, even if the cursor moved; opening another session meanwhile cancels it, and a session deleted meanwhile never opens.
+- (sessions) A finished restore, move, branch switch to the project's checkout, new session or new colony opens if the session that was active when it was asked for is still active, even if the cursor moved; opening another session meanwhile cancels it, and a session deleted meanwhile never opens.
 - (tui) When an error and a notice arrive in the same moment, the message box shows the error.
 - (projects) The projects screen re-sorts by recency while it is open.
 - (repo) `just lint` fails when a Rust file's production part (lines before its first `#[cfg(test)]`) passes 2,000 lines; test-only files (`tests.rs`, `test_support.rs`, listed once in scripts/lint-rules.py) have no production part.
@@ -387,3 +386,23 @@ Entries are added or amended **only with human approval**.
 - (mouse) In pixel mode, a drag whose release was lost above or left of the window ends on the next plain move, left press or focus loss.
 - (api) `~/.orb/terminal-browser.sock` answers terminal-browser's current-pane, split and focus requests, so `terminal-browser open --split right` or `--split down` opens an orb pane beside the caller with the keys left where they were; `left` and `up` are refused.
 - (api) Pane programs get `TERMINAL_BROWSER_TERMINAL_SOCKET` only when orb opened that socket.
+- (worlds) Adding a world in the worlds screen asks `Shared` or `Fresh` once; a shared world's colonies all run in its folder, and a fresh world's each run in their own copy of its kit.
+- (worlds) A world's name is its folder's name, and a name another world has, Research and Learn included, is refused.
+- (worlds) A new colony in the user's own fresh world copies the world's folder as it is then, leaving out `.git`.
+- (worlds) Removing a world drops it from orb only; its folder, its colonies' folders and its colonies stay, and Research and Learn can't be removed.
+- (keybinds) `<C-g> C` opens the worlds screen, where `a` adds a world, `d` removes one after a `No`/`Yes` confirm, and `⏎` starts a colony in it.
+- (keybinds) `<C-g> ,` on a colony opens the session picker titled `Colonists`, listing the agents of every session under it, whatever the project filter.
+- (keybinds) In the session picker's list, `c` shows or hides colonists' agents alongside whichever filter is on, and every open starts with them hidden.
+- (api) A session that `orb session create` makes from a pane of a colony or a colonist is a colonist of the caller's session; from any other pane it is a top-level session.
+- (api) `orb session create` in a fresh world is refused.
+- (sidebar) A session's colonists hang under a `colonists` row ending with one status dot per direct colonist (its most urgent status, its own colonists included), at most 8 then `+N`, then the count and `⌄`/`›`.
+- (sidebar) Under a folded colonists row, a colonist needing approval or input still shows, with each folded session above it as one dim `›` line.
+- (sidebar) A card's status icon is the most urgent of its own agents and every session under it.
+- (sidebar) A colonist with one agent and no colonists shows no agent row, and `⏎` on it enters that agent's pane.
+- (sidebar) `l` and `h` on a colonists row show and fold its colonists, `⏎` toggles it, and `h` on a folded colonists row moves the cursor to its card; `h` on a colonist whose agent rows don't show moves the cursor to the colonists row above it, or to the dim `›` line above it when it shows through a folded row.
+- (sidebar) While a search has text, a matching colonist shows under its colony with every colonists row on the way open, and `Esc` puts the folds back.
+- (sidebar) Under a project filter, a colonist whose colony isn't listed shows at the top level.
+- (settle) Settled colonists leave their colony for the Settled shelf, and a settled colony's unsettled colonists show at the top level until it is un-settled.
+- (settle) Settling or deleting a session with unsettled colonists asks `No` · `Colony only` · `With colonists`, and `With colonists` covers every session under it.
+- (settle) Settling with colonists is refused with `Can't settle while a colonist is working` while any of them has a turn underway.
+- (store) Schema v15 records which session made each colonist and turns Research and Learn sessions into colonies; deleting a session clears its colonists' link.
