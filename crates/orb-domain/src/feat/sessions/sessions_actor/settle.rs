@@ -101,9 +101,8 @@ impl SessionsActor {
         self.pane_reports.remove(&pane);
     }
 
-    /// Deletes every unsettled session under session `id`, then `id` itself,
-    /// so its folder isn't kept for sessions going with it (the list is read
-    /// before the first delete clears their links).
+    /// Deletes every unsettled session under session `id`, then `id` itself
+    /// (the list is read before the first delete clears their links).
     pub(super) fn delete_with_colonists(&mut self, id: SessionId) {
         let colonists = self.state.read().sessions.below(id, false);
         for colonist in colonists {
@@ -113,9 +112,9 @@ impl SessionsActor {
     }
 
     /// Deletes session `id`: kills every pane, deletes a fresh-world
-    /// colony's folder that is orb's own and no other session uses, then its tabs,
-    /// panes, agents (ended ones included) and row, and forgets them. The
-    /// sessions it made become top-level.
+    /// colony's folder that is orb's own, then its tabs, panes, agents
+    /// (ended ones included) and row, and forgets them. The sessions it made
+    /// become top-level.
     /// Claude transcripts, pi session files and worktrees stay. However it
     /// ends, the session is no longer hidden as being deleted.
     pub(super) fn delete_session(&mut self, id: SessionId) {
@@ -266,9 +265,10 @@ impl SessionsActor {
         }
     }
 
-    /// Removes session `id`'s folder when it is a colony in a fresh world,
-    /// in that world's colonies folder, and no other session runs in it or
-    /// below it (already gone counts as done). The error is the message box text.
+    /// Removes session `id`'s folder when it is a colony in a fresh world
+    /// and the folder is in that world's colonies folder, even while another
+    /// session still runs in it (already gone counts as done). The error is
+    /// the message box text.
     fn clear_folder(&self, id: SessionId) -> Result<(), String> {
         let Some(row) = self.sessions.get(&id) else {
             return Ok(());
@@ -283,11 +283,7 @@ impl SessionsActor {
         else {
             return Ok(());
         };
-        let shared = self
-            .sessions
-            .values()
-            .any(|other| other.id != id && other.dir.starts_with(&row.dir));
-        if shared || row.dir.parent() != Some(colonies.as_path()) {
+        if row.dir.parent() != Some(colonies.as_path()) {
             return Ok(());
         }
         match fs::remove_dir_all(&row.dir) {

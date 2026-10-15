@@ -73,7 +73,7 @@ Entries are added or amended **only with human approval**.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
-- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder unless a session not deleted with it still runs in it or below it; Claude transcripts, pi session files and worktrees stay.
+- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder, even while a session not deleted with it still runs in it; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled session closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
