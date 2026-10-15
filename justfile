@@ -38,7 +38,7 @@ lint:
     just lint-rules
     just lint-filelen
 
-# Check that code names in AGENTS.md and the Record exist in orb, and that AGENTS.md §3 names no bus
+# Check that code names in AGENTS.md, docs/dev and the Record exist in orb, and that docs/dev/architecture.md names no bus
 lint-rules:
     python3 scripts/lint-rules.py
     python3 scripts/lint-rules.py --self-test

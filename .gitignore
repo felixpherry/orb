@@ -8,3 +8,4 @@ debt.json
 flamegraph*.svg
 perf.*
 .claude/worktrees/
+.lavish/

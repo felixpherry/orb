@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Doc rules for orb.
 
-- Name check: every code name AGENTS.md and the Record put in backticks
-  (outside fenced blocks) must exist in orb's code.
-- Architecture deny-list: AGENTS.md section 3 must not describe a bus.
+- Name check: every code name the docs in DOCS put in backticks (outside
+  fenced blocks) must exist in orb's code. A listed doc that doesn't exist
+  is skipped (the public repo has no .agents/RECORD.md).
+- Architecture deny-list: docs/dev/architecture.md must not describe a bus.
 - Dropped results: production Rust code must not `let _ =` a kill or removal,
   nor drop an error report with a `|_report|` closure.
 - zmx list sites: each file's production `zmx … .list(` count must match the
@@ -26,22 +27,24 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCS = ["AGENTS.md", ".agents/RECORD.md"]
+DOCS = [
+    "AGENTS.md",
+    "docs/dev/architecture.md",
+    "docs/dev/rust-style.md",
+    "docs/dev/testing.md",
+    "docs/dev/keybindings.md",
+    ".agents/RECORD.md",
+]
+ARCHITECTURE = "docs/dev/architecture.md"
 CODE_DIRS = ["crates", "src"]
 
 # Names the docs may mention that orb's code doesn't have.
 ALLOWLIST = {
-    "ActorHost": "style-guide example in AGENTS.md §2",
-    "ActorHostError": "style-guide example in AGENTS.md §2",
-    "MessageSink": "style-guide example in AGENTS.md §2",
-    "RSTEST_TIMEOUT": "rstest's environment variable",
-    "clippy::missing_assert_message": "clippy lint name",
-    "git diff": "developer command in AGENTS.md §7, not one orb runs",
+    "RSTEST_TIMEOUT": "rstest's environment variable, in docs/dev/testing.md",
+    "clippy::missing_assert_message": "clippy lint name, in docs/dev/testing.md",
     "replace_all": "example inside the Record's own format template",
 }
 
-SECTION_START = "## 3. Architecture"
-SECTION_END = "## 4. Tests"
 DENY_PHRASES = ["actor host", "pub/sub", "message bus"]
 DENY_WORD = re.compile(r"\bbus\b", re.IGNORECASE)
 
@@ -121,23 +124,13 @@ def check_names(label, text):
     return reports
 
 
-def check_section3(label, text):
-    """Report bus wording in the AGENTS.md architecture section."""
-    lines = text.splitlines()
-    try:
-        start = lines.index(SECTION_START)
-    except ValueError:
-        return [f"{label}: section header `{SECTION_START}` not found"]
-    end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i] == SECTION_END),
-        len(lines),
-    )
+def check_bus(label, text):
+    """Report bus wording anywhere in the architecture doc."""
     reports = []
-    for number in range(start, end):
-        lowered = lines[number].lower()
-        found = [p for p in DENY_PHRASES if p in lowered]
-        found += [m.group(0) for m in DENY_WORD.finditer(lines[number])]
-        reports += [f"{label}:{number + 1}: §3 must not say `{word}`" for word in found]
+    for number, line in enumerate(text.splitlines(), start=1):
+        found = [p for p in DENY_PHRASES if p in line.lower()]
+        found += [m.group(0) for m in DENY_WORD.finditer(line)]
+        reports += [f"{label}:{number}: must not say `{word}`" for word in found]
     return reports
 
 
@@ -199,9 +192,7 @@ def rust_files():
 
 def self_test():
     names = check_names("self-test", "Uses `NoSuchTypeForSelfTest` here.\n")
-    deny = check_section3(
-        "self-test", f"{SECTION_START}\nEvents go on the message bus.\n{SECTION_END}\n"
-    )
+    deny = check_bus("self-test", "Events go on the message bus.\n")
     kill = check_drops("self-test", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
     blind = check_drops("self-test/tests.rs", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
     report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
@@ -224,8 +215,10 @@ def main():
         return self_test()
     reports = []
     for doc in DOCS:
-        reports += check_names(doc, (ROOT / doc).read_text())
-    reports += check_section3("AGENTS.md", (ROOT / "AGENTS.md").read_text())
+        path = ROOT / doc
+        if path.exists():
+            reports += check_names(doc, path.read_text())
+    reports += check_bus(ARCHITECTURE, (ROOT / ARCHITECTURE).read_text())
     for path in rust_files():
         rel = str(path.relative_to(ROOT))
         text = path.read_text()
