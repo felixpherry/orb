@@ -550,9 +550,11 @@ fn project_for(
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such project"))
 }
 
-/// A new session of `project` (else the caller's session's), refused with
-/// `bad_request` in a fresh world. A caller in a colony or a colonist makes
-/// it that session's colonist.
+/// A new session of `project` (else the caller's session's). Without
+/// `project`, a caller in a fresh world gets one in its own folder, no
+/// worktree; `--worktree` there, or `project` naming a fresh world, is a
+/// `bad_request`. A caller in a colony or a colonist makes it that
+/// session's colonist.
 fn session_create(
     app: &AppState,
     project: Option<ProjectId>,
@@ -560,23 +562,42 @@ fn session_create(
     name: Option<String>,
     caller: Option<PaneId>,
 ) -> Result<Action, ApiError> {
+    let named = project.is_some();
     let project = project_for(app, project, caller)?;
-    if let Some(world) = app
+    let asking = target::resolve(app, None, caller)
+        .ok()
+        .and_then(|resolved| app.sessions.session(resolved.session));
+    let dir = match app
         .sessions
         .project(project)
         .filter(|project| project.kind.is_fresh_world())
     {
-        return Err(ApiError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "can't start a session in fresh world {}; make its colonies with <C-g> c",
-                world.title
-            ),
-        ));
-    }
-    let parent = target::resolve(app, None, caller)
-        .ok()
-        .and_then(|resolved| app.sessions.session(resolved.session))
+        None => None,
+        Some(world) if named => {
+            return Err(ApiError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "can't start a session in fresh world {}; make its colonies with <C-g> c",
+                    world.title
+                ),
+            ));
+        }
+        Some(world) if worktree => {
+            return Err(ApiError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "fresh world {}'s folders aren't git repositories; for a worktree, name a project with --project",
+                    world.title
+                ),
+            ));
+        }
+        Some(_) => Some(
+            asking
+                .map(|session| session.dir.clone())
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such session"))?,
+        ),
+    };
+    let parent = asking
         .filter(|session| session.kind == SessionKind::Colony || session.parent.is_some())
         .map(|session| session.id);
     Ok(Action::Start(ApiStart {
@@ -584,6 +605,7 @@ fn session_create(
         worktree,
         name,
         parent,
+        dir,
     }))
 }
 
@@ -1129,33 +1151,113 @@ mod tests {
         );
     }
 
+    /// What `orb session create` plans when pane 1 of session 1, a colony
+    /// in a project of `kind`, asks with `worktree` and, when `named`, the
+    /// project's id; and session 1's folder.
+    fn created_from_colony(
+        kind: ProjectKind,
+        worktree: bool,
+        named: bool,
+    ) -> (Result<Action, ApiError>, Option<PathBuf>) {
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        let project = app.sessions.projects.first_mut().map(|project| {
+            project.kind = kind;
+            project.id
+        });
+        let dir = app.sessions.sessions.first_mut().map(|session| {
+            session.kind = SessionKind::Colony;
+            session.dir.clone()
+        });
+        let planned = plan(
+            &app,
+            &Request {
+                caller: Some(PaneId(1)),
+                op: Op::SessionCreate {
+                    project: project.filter(|_| named),
+                    worktree,
+                    name: None,
+                },
+            },
+        );
+        (planned, dir)
+    }
+
     #[rstest::rstest]
     #[case::research(ProjectKind::Research)]
     #[case::learn(ProjectKind::Learn)]
     #[case::fresh_world(ProjectKind::FreshWorld)]
-    fn session_create_in_a_fresh_world_is_a_bad_request(#[case] kind: ProjectKind) {
-        // Given session 1, with pane 1, in a fresh world of `kind`.
-        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
-        if let Some(project) = app.sessions.projects.first_mut() {
-            project.kind = kind;
-        }
-
-        // When pane 1 runs `session create`.
-        let request = Request {
-            caller: Some(PaneId(1)),
-            op: Op::SessionCreate {
-                project: None,
-                worktree: false,
-                name: None,
-            },
-        };
-        let planned = plan(&app, &request);
+    fn session_create_naming_a_fresh_world_is_a_bad_request(#[case] kind: ProjectKind) {
+        // Given session 1, a colony with pane 1, in a fresh world of `kind`.
+        // When pane 1 runs `session create --project <the world>`.
+        let (planned, _) = created_from_colony(kind, false, true);
 
         // Then it is refused with bad_request.
         assert_eq!(
             planned.map(drop).map_err(|error| error.code),
             Err(ErrorCode::BadRequest),
-            "a fresh world takes colonies, not API sessions"
+            "a fresh world named with --project takes colonies, not API sessions"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::research(ProjectKind::Research)]
+    #[case::learn(ProjectKind::Learn)]
+    #[case::fresh_world(ProjectKind::FreshWorld)]
+    fn session_create_in_a_fresh_world_starts_in_the_callers_folder(#[case] kind: ProjectKind) {
+        // Given session 1, a colony with pane 1, in a fresh world of `kind`.
+        // When pane 1 runs `session create` without --project.
+        let (planned, dir) = created_from_colony(kind, false, false);
+
+        // Then the new session starts in session 1's folder.
+        let start_dir = match planned {
+            Ok(Action::Start(start)) => start.dir,
+            _ => None,
+        };
+        assert_eq!(start_dir, dir, "a helper starts in its colony's folder");
+    }
+
+    #[rstest::rstest]
+    fn session_create_in_a_fresh_world_is_the_callers_colonist() {
+        // Given session 1, a colony with pane 1, in a fresh world.
+        // When pane 1 runs `session create` without --project.
+        let (planned, _) = created_from_colony(ProjectKind::Research, false, false);
+
+        // Then the new session's parent is session 1.
+        let parent = match planned {
+            Ok(Action::Start(start)) => start.parent,
+            _ => None,
+        };
+        assert_eq!(parent, Some(SessionId(1)), "a helper sits under its colony");
+    }
+
+    #[rstest::rstest]
+    fn session_create_with_worktree_in_a_fresh_world_is_a_bad_request() {
+        // Given session 1, a colony with pane 1, in a fresh world.
+        // When pane 1 runs `session create --worktree` without --project.
+        let (planned, _) = created_from_colony(ProjectKind::Research, true, false);
+
+        // Then it is refused with bad_request.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "a fresh world's folders have no git for a worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_create_in_a_normal_project_has_no_dir() {
+        // Given session 1, a colony with pane 1, in a normal project.
+        // When pane 1 runs `session create`.
+        let (planned, _) = created_from_colony(ProjectKind::Normal, false, false);
+
+        // Then the new session gets no folder of its own.
+        let has_dir = match planned {
+            Ok(Action::Start(start)) => start.dir.is_some(),
+            _ => true,
+        };
+        assert!(
+            !has_dir,
+            "a normal project's session starts in its checkout"
         );
     }
 }

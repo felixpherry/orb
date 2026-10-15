@@ -2240,6 +2240,83 @@ async fn delete_research_session_whose_folder_is_gone_shows_no_error()
     Ok(())
 }
 
+/// An actor with orb's folder at `orb_root` and Research colony aa in
+/// `dir`, with a plain colonist helper running in that same folder.
+fn colony_with_helper(
+    orb_root: &Path,
+    dir: &Path,
+) -> Result<(SessionsActor, SessionId), Report<StoreError>> {
+    fs::create_dir_all(dir).change_context(StoreError)?;
+    let store = Store::open_in_memory()?;
+    let project_id = store.add_project(
+        &orb_root.join("research"),
+        "Research",
+        ProjectKind::Research,
+        0,
+    )?;
+    let colony = seed_with(
+        &store,
+        "claude",
+        project_id,
+        SessionKind::Colony,
+        dir,
+        "aa",
+        now_ms() - HOUR_MS,
+    )?
+    .session;
+    store.insert_session(
+        project_id,
+        SessionKind::Plain,
+        dir,
+        None,
+        None,
+        Some(colony),
+        now_ms(),
+    )?;
+    let (actor, _state) = start_at(store, orb_root);
+    Ok((actor, colony))
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_a_colony_alone_keeps_its_folder_while_a_colonist_runs_in_it()
+-> Result<(), Report<StoreError>> {
+    // Given a Research colony whose helper runs in the colony's folder.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("research").join("tokio-cancel");
+    let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
+
+    // When deleting the colony only.
+    actor.delete_session(colony);
+
+    // Then the folder stays for the helper.
+    assert!(
+        dir.exists(),
+        "a helper that stays keeps the colony's folder"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_a_colony_with_its_colonists_removes_its_folder() -> Result<(), Report<StoreError>>
+{
+    // Given a Research colony whose helper runs in the colony's folder.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("research").join("tokio-cancel");
+    let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
+
+    // When deleting the colony with its colonists.
+    actor.delete_with_colonists(colony);
+
+    // Then the folder is gone.
+    assert!(
+        !dir.exists(),
+        "deleting a colony with its colonists takes its folder"
+    );
+    Ok(())
+}
+
 /// A store with world `kit` of `kind` at `root` and colony aa in `dir`.
 fn world_colony(
     kind: ProjectKind,
@@ -8987,6 +9064,7 @@ async fn api_start(
         worktree,
         name: None,
         parent,
+        dir: None,
     };
     tokio::time::timeout(LIMIT, actor.ask(start))
         .await
@@ -9156,6 +9234,7 @@ fn api_start_whose_parent_was_deleted_meanwhile_is_top_level() -> Result<(), Rep
         worktree: true,
         name: None,
         parent: Some(colony),
+        dir: None,
     };
     let job = actor.api_start(start, None);
     actor.delete_session(colony);
@@ -9188,6 +9267,7 @@ fn api_start_in_a_new_worktree_saves_its_parent() -> Result<(), Report<StoreErro
         worktree: true,
         name: None,
         parent: Some(colony),
+        dir: None,
     };
     let job = actor.api_start(start, None);
     finish(&mut actor, job);
@@ -9205,6 +9285,65 @@ fn api_start_in_a_new_worktree_saves_its_parent() -> Result<(), Report<StoreErro
         parents,
         [Some(colony)],
         "a worktree session an agent in a colony asks for is its colonist"
+    );
+    Ok(())
+}
+
+/// The session an agent in a Research colony's folder `dir` (under orb's
+/// folder `orb_root`) gets when it asks for one there.
+fn started_in_colony_folder(orb_root: &Path, dir: &Path) -> Result<Session, Report<StoreError>> {
+    fs::create_dir_all(dir).change_context(StoreError)?;
+    let (store, colony) = research_sessions(orb_root, dir, false)?;
+    let (mut actor, state) = start_at(store, orb_root);
+    let project = state
+        .read()
+        .sessions
+        .session(colony.session)
+        .map(|session| session.project)
+        .ok_or_else(|| Report::new(StoreError).attach("no colony"))?;
+    let start = ApiStart {
+        project,
+        worktree: false,
+        name: None,
+        parent: Some(colony.session),
+        dir: Some(dir.to_path_buf()),
+    };
+    let job = actor.api_start(start, None);
+    finish(&mut actor, job);
+    sessions_of(&state)
+        .into_iter()
+        .find(|shown| shown.id != colony.session)
+        .ok_or_else(|| Report::new(StoreError).attach("no new session"))
+}
+
+#[rstest::rstest]
+fn api_start_in_a_folder_runs_there() -> Result<(), Report<StoreError>> {
+    // Given a Research colony in its own folder under orb's.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("research").join("x");
+
+    // When an agent in it asks for a session in that folder.
+    let started = started_in_colony_folder(orb.path(), &dir)?;
+
+    // Then the new session runs in the colony's folder.
+    assert_eq!(started.dir, dir, "a helper runs in its colony's folder");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn api_start_in_a_folder_is_a_plain_session() -> Result<(), Report<StoreError>> {
+    // Given a Research colony in its own folder under orb's.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("research").join("x");
+
+    // When an agent in it asks for a session in that folder.
+    let started = started_in_colony_folder(orb.path(), &dir)?;
+
+    // Then the new session is plain, not a colony.
+    assert_eq!(
+        started.kind,
+        SessionKind::Plain,
+        "a helper in a Research world is a plain session"
     );
     Ok(())
 }

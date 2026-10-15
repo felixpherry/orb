@@ -73,7 +73,7 @@ Entries are added or amended **only with human approval**.
 - (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
-- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder; Claude transcripts, pi session files and worktrees stay.
+- (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder unless a session not deleted with it still runs in it or below it; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled session closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
@@ -394,7 +394,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-g> ,` on a colony opens the session picker titled `Colonists`, listing the agents of every session under it, whatever the project filter.
 - (keybinds) In the session picker's list, `c` shows or hides colonists' agents alongside whichever filter is on, and every open starts with them hidden.
 - (api) A session that `orb session create` makes from a pane of a colony or a colonist is a colonist of the caller's session; from any other pane it is a top-level session.
-- (api) `orb session create` in a fresh world is refused.
+- (api) `orb session create` from a session in a fresh world starts a plain session in the caller's folder with no worktree; `--worktree` there and `--project` naming a fresh world are refused.
 - (sidebar) A session's colonists hang under a `colonists` row ending with one status dot per direct colonist (its most urgent status, its own colonists included), at most 8 then `+N`, then the count and `⌄`/`›`.
 - (sidebar) Under a folded colonists row, a colonist needing approval or input still shows, with each folded session above it as one dim `›` line.
 - (sidebar) A card's status icon is the most urgent of its own agents and every session under it.

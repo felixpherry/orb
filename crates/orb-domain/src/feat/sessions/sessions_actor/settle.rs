@@ -101,14 +101,15 @@ impl SessionsActor {
         self.pane_reports.remove(&pane);
     }
 
-    /// Deletes session `id` and then every unsettled session under it (the
-    /// list is read before the first delete clears their links).
+    /// Deletes every unsettled session under session `id`, then `id` itself,
+    /// so its folder isn't kept for sessions going with it (the list is read
+    /// before the first delete clears their links).
     pub(super) fn delete_with_colonists(&mut self, id: SessionId) {
         let colonists = self.state.read().sessions.below(id, false);
-        self.delete_session(id);
         for colonist in colonists {
             self.delete_session(colonist);
         }
+        self.delete_session(id);
     }
 
     /// Deletes session `id`: kills every pane, deletes a fresh-world
@@ -266,8 +267,8 @@ impl SessionsActor {
     }
 
     /// Removes session `id`'s folder when it is a colony in a fresh world,
-    /// in that world's colonies folder, and no other session uses it
-    /// (already gone counts as done). The error is the message box text.
+    /// in that world's colonies folder, and no other session runs in it or
+    /// below it (already gone counts as done). The error is the message box text.
     fn clear_folder(&self, id: SessionId) -> Result<(), String> {
         let Some(row) = self.sessions.get(&id) else {
             return Ok(());
@@ -285,7 +286,7 @@ impl SessionsActor {
         let shared = self
             .sessions
             .values()
-            .any(|other| other.id != id && other.dir == row.dir);
+            .any(|other| other.id != id && other.dir.starts_with(&row.dir));
         if shared || row.dir.parent() != Some(colonies.as_path()) {
             return Ok(());
         }

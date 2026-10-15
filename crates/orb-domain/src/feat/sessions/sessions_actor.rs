@@ -274,9 +274,9 @@ pub enum ApiPlace {
     Float,
 }
 
-/// An agent's request for a new session in project `project`'s checkout, or
-/// in a new worktree from its default branch, named `name`. Never selected or
-/// opened. Only ever `ask`ed.
+/// An agent's request for a new session in project `project`'s checkout, in
+/// `dir`, or in a new worktree from its default branch, named `name`. Never
+/// selected or opened. Only ever `ask`ed.
 #[derive(Debug)]
 pub struct ApiStart {
     pub project: ProjectId,
@@ -285,6 +285,9 @@ pub struct ApiStart {
     /// The session whose pane asked, when it's a colony or a colonist: the
     /// new session becomes its colonist.
     pub parent: Option<SessionId>,
+    /// The folder to start in instead of the project's checkout, never a
+    /// new worktree: the caller's own folder in a fresh world.
+    pub dir: Option<PathBuf>,
 }
 
 /// What an [`ApiStart`] answers: the new session and its first pane, or why
@@ -853,16 +856,16 @@ fn agent(row: &AgentRow, status: AgentStatus, pane: Option<PaneLaunch>) -> Agent
     }
 }
 
-/// The kind of session a project's new session gets: a colony in Research
-/// and Learn, Incognito in Incognito, plain elsewhere (a colony in the
-/// user's worlds comes only from the new-colony key).
+/// The kind of session a project's new session gets: Incognito in
+/// Incognito, plain elsewhere (colonies come only from the new-colony key).
 fn session_kind(kind: ProjectKind) -> SessionKind {
     match kind {
-        ProjectKind::Research | ProjectKind::Learn => SessionKind::Colony,
         ProjectKind::Incognito => SessionKind::Incognito,
-        ProjectKind::Normal | ProjectKind::SharedWorld | ProjectKind::FreshWorld => {
-            SessionKind::Plain
-        }
+        ProjectKind::Normal
+        | ProjectKind::SharedWorld
+        | ProjectKind::FreshWorld
+        | ProjectKind::Research
+        | ProjectKind::Learn => SessionKind::Plain,
     }
 }
 

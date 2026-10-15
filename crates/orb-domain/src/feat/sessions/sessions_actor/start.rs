@@ -68,8 +68,8 @@ impl SessionsActor {
     }
 
     /// Makes a session for an agent, as [`Self::new_session`] does, in
-    /// project `msg.project`'s checkout or, with `msg.worktree`, in a new
-    /// worktree from the project's default branch. The session isn't
+    /// `msg.dir` when set, else project `msg.project`'s checkout or, with
+    /// `msg.worktree`, a new worktree from the project's default branch. The session isn't
     /// selected or opened; `reply` gets the session and its first pane once
     /// it's made, or why it wasn't.
     #[must_use]
@@ -83,28 +83,31 @@ impl SessionsActor {
             worktree,
             name,
             parent,
+            dir,
         } = msg;
         let asker = Asker::Api(reply);
-        let workspace = if worktree {
-            let base = match self.project_of(project) {
-                None => Err("the project is gone".to_owned()),
-                Some((root, _)) => self.services.git.default_branch(&root).map_err(|report| {
-                    git_failed(
-                        &self.services.log,
-                        "default branch for a new session",
-                        &report,
-                    )
-                }),
-            };
-            match base {
-                Ok(base) => Workspace::NewWorktree { base },
-                Err(error) => {
-                    self.end_new(Err(error), asker);
-                    return None;
+        let workspace = match (dir, worktree) {
+            (Some(dir), _) => Workspace::Existing(dir),
+            (None, true) => {
+                let base = match self.project_of(project) {
+                    None => Err("the project is gone".to_owned()),
+                    Some((root, _)) => self.services.git.default_branch(&root).map_err(|report| {
+                        git_failed(
+                            &self.services.log,
+                            "default branch for a new session",
+                            &report,
+                        )
+                    }),
+                };
+                match base {
+                    Ok(base) => Workspace::NewWorktree { base },
+                    Err(error) => {
+                        self.end_new(Err(error), asker);
+                        return None;
+                    }
                 }
             }
-        } else {
-            Workspace::Checkout
+            (None, false) => Workspace::Checkout,
         };
         self.start_new(project, workspace, name, parent, asker)
     }
