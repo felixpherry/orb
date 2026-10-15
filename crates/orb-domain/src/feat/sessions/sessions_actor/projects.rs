@@ -113,7 +113,7 @@ impl SessionsActor {
             }
             Some(WorldDirs::Shared(root)) => {
                 let named = (!name.is_empty()).then(|| name.to_owned());
-                self.save_session(world, SessionKind::Colony, &root, None, named, true)
+                self.save_session(world, SessionKind::Colony, &root, None, named, None, true)
             }
             Some(WorldDirs::Fresh {
                 kit,
@@ -123,7 +123,7 @@ impl SessionsActor {
                 .make_folder(&kit, &colonies, seed, name, &home)
                 .and_then(|dir| {
                     let saved =
-                        self.save_session(world, SessionKind::Colony, &dir, None, None, true);
+                        self.save_session(world, SessionKind::Colony, &dir, None, None, None, true);
                     if saved.is_err() {
                         remove_unstarted(&self.services.log, &dir);
                     }

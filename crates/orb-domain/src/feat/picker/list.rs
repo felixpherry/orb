@@ -34,6 +34,10 @@ pub enum PickerItem {
     AllProjects,
     /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
     Confirm(bool),
+    /// A settle or delete confirm's answer on a session with colonists:
+    /// `Colony only`, or `With colonists` when `colonists`. Matched on its
+    /// label.
+    Covers { colonists: bool },
     /// An agent in the session picker: the agent `agent` running in pane
     /// `pane` of session `id`, labelled `<project>/<session>/<agent>` and
     /// matched on the whole label. `split` is the byte offset where the
@@ -88,6 +92,15 @@ pub const ALL_PROJECTS: &str = "All projects";
 /// The text of a [`PickerItem::Confirm`] row.
 pub fn confirm_label(yes: bool) -> &'static str {
     if yes { "Yes" } else { "No" }
+}
+
+/// The text of a [`PickerItem::Covers`] row.
+pub fn covers_label(colonists: bool) -> &'static str {
+    if colonists {
+        "With colonists"
+    } else {
+        "Colony only"
+    }
 }
 
 /// The text of a [`PickerItem::WorldKind`] row.
@@ -419,6 +432,7 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
+        | PickerItem::Covers { .. }
         | PickerItem::Session { .. }
         | PickerItem::Worktree { .. }
         | PickerItem::Hit { .. }
@@ -481,6 +495,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
+        PickerItem::Covers { colonists } => (covers_label(*colonists).to_owned(), None),
         PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
@@ -544,6 +559,7 @@ mod tests {
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
+                PickerItem::Covers { colonists } => super::covers_label(*colonists).to_owned(),
                 PickerItem::Session { label, .. }
                 | PickerItem::Worktree { label, .. }
                 | PickerItem::Hit { label, .. } => label.clone(),
@@ -630,6 +646,7 @@ mod tests {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
+                | PickerItem::Covers { .. }
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. }

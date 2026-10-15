@@ -45,14 +45,30 @@ impl SessionsActor {
     /// underway (a turn that started after the key press wins), then kills
     /// every pane, keeping its tabs, layout and each pane's resume command.
     pub(super) fn settle_session(&mut self, id: SessionId) {
-        if self
-            .session_rows(id)
-            .any(|row| self.status(row.id).is_some_and(AgentStatus::in_progress))
-        {
+        self.settle_all(vec![id]);
+    }
+
+    /// Settles session `id` and every unsettled session under it, or none
+    /// of them while any has a turn underway.
+    pub(super) fn settle_with_colonists(&mut self, id: SessionId) {
+        let under = self.state.read().sessions.under(id);
+        self.settle_all(std::iter::once(id).chain(under).collect());
+    }
+
+    /// Settles every session in `ids`, unless one has a turn underway: then
+    /// none.
+    fn settle_all(&mut self, ids: Vec<SessionId>) {
+        let working = ids.iter().any(|&id| {
+            self.session_rows(id)
+                .any(|row| self.status(row.id).is_some_and(AgentStatus::in_progress))
+        });
+        if working {
             return;
         }
-        self.edit_session(id, settle_session_row);
-        self.kill_panes(id, "session settled");
+        for id in ids {
+            self.edit_session(id, settle_session_row);
+            self.kill_panes(id, "session settled");
+        }
     }
 
     pub(super) fn unsettle_session(&mut self, id: SessionId) {
@@ -85,7 +101,17 @@ impl SessionsActor {
         self.pane_reports.remove(&pane);
     }
 
-    /// Deletes session `id`: kills every pane, deletes a Research or Learn
+    /// Deletes session `id` and then every unsettled session under it (the
+    /// list is read before the first delete clears their links).
+    pub(super) fn delete_with_colonists(&mut self, id: SessionId) {
+        let colonists = self.state.read().sessions.below(id, false);
+        self.delete_session(id);
+        for colonist in colonists {
+            self.delete_session(colonist);
+        }
+    }
+
+    /// Deletes session `id`: kills every pane, deletes a fresh-world
     /// colony's folder that is orb's own and no other session uses, then its tabs,
     /// panes, agents (ended ones included) and row, and forgets them. The
     /// sessions it made become top-level.
@@ -239,29 +265,28 @@ impl SessionsActor {
         }
     }
 
-    /// Removes session `id`'s folder when it is a colony in Research or Learn,
-    /// in orb's own folder for it, and no other session uses it
+    /// Removes session `id`'s folder when it is a colony in a fresh world,
+    /// in that world's colonies folder, and no other session uses it
     /// (already gone counts as done). The error is the message box text.
     fn clear_folder(&self, id: SessionId) -> Result<(), String> {
         let Some(row) = self.sessions.get(&id) else {
             return Ok(());
         };
-        let project = self
+        let colonies = self
             .state
             .read()
             .sessions
             .project(row.project_id)
-            .map(|project| project.kind);
-        let kind_dir = match (row.kind, project) {
-            (SessionKind::Colony, Some(ProjectKind::Research)) => "research",
-            (SessionKind::Colony, Some(ProjectKind::Learn)) => "learn",
-            _ => return Ok(()),
+            .and_then(|project| world_dirs(&self.orb_root, project));
+        let (SessionKind::Colony, Some(WorldDirs::Fresh { colonies, .. })) = (row.kind, colonies)
+        else {
+            return Ok(());
         };
         let shared = self
             .sessions
             .values()
             .any(|other| other.id != id && other.dir == row.dir);
-        if shared || row.dir.parent() != Some(self.orb_root.join(kind_dir).as_path()) {
+        if shared || row.dir.parent() != Some(colonies.as_path()) {
             return Ok(());
         }
         match fs::remove_dir_all(&row.dir) {

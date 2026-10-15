@@ -129,6 +129,10 @@ pub enum Intent {
     /// Open the session picker over the agents inside the project filter,
     /// newest chat first, to jump into one.
     OpenSessionPicker,
+    /// `<C-g> ,` on a colony: the session picker over its colonists' agents.
+    OpenColonists,
+    /// `c` in the session picker's list: show or hide colonists' agents.
+    ToggleColonists,
     /// Open the worktree picker over every directory under
     /// `~/.orb/worktrees/<repo>/`, most recently used first.
     OpenWorktreePicker,
@@ -288,6 +292,7 @@ impl fmt::Display for Intent {
             Self::NewIncognito => "incognito",
             Self::NewColony => "new colony",
             Self::OpenSessionPicker => "sessions",
+            Self::OpenColonists | Self::ToggleColonists => "colonists",
             Self::OpenWorktreePicker => "worktrees",
             Self::OpenProjects => "projects",
             Self::OpenWorlds => "worlds",
@@ -367,6 +372,8 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Intent::OpenSessionPicker, "sessions")]
+    #[case(Intent::OpenColonists, "colonists")]
+    #[case(Intent::ToggleColonists, "colonists")]
     #[case(Intent::PickerFilter(SessionFilter::Blocked), "filter")]
     fn session_picker_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the session picker's intents.

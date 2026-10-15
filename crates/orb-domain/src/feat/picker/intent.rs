@@ -15,8 +15,8 @@ use crate::feat::picker::state::{
 };
 use crate::feat::picker::validator::{
     DeleteWorktreeError, validate_add_directory, validate_close_listed_agent,
-    validate_delete_worktree, validate_open_directory, validate_pick_project,
-    validate_pick_session, validate_remove_project,
+    validate_delete_worktree, validate_open_colonists, validate_open_directory,
+    validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::intent::new_session;
 use crate::feat::sessions::intent::{
@@ -80,8 +80,31 @@ pub(crate) fn open_worlds(state: &mut AppState) -> Vec<Command> {
 
 /// Opens the session picker, loading the selected row's preview.
 pub(crate) fn open_session_picker(state: &mut AppState) -> Vec<Command> {
-    let items = session_items(&state.sessions, &state.layouts, SessionFilter::All);
+    let items = session_items(
+        &state.sessions,
+        &state.layouts,
+        SessionFilter::All,
+        false,
+        None,
+    );
     open_picker(state, PickerState::sessions(items, state.focus));
+    preview_command(state)
+}
+
+/// Opens the Colonists picker on the keyed colony, loading the selected
+/// row's preview.
+pub(crate) fn open_colonists(state: &mut AppState) -> Vec<Command> {
+    let Ok(colony) = validate_open_colonists(state) else {
+        return vec![];
+    };
+    let items = session_items(
+        &state.sessions,
+        &state.layouts,
+        SessionFilter::All,
+        false,
+        Some(colony),
+    );
+    open_picker(state, PickerState::colonists(items, colony, state.focus));
     preview_command(state)
 }
 
@@ -177,6 +200,15 @@ pub(crate) fn press_g(state: &mut AppState) -> Vec<Command> {
     let before = picked(state);
     if let Some(picker) = &mut state.picker {
         picker.press_g();
+    }
+    with_preview(state, before, vec![])
+}
+
+/// `c` in the session picker's list: shows or hides colonists' agents.
+pub(crate) fn toggle_colonists(state: &mut AppState) -> Vec<Command> {
+    let before = picked(state);
+    if let Some(picker) = &mut state.picker {
+        picker.toggle_colonists(&state.sessions, &state.layouts);
     }
     with_preview(state, before, vec![])
 }
@@ -456,16 +488,26 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
         }
         Some(&PickerKind::SettleSession { session }) => {
             match close_picker(state).as_ref().and_then(PickerState::selected) {
-                Some(PickerItem::Confirm(true)) => settle_session(state, session),
+                Some(PickerItem::Confirm(true) | PickerItem::Covers { colonists: false }) => {
+                    settle_session(state, session, false)
+                }
+                Some(PickerItem::Covers { colonists: true }) => {
+                    settle_session(state, session, true)
+                }
                 _ => vec![],
             }
         }
         Some(&PickerKind::DeleteSession { session, .. }) => {
             match close_picker(state).as_ref().and_then(PickerState::selected) {
-                Some(PickerItem::Confirm(true))
+                Some(PickerItem::Confirm(true) | PickerItem::Covers { colonists: false })
                     if still_deletable(state, SidebarItem::Session(session)) =>
                 {
-                    delete_session(state, session)
+                    delete_session(state, session, false)
+                }
+                Some(PickerItem::Covers { colonists: true })
+                    if still_deletable(state, SidebarItem::Session(session)) =>
+                {
+                    delete_session(state, session, true)
                 }
                 _ => vec![],
             }

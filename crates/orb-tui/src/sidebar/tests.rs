@@ -1838,7 +1838,7 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
             .unwrap_or_default()
             .join(" ")
     };
-    let picker_name = session_items(&sessions, &layouts, SessionFilter::All)
+    let picker_name = session_items(&sessions, &layouts, SessionFilter::All, false, None)
         .into_iter()
         .find_map(|item| match item {
             PickerItem::Session { label, .. } => {

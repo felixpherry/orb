@@ -29,7 +29,7 @@ use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::picker::list::{
     ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
-    world_kind_label,
+    covers_label, world_kind_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::feat::sessions::state::{ProjectKind, Sessions};
@@ -222,6 +222,9 @@ pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
             let own: &[(&str, &str)] = match kind {
                 PickerKind::ManageProjects | PickerKind::ManageWorlds => {
                     &[("a", "add"), ("d", "remove")]
+                }
+                PickerKind::Sessions { scope: None, .. } => {
+                    &[("a/b/w/i/s", "filter"), ("c", "colonists"), ("d", "close")]
                 }
                 PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "close")],
                 _ => &[("d", "delete")],
@@ -459,6 +462,10 @@ fn row_content(
             None,
         ),
         PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
+        PickerItem::Covers { colonists } => (
+            highlight(covers_label(*colonists), &matches.name, |_| FG),
+            None,
+        ),
         PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (highlight(label, &matches.name, |_| FG), None),
@@ -897,15 +904,15 @@ mod tests {
 
     #[rstest::rstest]
     #[case::settle(
-        PickerState::settle_session(SessionId(1), Focus::Sidebar),
+        PickerState::settle_session(SessionId(1), false, Focus::Sidebar),
         "Settle login?"
     )]
     #[case::delete(
-        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), false, false, Focus::Sidebar),
         "Delete login?"
     )]
     #[case::delete_folder(
-        PickerState::delete_session(SessionId(1), true, Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), true, false, Focus::Sidebar),
         "Delete login and its folder?"
     )]
     fn session_confirm_names_the_session(#[case] picker: PickerState, #[case] title: &str) {
@@ -1033,15 +1040,15 @@ mod tests {
         "Remove project?"
     )]
     #[case(
-        PickerState::settle_session(SessionId(1), Focus::Sidebar),
+        PickerState::settle_session(SessionId(1), false, Focus::Sidebar),
         "Settle session?"
     )]
     #[case(
-        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), false, false, Focus::Sidebar),
         "Delete session?"
     )]
     #[case(
-        PickerState::delete_session(SessionId(1), true, Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), true, false, Focus::Sidebar),
         "Delete session and its folder?"
     )]
     #[case::clean_worktree(delete_worktree(false), "Delete worktree?")]
@@ -1224,11 +1231,11 @@ mod tests {
         "⏎ confirm · Esc cancel"
     )]
     #[case(
-        PickerState::settle_session(SessionId(1), Focus::Sidebar),
+        PickerState::settle_session(SessionId(1), false, Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(
-        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), false, false, Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
@@ -1816,6 +1823,28 @@ mod tests {
         let rows = (find(&buf, "No"), find(&buf, "Yes"));
         assert!(
             matches!(rows, (Some((_, no)), Some((_, yes))) if no + 1 == yes),
+            "rows were at {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn three_row_confirm_names_its_rows() {
+        // Given the settle confirm for session 1, which has colonists.
+        let picker = PickerState::settle_session(SessionId(1), true, Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then No, Colony only and With colonists are drawn on three lines
+        // in a row.
+        let rows = [
+            find(&buf, "No"),
+            find(&buf, "Colony only"),
+            find(&buf, "With colonists"),
+        ]
+        .map(|at| at.map(|(_, y)| y));
+        assert!(
+            matches!(rows, [Some(no), Some(colony), Some(with)] if no + 1 == colony && colony + 1 == with),
             "rows were at {rows:?}"
         );
     }

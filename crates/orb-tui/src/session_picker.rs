@@ -128,8 +128,18 @@ pub(crate) fn boxed(title: Option<Line<'static>>) -> Block<'static> {
     }
 }
 
-/// ` Sessions `, or ` Sessions · <filter> ` unless `filter` is all.
-fn title(filter: SessionFilter) -> Line<'static> {
+/// ` Sessions `, or ` Colonists ` in the Colonists picker, then
+/// ` · <filter>` unless the filter is all, then ` · colonists` while
+/// colonists' agents are shown.
+fn title(kind: &PickerKind) -> Line<'static> {
+    let (filter, colonists, scope) = match kind {
+        PickerKind::Sessions {
+            filter,
+            colonists,
+            scope,
+        } => (*filter, *colonists, scope.is_some()),
+        _ => (SessionFilter::All, false, false),
+    };
     let name = match filter {
         SessionFilter::All => None,
         SessionFilter::Blocked => Some("blocked"),
@@ -137,10 +147,15 @@ fn title(filter: SessionFilter) -> Line<'static> {
         SessionFilter::Idle => Some("idle"),
         SessionFilter::Settled => Some("settled"),
     };
-    let text = name.map_or_else(
-        || " Sessions ".to_owned(),
-        |name| format!(" Sessions · {name} "),
-    );
+    let mut text = if scope { " Colonists" } else { " Sessions" }.to_owned();
+    if let Some(name) = name {
+        text.push_str(" · ");
+        text.push_str(name);
+    }
+    if colonists {
+        text.push_str(" · colonists");
+    }
+    text.push(' ');
     Line::from(span(text, BLUE))
 }
 
@@ -160,11 +175,7 @@ fn render_list(
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
-    let filter = match picker.kind() {
-        PickerKind::Sessions { filter } => *filter,
-        _ => SessionFilter::All,
-    };
-    let block = boxed(Some(title(filter)));
+    let block = boxed(Some(title(picker.kind())));
     let inner = block.inner(area);
     block.render(area, buf);
     let [input, rule, rows] = Layout::vertical([
@@ -758,6 +769,8 @@ mod tests {
                 sessions,
                 &layouts_for(&sessions.projects),
                 SessionFilter::All,
+                false,
+                None,
             ),
             Focus::Sidebar,
         )
@@ -920,15 +933,25 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(SessionFilter::Blocked, " Sessions · blocked ")]
-    #[case(SessionFilter::Working, " Sessions · working ")]
-    #[case(SessionFilter::Idle, " Sessions · idle ")]
-    #[case(SessionFilter::Settled, " Sessions · settled ")]
-    fn title_names_the_active_filter(#[case] filter: SessionFilter, #[case] expected: &str) {
-        // Given the session picker filtered to `filter`.
+    #[case(SessionFilter::Blocked, false, " Sessions · blocked ")]
+    #[case(SessionFilter::Working, false, " Sessions · working ")]
+    #[case(SessionFilter::Idle, false, " Sessions · idle ")]
+    #[case(SessionFilter::Settled, false, " Sessions · settled ")]
+    #[case(SessionFilter::Blocked, true, " Sessions · blocked · colonists ")]
+    fn title_names_the_active_filter(
+        #[case] filter: SessionFilter,
+        #[case] colonists: bool,
+        #[case] expected: &str,
+    ) {
+        // Given the session picker filtered to `filter`, showing colonists
+        // when `colonists`.
         let sessions = two();
+        let layouts = layouts_for(&sessions.projects);
         let mut picker = picker(&sessions);
-        picker.set_filter(filter, &sessions, &layouts_for(&sessions.projects));
+        picker.set_filter(filter, &sessions, &layouts);
+        if colonists {
+            picker.toggle_colonists(&sessions, &layouts);
+        }
 
         // When drawing the picker.
         let (buf, _) = draw(&picker, &sessions, 140, 30);
@@ -1334,7 +1357,48 @@ mod tests {
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
 
-        // Then the hints name the filters, close and open.
+        // Then the hints name the filters, colonists, close and open.
+        let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · c colonists · d close · ⏎ open · Esc close";
+        assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
+    }
+
+    /// The Colonists picker over `sessions`' agents, on colony 1.
+    fn colonists_picker(sessions: &Sessions) -> PickerState {
+        PickerState::colonists(
+            session_items(
+                sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+                false,
+                None,
+            ),
+            SessionId(1),
+            Focus::Sidebar,
+        )
+    }
+
+    #[rstest::rstest]
+    fn colonists_picker_is_titled_colonists() {
+        // Given the Colonists picker.
+        let sessions = two();
+
+        // When drawing it.
+        let (buf, _) = draw(&colonists_picker(&sessions), &sessions, 140, 30);
+
+        // Then the title row is ` Colonists `.
+        let title = line_of(&buf, "Colonists");
+        assert!(title.contains(" Colonists "), "title row was {title}");
+    }
+
+    #[rstest::rstest]
+    fn colonists_picker_hints_leave_out_c() {
+        // Given the Colonists picker.
+        let sessions = two();
+
+        // When drawing it.
+        let (buf, _) = draw(&colonists_picker(&sessions), &sessions, 140, 30);
+
+        // Then the hints name the filters and close, but not `c`.
         let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · d close · ⏎ open · Esc close";
         assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
     }

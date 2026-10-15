@@ -122,6 +122,42 @@ pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError>
     }
 }
 
+/// What the mode line says when settling with colonists is refused because
+/// a colonist is working.
+pub const COLONIST_WORKING: &str = "Can't settle while a colonist is working";
+
+/// Why a session can't be settled together with its colonists.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error(debug)]
+pub enum SettleColonistsError {
+    /// A session under it has a turn underway.
+    Working,
+}
+
+/// Allow settling `session` with its colonists only while none of the
+/// sessions under it has a turn underway.
+///
+/// # Errors
+///
+/// Returns [`SettleColonistsError::Working`] when one does.
+pub fn validate_settle_colonists(
+    state: &AppState,
+    session: SessionId,
+) -> Result<(), SettleColonistsError> {
+    let working = state.sessions.under(session).into_iter().any(|id| {
+        state
+            .sessions
+            .agents(id)
+            .into_iter()
+            .any(|agent| agent.status.in_progress())
+    });
+    if working {
+        Err(SettleColonistsError::Working)
+    } else {
+        Ok(())
+    }
+}
+
 /// Why pinning or unpinning can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]

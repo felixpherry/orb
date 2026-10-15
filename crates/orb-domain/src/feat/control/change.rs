@@ -149,13 +149,15 @@ fn settle(state: &mut AppState, session: SessionId) -> Result<Vec<Command>, ApiE
         .map(|selected| selected.id)
         == Some(session)
     {
-        state.sessions.cursor = state
-            .sessions
-            .card_neighbour(SidebarItem::Session(session), &state.layouts);
+        state.sessions.cursor =
+            state
+                .sessions
+                .card_neighbour(SidebarItem::Session(session), &state.layouts, &[]);
     }
-    Ok(vec![Command::Sessions(SessionsCommand::SettleSession(
+    Ok(vec![Command::Sessions(SessionsCommand::SettleSession {
         session,
-    ))])
+        with_colonists: false,
+    })])
 }
 
 /// Shows `pane` of `session` (else its focused pane) in its tab, makes the

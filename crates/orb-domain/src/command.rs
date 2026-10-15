@@ -107,12 +107,21 @@ pub enum SessionsCommand {
         session: SessionId,
         name: Option<String>,
     },
-    /// Move the session to the Settled shelf.
-    SettleSession(SessionId),
+    /// Move the session to the Settled shelf, with every unsettled session
+    /// under it when `with_colonists`; none moves while any has a turn
+    /// underway.
+    SettleSession {
+        session: SessionId,
+        with_colonists: bool,
+    },
     /// Bring the session back from the Settled shelf and keep it active.
     UnsettleSession(SessionId),
-    /// Delete the session: its panes, tabs and agents.
-    DeleteSession(SessionId),
+    /// Delete the session: its panes, tabs and agents, and every unsettled
+    /// session under it when `with_colonists`.
+    DeleteSession {
+        session: SessionId,
+        with_colonists: bool,
+    },
     /// The keys are in this agent pane now.
     Visit(PaneId),
     /// Save the sidebar's width and project filter as they now are in the

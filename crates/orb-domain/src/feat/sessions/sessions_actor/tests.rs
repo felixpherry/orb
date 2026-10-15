@@ -1651,6 +1651,92 @@ async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<S
     Ok(())
 }
 
+/// Agents aa, bb and cc's polled sessions, bb a colonist of aa and cc of bb,
+/// cc's agent `cc_status` and the others idle.
+async fn colony_of_three(
+    cc_status: AgentStatus,
+) -> Result<(SessionsActor, [SessionId; 3]), Report<StoreError>> {
+    let store = Store::open_in_memory()?;
+    let ids = [
+        insert_agent(&store, "aa")?.session,
+        insert_agent(&store, "bb")?.session,
+        insert_agent(&store, "cc")?.session,
+    ];
+    let host = listing(vec![
+        record("aa", AgentStatus::Idle),
+        record("bb", AgentStatus::Idle),
+        record("cc", cc_status),
+    ]);
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+    for session in &mut state.write().sessions.sessions {
+        session.parent = match session.id {
+            id if id == ids[1] => Some(ids[0]),
+            id if id == ids[2] => Some(ids[1]),
+            _ => None,
+        };
+    }
+    Ok((actor, ids))
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn settling_with_colonists_settles_the_whole_subtree() -> Result<(), Report<StoreError>> {
+    // Given colony aa with colonist bb, whose colonist is cc, all idle.
+    let (mut actor, ids) = colony_of_three(AgentStatus::Idle).await?;
+
+    // When settling aa with its colonists.
+    actor.settle_with_colonists(ids[0]);
+
+    // Then all three are saved settled.
+    let saved = ids.map(|id| saved_session_row(&actor.store, id)?.settled_override);
+    assert_eq!(
+        saved,
+        [Some(SettledOverride::Settled); 3],
+        "settling with colonists settles every session under the colony"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn settling_with_colonists_settles_none_while_one_works() -> Result<(), Report<StoreError>> {
+    // Given colony aa with colonist bb, whose colonist cc is working.
+    let (mut actor, ids) = colony_of_three(AgentStatus::Working).await?;
+
+    // When settling aa with its colonists.
+    actor.settle_with_colonists(ids[0]);
+
+    // Then none is saved settled.
+    let saved = ids.map(|id| saved_session_row(&actor.store, id)?.settled_override);
+    assert_eq!(
+        saved, [None; 3],
+        "a colonist's turn that started after the key press wins"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_with_colonists_deletes_the_whole_subtree() -> Result<(), Report<StoreError>> {
+    // Given colony aa with colonist bb, whose colonist is cc.
+    let (mut actor, ids) = colony_of_three(AgentStatus::Idle).await?;
+
+    // When deleting aa with its colonists.
+    actor.delete_with_colonists(ids[0]);
+
+    // Then none of the three is left in the app state or the store.
+    let left = ids.map(|id| {
+        actor.state.read().sessions.session(id).is_some()
+            || saved_session_row(&actor.store, id).is_some()
+    });
+    assert_eq!(
+        left, [false; 3],
+        "deleting with colonists deletes every session under the colony"
+    );
+    Ok(())
+}
+
 #[rstest::rstest]
 #[tokio::test]
 async fn settle_session_kills_every_pane() -> Result<(), Report<StoreError>> {
@@ -2131,6 +2217,66 @@ async fn delete_research_session_whose_folder_is_gone_shows_no_error()
         error_of(&actor),
         None,
         "an already-removed folder counts as removed"
+    );
+    Ok(())
+}
+
+/// A store with world `kit` of `kind` at `root` and colony aa in `dir`.
+fn world_colony(
+    kind: ProjectKind,
+    root: &Path,
+    dir: &Path,
+) -> Result<(Store, Seeded), Report<StoreError>> {
+    let store = Store::open_in_memory()?;
+    let project_id = store.add_project(root, "kit", kind, 0)?;
+    let inserted = seed_with(
+        &store,
+        "claude",
+        project_id,
+        SessionKind::Colony,
+        dir,
+        "aa",
+        now_ms() - HOUR_MS,
+    )?;
+    Ok((store, inserted))
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn delete_fresh_world_colony_removes_its_folder() -> Result<(), Report<StoreError>> {
+    // Given a colony of fresh world kit in its own folder under orb's
+    // worlds folder.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let kit = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("worlds").join("kit").join("x");
+    fs::create_dir_all(&dir).change_context(StoreError)?;
+    let (store, inserted) = world_colony(ProjectKind::FreshWorld, kit.path(), &dir)?;
+    let (mut actor, _state) = start_at(store, orb.path());
+
+    // When deleting it.
+    actor.delete_session(inserted.session);
+
+    // Then its folder is gone.
+    assert!(!dir.exists(), "a fresh-world colony takes its folder");
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn delete_shared_world_colony_keeps_its_folder() -> Result<(), Report<StoreError>> {
+    // Given a colony of shared world kit, running in the world's folder.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let world = tempfile::tempdir().change_context(StoreError)?;
+    let (store, inserted) = world_colony(ProjectKind::SharedWorld, world.path(), world.path())?;
+    let (mut actor, _state) = start_at(store, orb.path());
+
+    // When deleting it.
+    actor.delete_session(inserted.session);
+
+    // Then the world's folder stays.
+    assert!(
+        world.path().is_dir(),
+        "a shared-world colony leaves the world's folder"
     );
     Ok(())
 }
@@ -5101,6 +5247,51 @@ async fn deleting_a_session_clears_its_colonists_parent_in_the_sidebar()
             .map(|session| session.parent),
         Some(None),
         "deleting a session should leave its colonists top level"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_colony_only_leaves_its_colonists_top_level() -> Result<(), Report<StoreError>> {
+    // Given saved colony A and its colonist B, the actor started through
+    // its mailbox.
+    let store = Store::open_in_memory()?;
+    let project = orb_project(&store)?;
+    let dir = Path::new(PROJECT_ROOT);
+    let (colony, _) =
+        store.insert_session(project, SessionKind::Colony, dir, None, None, None, 1_000)?;
+    let (colonist, _) = store.insert_session(
+        project,
+        SessionKind::Plain,
+        dir,
+        None,
+        None,
+        Some(colony),
+        1_100,
+    )?;
+    let zmx = zmx_running(&store);
+    let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
+
+    // When deleting A alone through the mailbox.
+    ask_within(
+        &actor,
+        SessionsCommand::DeleteSession {
+            session: colony,
+            with_colonists: false,
+        },
+    )
+    .await?;
+
+    // Then B stays, top level.
+    assert_eq!(
+        state
+            .read()
+            .sessions
+            .session(colonist)
+            .map(|session| session.parent),
+        Some(None),
+        "Colony only should leave the colonist as a top-level session"
     );
     Ok(())
 }
@@ -8561,7 +8752,14 @@ async fn settling_takes_the_session_off_the_right_side_before_killing_its_panes(
     let (actor, session, zmx) = shown_movable_through_mailbox().await?;
 
     // When settling it through the mailbox.
-    ask_within(&actor, SessionsCommand::SettleSession(session)).await?;
+    ask_within(
+        &actor,
+        SessionsCommand::SettleSession {
+            session,
+            with_colonists: false,
+        },
+    )
+    .await?;
 
     // Then it was off the right side at each of its two kills.
     assert_eq!(
@@ -8580,7 +8778,14 @@ async fn deleting_takes_the_session_off_the_right_side_before_killing_its_panes(
     let (actor, session, zmx) = shown_movable_through_mailbox().await?;
 
     // When deleting it through the mailbox.
-    ask_within(&actor, SessionsCommand::DeleteSession(session)).await?;
+    ask_within(
+        &actor,
+        SessionsCommand::DeleteSession {
+            session,
+            with_colonists: false,
+        },
+    )
+    .await?;
 
     // Then it was off the right side at each of its two kills.
     assert_eq!(
@@ -8750,17 +8955,19 @@ async fn api_add(
 }
 
 /// Asks `actor` for an agent's new session of `project` (in a new
-/// worktree when `worktree`) and waits, at most [`LIMIT`], for the
-/// session and its first pane.
+/// worktree when `worktree`), made by session `parent`, and waits, at most
+/// [`LIMIT`], for the session and its first pane.
 async fn api_start(
     actor: &ActorRef<SessionsActor>,
     project: ProjectId,
     worktree: bool,
+    parent: Option<SessionId>,
 ) -> Result<(SessionId, PaneId), Report<StoreError>> {
     let start = ApiStart {
         project,
         worktree,
         name: None,
+        parent,
     };
     tokio::time::timeout(LIMIT, actor.ask(start))
         .await
@@ -8815,7 +9022,7 @@ async fn api_start_in_the_checkout_opens_nothing() -> Result<(), Report<StoreErr
         spawned_reporting(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
 
     // When an agent asks for a session in its checkout.
-    let started = api_start(&actor, project, false).await;
+    let started = api_start(&actor, project, false, None).await;
 
     // Then it gets the session, and nothing is reported ready to open.
     let opened = report
@@ -8840,7 +9047,7 @@ async fn api_start_leaves_the_sidebar_cursor() -> Result<(), Report<StoreError>>
     let before = state.read().sessions.cursor;
 
     // When an agent asks for a session in its checkout.
-    api_start(&actor, project, false).await?;
+    api_start(&actor, project, false, None).await?;
 
     // Then the sidebar's cursor stays where it was.
     assert_eq!(
@@ -8861,7 +9068,7 @@ async fn api_start_in_a_new_worktree_replies_with_its_session() -> Result<(), Re
     let (actor, state) = spawned_with(store, &listing(Vec::new()), git.clone(), zmx).await?;
 
     // When an agent asks for a session in a new worktree.
-    let (session, _pane) = api_start(&actor, project, true).await?;
+    let (session, _pane) = api_start(&actor, project, true, None).await?;
 
     // Then the session it gets runs in the worktree orb made.
     let dir = sessions_of(&state)
@@ -8872,6 +9079,74 @@ async fn api_start_in_a_new_worktree_replies_with_its_session() -> Result<(), Re
         dir,
         git.added().map(|(path, _)| path),
         "the replied session runs in the new worktree"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_saves_its_parent() -> Result<(), Report<StoreError>> {
+    // Given a store file with the orb project and colony aa, and the actor
+    // started through its mailbox.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    let store = Store::open(&path)?;
+    let project = orb_project(&store)?;
+    let colony = insert_agent(&store, "aa")?.session;
+    let zmx = zmx_running(&store);
+    let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
+
+    // When an agent in aa asks for a session in the checkout.
+    let (session, _pane) = api_start(&actor, project, false, Some(colony)).await?;
+
+    // Then the new session has aa as its parent, shown and saved.
+    let shown = sessions_of(&state)
+        .into_iter()
+        .find(|shown| shown.id == session)
+        .and_then(|shown| shown.parent);
+    let saved = Store::open(&path)?
+        .layouts()?
+        .sessions
+        .into_iter()
+        .find(|row| row.id == session)
+        .and_then(|row| row.parent);
+    assert_eq!(
+        (shown, saved),
+        (Some(colony), Some(colony)),
+        "an agent's new session is its maker's colonist"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn api_start_whose_parent_was_deleted_meanwhile_is_top_level() -> Result<(), Report<StoreError>> {
+    // Given the orb project and colony aa.
+    let (store, project) = store_with_project()?;
+    let colony = insert_agent(&store, "aa")?.session;
+    let (mut actor, state) = start_with(
+        store,
+        &listing(Vec::new()),
+        &FakeGit::local(),
+        Path::new(NO_CLAUDE_DIR),
+    );
+
+    // When an agent in aa asks for a session in a new worktree, and aa is
+    // deleted before the worktree is made.
+    let start = ApiStart {
+        project,
+        worktree: true,
+        name: None,
+        parent: Some(colony),
+    };
+    let job = actor.api_start(start, None);
+    actor.delete_session(colony);
+    finish(&mut actor, job);
+
+    // Then the new session has no parent.
+    let parent = only_session(&state)?.parent;
+    assert_eq!(
+        parent, None,
+        "a session made by a since-deleted session is top level"
     );
     Ok(())
 }

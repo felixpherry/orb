@@ -118,8 +118,14 @@ pub enum PickerKind {
     /// `d` on an agent row: confirm closing its pane.
     ClosePane { pane: PaneId, session: SessionId },
     /// `<C-g> Space`: pick an agent to jump into, listing the agents
-    /// `filter` lets through.
-    Sessions { filter: SessionFilter },
+    /// `filter` lets through; colonists' agents only when `colonists`.
+    /// `<C-g> ,` sets `scope` to a colony: only the agents of the sessions
+    /// under it.
+    Sessions {
+        filter: SessionFilter,
+        colonists: bool,
+        scope: Option<SessionId>,
+    },
     /// `<C-g> W`: orb's worktrees, to look over and delete.
     Worktrees,
     /// `d` in the worktree picker: confirm force-removing the worktree at
@@ -207,6 +213,8 @@ impl PickerState {
         Self {
             kind: PickerKind::Sessions {
                 filter: SessionFilter::All,
+                colonists: false,
+                scope: None,
             },
             list: PickerList::new(items),
             return_to,
@@ -217,6 +225,19 @@ impl PickerState {
             search_preview: None,
             under: None,
             mode: PickerMode::List { pending_g: false },
+        }
+    }
+
+    /// The `Colonists` picker: the session picker scoped to the sessions
+    /// under `colony`, opening in list mode.
+    pub fn colonists(items: Vec<PickerItem>, colony: SessionId, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Sessions {
+                filter: SessionFilter::All,
+                colonists: false,
+                scope: Some(colony),
+            },
+            ..Self::sessions(items, return_to)
         }
     }
 
@@ -266,7 +287,7 @@ impl PickerState {
                 PickerItem::WorldKind { fresh: false },
                 PickerItem::WorldKind { fresh: true },
             ]),
-            ..Self::confirm(PickerKind::WorldKind { root }, return_to)
+            ..Self::confirm(PickerKind::WorldKind { root }, false, return_to)
         }
     }
 
@@ -312,31 +333,42 @@ impl PickerState {
 
     /// The `No`/`Yes` confirm for removing `project`, with `No` selected.
     pub fn remove_project(project: ProjectId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::RemoveProject { project }, return_to)
+        Self::confirm(PickerKind::RemoveProject { project }, false, return_to)
     }
 
-    /// The `No`/`Yes` confirm for settling `session`, with `No` selected.
-    pub fn settle_session(session: SessionId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::SettleSession { session }, return_to)
+    /// The settle confirm for `session`, with `No` selected: `No`/`Yes`, or
+    /// `No`/`Colony only`/`With colonists` when it has `colonists`.
+    pub fn settle_session(session: SessionId, colonists: bool, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::SettleSession { session }, colonists, return_to)
     }
 
-    /// The `No`/`Yes` confirm for deleting `session` (and its folder when
-    /// `folder`), with `No` selected.
-    pub fn delete_session(session: SessionId, folder: bool, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DeleteSession { session, folder }, return_to)
+    /// The delete confirm for `session` (and its folder when `folder`), with
+    /// `No` selected: `No`/`Yes`, or `No`/`Colony only`/`With colonists`
+    /// when it has `colonists`.
+    pub fn delete_session(
+        session: SessionId,
+        folder: bool,
+        colonists: bool,
+        return_to: Focus,
+    ) -> Self {
+        Self::confirm(
+            PickerKind::DeleteSession { session, folder },
+            colonists,
+            return_to,
+        )
     }
 
     /// The `No`/`Yes` confirm for closing agent pane `pane` of `session`,
     /// with `No` selected.
     pub fn close_pane(pane: PaneId, session: SessionId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::ClosePane { pane, session }, return_to)
+        Self::confirm(PickerKind::ClosePane { pane, session }, false, return_to)
     }
 
     /// The `No`/`Yes` confirm for deleting the worktree at `path`, with `No`
     /// selected, over `list`, which it returns to.
     pub fn delete_worktree(list: PickerState, path: PathBuf, dirty: bool) -> Self {
         let return_to = list.return_to;
-        Self::confirm(PickerKind::DeleteWorktree { path, dirty }, return_to).over(list)
+        Self::confirm(PickerKind::DeleteWorktree { path, dirty }, false, return_to).over(list)
     }
 
     /// This picker drawn over `list`, which it returns to; the keys go back
@@ -360,11 +392,21 @@ impl PickerState {
         self.under.as_deref()
     }
 
-    /// A `No`/`Yes` confirm of `kind`, with `No` selected.
-    fn confirm(kind: PickerKind, return_to: Focus) -> Self {
+    /// A confirm of `kind` with `No` selected: `No`/`Yes`, or
+    /// `No`/`Colony only`/`With colonists` when `covers`.
+    fn confirm(kind: PickerKind, covers: bool, return_to: Focus) -> Self {
+        let items = if covers {
+            vec![
+                PickerItem::Confirm(false),
+                PickerItem::Covers { colonists: false },
+                PickerItem::Covers { colonists: true },
+            ]
+        } else {
+            vec![PickerItem::Confirm(false), PickerItem::Confirm(true)]
+        };
         Self {
             kind,
-            list: PickerList::new(vec![PickerItem::Confirm(false), PickerItem::Confirm(true)]),
+            list: PickerList::new(items),
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -646,7 +688,12 @@ impl PickerState {
     /// is already the filter, re-listing `sessions`' agents under the typed
     /// text and selecting the best match. Other pickers ignore it.
     pub fn set_filter(&mut self, pressed: SessionFilter, sessions: &Sessions, layouts: &Layouts) {
-        let PickerKind::Sessions { filter } = &mut self.kind else {
+        let PickerKind::Sessions {
+            filter,
+            colonists,
+            scope,
+        } = &mut self.kind
+        else {
             return;
         };
         *filter = if *filter == pressed {
@@ -654,7 +701,25 @@ impl PickerState {
         } else {
             pressed
         };
-        let items = session_items(sessions, layouts, *filter);
+        let items = session_items(sessions, layouts, *filter, *colonists, *scope);
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+    }
+
+    /// Shows or hides colonists' agents in the session picker, keeping the
+    /// filter and the typed text. Other pickers, and the Colonists picker,
+    /// ignore it.
+    pub fn toggle_colonists(&mut self, sessions: &Sessions, layouts: &Layouts) {
+        let PickerKind::Sessions {
+            filter,
+            colonists,
+            scope: None,
+        } = &mut self.kind
+        else {
+            return;
+        };
+        *colonists = !*colonists;
+        let items = session_items(sessions, layouts, *filter, *colonists, None);
         let pattern = self.list.input().to_owned();
         self.list.set_items(items, &pattern);
     }
@@ -824,6 +889,7 @@ impl PickerState {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
+                | PickerItem::Covers { .. }
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. }
@@ -1033,19 +1099,28 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 /// inside the project filter (removed projects too), newest chat first by
 /// the agent's latest chat, ties to the higher agent id. Sessions being
 /// deleted, sessions with no agent panes, and agents `filter` leaves out are
-/// left out.
+/// left out, and so are colonists' agents unless `colonists`. With `scope`,
+/// only the sessions under that colony are listed (through settled ones
+/// under the settled filter), whatever the project filter.
 pub fn session_items(
     sessions: &Sessions,
     layouts: &Layouts,
     filter: SessionFilter,
+    colonists: bool,
+    scope: Option<SessionId>,
 ) -> Vec<PickerItem> {
+    let scoped = scope.map(|colony| sessions.below(colony, filter == SessionFilter::Settled));
     let mut rows: Vec<(SystemTime, i64, PickerItem)> = sessions
         .sessions
         .iter()
-        .filter(|session| {
-            sessions
-                .filter
-                .is_none_or(|filter| filter == session.project)
+        .filter(|session| match &scoped {
+            Some(ids) => ids.contains(&session.id),
+            None => {
+                sessions
+                    .filter
+                    .is_none_or(|filter| filter == session.project)
+                    && (colonists || session.parent.is_none())
+            }
         })
         .filter(|session| !sessions.deleting.contains(&session.id))
         .filter_map(|session| Some((session, sessions.project(session.project)?)))

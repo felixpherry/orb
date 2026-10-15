@@ -64,7 +64,7 @@ impl SessionsActor {
         name: Option<String>,
         if_active: Option<SessionId>,
     ) -> Option<WorktreeJob> {
-        self.start_new(id, workspace, name, Asker::User(if_active))
+        self.start_new(id, workspace, name, None, Asker::User(if_active))
     }
 
     /// Makes a session for an agent, as [`Self::new_session`] does, in
@@ -82,6 +82,7 @@ impl SessionsActor {
             project,
             worktree,
             name,
+            parent,
         } = msg;
         let asker = Asker::Api(reply);
         let workspace = if worktree {
@@ -105,16 +106,18 @@ impl SessionsActor {
         } else {
             Workspace::Checkout
         };
-        self.start_new(project, workspace, name, asker)
+        self.start_new(project, workspace, name, parent, asker)
     }
 
     /// The work of a new session of project `id` in `workspace`, named
-    /// `name`, for `asker`; see [`Self::new_session`].
+    /// `name`, made by session `parent`, for `asker`; see
+    /// [`Self::new_session`].
     fn start_new(
         &mut self,
         id: ProjectId,
         workspace: Workspace,
         name: Option<String>,
+        parent: Option<SessionId>,
         asker: Asker,
     ) -> Option<WorktreeJob> {
         let Some((root, kind)) = self.project_of(id) else {
@@ -140,6 +143,7 @@ impl SessionsActor {
                     project: id,
                     kind,
                     name,
+                    parent,
                     asker,
                 };
                 Some(self.job(root, make, start))
@@ -148,7 +152,7 @@ impl SessionsActor {
                 let select = asker.selects();
                 let saved = reach(&root, to).and_then(|dir| {
                     let branch = current_branch(&self.services.git, &self.services.log, &dir);
-                    self.save_session(id, session_kind(kind), &dir, branch, name, select)
+                    self.save_session(id, session_kind(kind), &dir, branch, name, parent, select)
                 });
                 self.end_new(saved, asker);
                 None
@@ -217,6 +221,7 @@ impl SessionsActor {
                 project,
                 kind,
                 name,
+                parent,
                 asker,
             } => {
                 let select = asker.selects();
@@ -238,6 +243,7 @@ impl SessionsActor {
                         &made.path,
                         branch,
                         name,
+                        parent,
                         select,
                     );
                     if saved.is_err() {
@@ -286,8 +292,10 @@ impl SessionsActor {
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
     /// on `branch` with one tab of one shell pane, saved through the layout
-    /// save, shows it and, when `select`, selects it. Returns its id; the
-    /// error is the message box text.
+    /// save, shows it and, when `select`, selects it. `parent` is the session
+    /// that made it, dropped when that session is gone or being deleted
+    /// (session ids are reused). Returns its id; the error is the message box
+    /// text.
     pub(super) fn save_session(
         &mut self,
         project: ProjectId,
@@ -295,8 +303,13 @@ impl SessionsActor {
         dir: &Path,
         branch: Option<String>,
         name: Option<String>,
+        parent: Option<SessionId>,
         select: bool,
     ) -> Result<SessionId, String> {
+        let parent = parent.filter(|&parent| {
+            let app = self.state.read();
+            app.sessions.session(parent).is_some() && !app.sessions.deleting.contains(&parent)
+        });
         let now = now_ms();
         let (id, pane) = self
             .store
@@ -306,7 +319,7 @@ impl SessionsActor {
                 dir,
                 branch.as_deref(),
                 name.as_deref(),
-                None,
+                parent,
                 now,
             )
             .map_err(|report| failed(&self.services.log, NEW_SESSION_UNSAVED, &report))?;
@@ -314,7 +327,7 @@ impl SessionsActor {
             id,
             project_id: project,
             kind,
-            parent: None,
+            parent,
             name,
             branch,
             created_at: now,

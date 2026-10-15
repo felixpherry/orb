@@ -7,9 +7,10 @@ use crate::feat::picker::intent::open_picker;
 use crate::feat::picker::state::{PickTarget, PickerState};
 use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem, folder_slug};
 use crate::feat::sessions::validator::{
-    FoldTarget, NewColonyError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete,
-    validate_fold, validate_new_colony, validate_new_incognito, validate_new_session,
-    validate_toggle_pin, validate_toggle_settle, validate_unfold,
+    COLONIST_WORKING, FoldTarget, NewColonyError, SETTLE_IN_PROGRESS, ToggleSettleError,
+    validate_delete, validate_fold, validate_new_colony, validate_new_incognito,
+    validate_new_session, validate_settle_colonists, validate_toggle_pin, validate_toggle_settle,
+    validate_unfold,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::{ProjectId, SessionId};
@@ -94,7 +95,8 @@ pub(crate) fn toggle_settle(state: &mut AppState) -> Vec<Command> {
             ))]
         }
         (Ok(()), Some(session)) => {
-            let picker = PickerState::settle_session(session.id, state.focus);
+            let colonists = !state.sessions.under(session.id).is_empty();
+            let picker = PickerState::settle_session(session.id, colonists, state.focus);
             open_picker(state, picker);
             vec![]
         }
@@ -119,7 +121,11 @@ pub(crate) fn delete(state: &mut AppState) -> Vec<Command> {
         }
         (Ok(()), Some(SidebarItem::Session(id))) => {
             let folder = deletes_folder(state, id);
-            open_picker(state, PickerState::delete_session(id, folder, state.focus));
+            let colonists = !state.sessions.under(id).is_empty();
+            open_picker(
+                state,
+                PickerState::delete_session(id, folder, colonists, state.focus),
+            );
             vec![]
         }
         _ => vec![],
@@ -145,22 +151,43 @@ pub(crate) fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Co
     ]
 }
 
-/// Settles `session`, answered `Yes` in its confirm, if the cursor is still
-/// on it, it is still unsettled and no agent pane has a turn underway: it
-/// leaves `attached` and the cursor moves to the neighbouring card. A turn
-/// that started meanwhile shows the refusal on the mode line.
-pub(crate) fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+/// Settles `session`, answered `Yes` or `Colony only` in its confirm (with
+/// every unsettled session under it when `with_colonists`), if the cursor is
+/// still on it, it is still unsettled and no agent pane has a turn underway:
+/// they leave `attached` and the cursor moves to the neighbouring card. A
+/// turn that started meanwhile shows the refusal on the mode line.
+pub(crate) fn settle_session(
+    state: &mut AppState,
+    session: SessionId,
+    with_colonists: bool,
+) -> Vec<Command> {
     match (
         validate_toggle_settle(state),
         state.sessions.selected_session(),
     ) {
         (Ok(()), Some(selected)) if selected.id == session && selected.settled_at.is_none() => {
-            state.attached.remove(&session);
-            state.sessions.leave(session);
-            state.sessions.cursor = state
-                .sessions
-                .card_neighbour(SidebarItem::Session(session), &state.layouts);
-            vec![Command::Sessions(SessionsCommand::SettleSession(session))]
+            let colonists = if with_colonists {
+                state.sessions.under(session)
+            } else {
+                vec![]
+            };
+            if with_colonists && validate_settle_colonists(state, session).is_err() {
+                state.sessions.error = Some(COLONIST_WORKING.to_owned());
+                return vec![];
+            }
+            for id in std::iter::once(session).chain(colonists.iter().copied()) {
+                state.attached.remove(&id);
+                state.sessions.leave(id);
+            }
+            state.sessions.cursor = state.sessions.card_neighbour(
+                SidebarItem::Session(session),
+                &state.layouts,
+                &colonists,
+            );
+            vec![Command::Sessions(SessionsCommand::SettleSession {
+                session,
+                with_colonists,
+            })]
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
             state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
@@ -176,10 +203,23 @@ pub(crate) fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
     state.sessions.cursor_row(&state.layouts) == Some(item) && validate_delete(state).is_ok()
 }
 
-/// Hides `session` at once, detaches it, drops it from the jump list, moves
+/// Hides `session` (with every unsettled session under it when
+/// `with_colonists`) at once, detaches it, drops it from the jump list, moves
 /// the sidebar cursor to the neighbouring row when it was on `session`, and
 /// asks for the delete.
-pub(crate) fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+pub(crate) fn delete_session(
+    state: &mut AppState,
+    session: SessionId,
+    with_colonists: bool,
+) -> Vec<Command> {
+    if with_colonists {
+        for id in state.sessions.under(session) {
+            state.sessions.deleting.insert(id);
+            state.attached.remove(&id);
+            state.sessions.leave(id);
+            state.jumps.remove(SidebarItem::Session(id));
+        }
+    }
     let on_it = state
         .sessions
         .selected_session()
@@ -196,7 +236,10 @@ pub(crate) fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Co
         state.sessions.cursor = neighbour;
     }
     vec![
-        Command::Sessions(SessionsCommand::DeleteSession(session)),
+        Command::Sessions(SessionsCommand::DeleteSession {
+            session,
+            with_colonists,
+        }),
         Command::Sessions(SessionsCommand::SaveJumps),
     ]
 }
@@ -271,16 +314,15 @@ pub(crate) fn open_colony_name(state: &mut AppState, world: ProjectId) -> Vec<Co
     vec![]
 }
 
-/// Whether deleting `session` also deletes its folder: a colony in Research or Learn.
+/// Whether deleting `session` also deletes its folder: a colony in a fresh
+/// world.
 fn deletes_folder(state: &AppState, session: SessionId) -> bool {
     state.sessions.session(session).is_some_and(|session| {
         session.kind == SessionKind::Colony
             && state
                 .sessions
                 .project(session.project)
-                .is_some_and(|project| {
-                    matches!(project.kind, ProjectKind::Research | ProjectKind::Learn)
-                })
+                .is_some_and(|project| project.kind.is_fresh_world())
     })
 }
 
@@ -370,7 +412,8 @@ mod tests {
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, at, incognito, on_agent_in_another_tab, settle, state_at, state_with, stopped,
+        agent, at, colony_with_colonists, incognito, on_agent_in_another_tab, settle, state_at,
+        state_with, stopped,
     };
     use crate::{AppState, Command, Intent, IntentHandler};
 
@@ -526,6 +569,71 @@ mod tests {
         );
     }
 
+    /// The rows of the open picker.
+    fn picker_rows(state: &AppState) -> Vec<PickerItem> {
+        state
+            .picker
+            .as_ref()
+            .map(|picker| picker.shown().map(|(item, _)| item.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[rstest::rstest]
+    fn toggle_settle_on_a_colony_with_colonists_offers_three_rows() {
+        // Given a selected colony with a colonist, which has its own.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the confirm offers No, Colony only and With colonists.
+        assert_eq!(
+            picker_rows(&state),
+            [
+                PickerItem::Confirm(false),
+                PickerItem::Covers { colonists: false },
+                PickerItem::Covers { colonists: true },
+            ],
+            "s on a colony with colonists should offer three rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_settle_without_colonists_keeps_two_rows() {
+        // Given a selected idle agent with no colonists.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the confirm offers No and Yes.
+        assert_eq!(
+            picker_rows(&state),
+            [PickerItem::Confirm(false), PickerItem::Confirm(true)],
+            "s without colonists should offer No and Yes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_on_a_colony_with_colonists_offers_three_rows() {
+        // Given a selected colony with a colonist, which has its own.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When handling Delete.
+        IntentHandler::handle(&Intent::Delete, &mut state);
+
+        // Then the confirm offers No, Colony only and With colonists.
+        assert_eq!(
+            picker_rows(&state),
+            [
+                PickerItem::Confirm(false),
+                PickerItem::Covers { colonists: false },
+                PickerItem::Covers { colonists: true },
+            ],
+            "d on a colony with colonists should offer three rows"
+        );
+    }
+
     #[rstest::rstest]
     fn settle_on_a_settled_agent_opens_no_confirm() {
         // Given a selected settled agent.
@@ -592,11 +700,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn delete_on_a_research_colony_asks_to_delete_its_folder() {
-        // Given a selected colony in the Research project.
+    #[case(ProjectKind::Research)]
+    #[case(ProjectKind::FreshWorld)]
+    fn delete_on_a_fresh_world_colony_asks_to_delete_its_folder(#[case] kind: ProjectKind) {
+        // Given a selected colony in a fresh world of `kind`.
         let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
         if let Some(project) = state.sessions.projects.first_mut() {
-            project.kind = ProjectKind::Research;
+            project.kind = kind;
         }
         if let Some(session) = state.sessions.sessions.first_mut() {
             session.kind = SessionKind::Colony;
@@ -612,7 +722,7 @@ mod tests {
                 session: SessionId(1),
                 folder: true
             }),
-            "d on a Research colony should ask to delete its folder too"
+            "d on a {kind:?} colony should ask to delete its folder too"
         );
     }
 

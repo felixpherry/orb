@@ -585,7 +585,7 @@ fn remove_project_confirm_selects_no() {
 #[rstest::rstest]
 fn settle_session_confirm_starts_on_no() {
     // Given / When opening the confirm for settling session 9.
-    let picker = PickerState::settle_session(SessionId(9), Focus::Sidebar);
+    let picker = PickerState::settle_session(SessionId(9), false, Focus::Sidebar);
 
     // Then No is highlighted, so ⏎ alone settles nothing.
     assert_eq!(
@@ -844,6 +844,8 @@ fn session_with_two_agents_lists_two_rows() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::All,
+        false,
+        None,
     );
 
     // Then each agent has a row.
@@ -863,6 +865,8 @@ fn shell_only_session_lists_no_row() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::All,
+        false,
+        None,
     );
 
     // Then nothing is listed.
@@ -893,6 +897,8 @@ fn agent_row_is_labelled_project_session_and_agent() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::All,
+        false,
+        None,
     );
 
     // Then its row is `work/auth/fix`.
@@ -918,7 +924,7 @@ fn agent_row_ends_in_its_panes_name() {
     };
 
     // When listing the session picker's rows.
-    let items = session_items(&sessions, &layouts, SessionFilter::All);
+    let items = session_items(&sessions, &layouts, SessionFilter::All, false, None);
 
     // Then its row ends in the pane's name.
     assert!(
@@ -941,6 +947,8 @@ fn untitled_agent_row_ends_in_new_agent() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::All,
+        false,
+        None,
     );
 
     // Then its row ends in `New agent`.
@@ -961,6 +969,8 @@ fn agent_rows_list_newest_chat_first() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::All,
+        false,
+        None,
     );
 
     // Then agent 2 comes first.
@@ -981,6 +991,8 @@ fn working_filter_leaves_out_an_idle_sibling() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::Working,
+        false,
+        None,
     );
 
     // Then only agent 2 is listed.
@@ -1001,6 +1013,8 @@ fn idle_filter_lists_an_idle_agent_beside_a_working_sibling() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::Idle,
+        false,
+        None,
     );
 
     // Then agent 1 is listed.
@@ -1024,6 +1038,8 @@ fn settled_filter_lists_a_settled_sessions_agents() {
         &sessions,
         &layouts_for(&sessions.projects),
         SessionFilter::Settled,
+        false,
+        None,
     );
 
     // Then both agents are listed.
@@ -1058,6 +1074,8 @@ fn typing_a_session_name_shows_only_its_agents() {
             &sessions,
             &layouts_for(&sessions.projects),
             SessionFilter::All,
+            false,
+            None,
         ),
         Focus::Sidebar,
     );
@@ -1106,7 +1124,13 @@ fn session_items_list_settled_sessions_only_under_settled(
     }
 
     // When listing the rows under `filter`.
-    let items = session_items(&sessions, &layouts_for(&sessions.projects), filter);
+    let items = session_items(
+        &sessions,
+        &layouts_for(&sessions.projects),
+        filter,
+        false,
+        None,
+    );
 
     // Then the settled session shows only under Settled, alone.
     assert_eq!(session_ids(&items), expected, "filter: {filter:?}");
@@ -1146,7 +1170,13 @@ fn session_items_filter_by_status(
     let sessions = orb_sessions(vec![with_status(agent(1, "api", 10), status)]);
 
     // When listing the rows under `filter`.
-    let items = session_items(&sessions, &layouts_for(&sessions.projects), filter);
+    let items = session_items(
+        &sessions,
+        &layouts_for(&sessions.projects),
+        filter,
+        false,
+        None,
+    );
 
     // Then the session is listed only when the filter lets it through.
     assert_eq!(
@@ -1165,6 +1195,8 @@ fn set_filter_twice_goes_back_to_all() {
             &sessions,
             &layouts_for(&sessions.projects),
             SessionFilter::All,
+            false,
+            None,
         ),
         Focus::Sidebar,
     );
@@ -1185,7 +1217,9 @@ fn set_filter_twice_goes_back_to_all() {
     assert_eq!(
         picker.kind(),
         &PickerKind::Sessions {
-            filter: SessionFilter::All
+            filter: SessionFilter::All,
+            colonists: false,
+            scope: None
         },
         "the same filter twice should go back to all"
     );
@@ -1200,6 +1234,8 @@ fn set_filter_keeps_the_typed_text() {
             &sessions,
             &layouts_for(&sessions.projects),
             SessionFilter::All,
+            false,
+            None,
         ),
         Focus::Sidebar,
     );
@@ -1254,6 +1290,8 @@ fn session_row_previews_its_agent() {
             &sessions,
             &layouts_for(&sessions.projects),
             SessionFilter::All,
+            false,
+            None,
         ),
         Focus::Sidebar,
     );

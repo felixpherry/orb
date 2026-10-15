@@ -12,8 +12,31 @@ use wherror::Error;
 
 use crate::AppState;
 use crate::feat::picker::state::PickerKind;
-use crate::feat::sessions::state::ProjectKind;
+use crate::feat::sessions::state::{ProjectKind, SessionKind};
 use crate::feat::worktrees::state::{Verdict, users, verdict};
+use crate::ids::SessionId;
+
+/// Why `<C-g> ,` can't open the Colonists picker.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum OpenColonistsError {
+    /// The keyed session isn't a colony.
+    NotAColony,
+}
+
+/// The colony `<C-g> ,` opens on: the shown session in a pane, else the
+/// sidebar's selected session (card or agent row).
+///
+/// # Errors
+///
+/// Returns [`OpenColonistsError::NotAColony`] when it isn't a colony.
+pub fn validate_open_colonists(state: &AppState) -> Result<SessionId, OpenColonistsError> {
+    state
+        .keyed_session()
+        .filter(|session| session.kind == SessionKind::Colony)
+        .map(|session| session.id)
+        .ok_or(OpenColonistsError::NotAColony)
+}
 
 /// Why picking a project can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]

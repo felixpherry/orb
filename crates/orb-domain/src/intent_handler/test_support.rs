@@ -8,8 +8,8 @@ use crate::feat::layout::tree::Split;
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::PickerState;
 use crate::feat::sessions::state::{
-    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Search, Sessions, SidebarItem,
-    sessions_for,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Search, SessionKind, Sessions,
+    SidebarItem, sessions_for,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
 use crate::feat::worktrees::state::{Worktree, Worktrees};
@@ -135,6 +135,23 @@ pub(crate) fn with_projects(titles: &[&str]) -> AppState {
 /// One project holding `agents`, with agent `selected` selected.
 pub(crate) fn state_with(agents: Vec<Agent>, selected: i64) -> AppState {
     state_at(agents, SidebarItem::Session(SessionId(selected)))
+}
+
+/// Sessions 1–3 with agents 1–3 (statuses `statuses`), the cursor on
+/// session 1: 1 a colony, 2 its colonist, 3 a colonist of 2.
+pub(crate) fn colony_with_colonists(statuses: [AgentStatus; 3]) -> AppState {
+    let agents = (1..)
+        .zip(statuses)
+        .map(|(id, status)| agent(id, status))
+        .collect();
+    let mut state = state_with(agents, 1);
+    for session in &mut state.sessions.sessions {
+        match session.id.0 {
+            1 => session.kind = SessionKind::Colony,
+            id => session.parent = Some(SessionId(id - 1)),
+        }
+    }
+    state
 }
 
 /// Agent `id`, idle and prompt-less, in the project's root `/work`.

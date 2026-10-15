@@ -28,7 +28,7 @@ use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace, ApiStart, SessionsActor};
-use crate::feat::sessions::state::Agent;
+use crate::feat::sessions::state::{Agent, SessionKind};
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
 
@@ -287,11 +287,7 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
             project,
             worktree,
             name,
-        } => Ok(Action::Start(ApiStart {
-            project: project_for(app, *project, caller)?,
-            worktree: *worktree,
-            name: name.clone(),
-        })),
+        } => session_create(app, *project, *worktree, name.clone(), caller),
         Op::PaneClose { pane } => {
             changing(app, Some(Target::Pane(*pane)), caller)?;
             Ok(Action::Change(Change::ClosePane(*pane)))
@@ -554,6 +550,43 @@ fn project_for(
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such project"))
 }
 
+/// A new session of `project` (else the caller's session's), refused with
+/// `bad_request` in a fresh world. A caller in a colony or a colonist makes
+/// it that session's colonist.
+fn session_create(
+    app: &AppState,
+    project: Option<ProjectId>,
+    worktree: bool,
+    name: Option<String>,
+    caller: Option<PaneId>,
+) -> Result<Action, ApiError> {
+    let project = project_for(app, project, caller)?;
+    if let Some(world) = app
+        .sessions
+        .project(project)
+        .filter(|project| project.kind.is_fresh_world())
+    {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "can't start a session in fresh world {}; make its colonies with <C-g> c",
+                world.title
+            ),
+        ));
+    }
+    let parent = target::resolve(app, None, caller)
+        .ok()
+        .and_then(|resolved| app.sessions.session(resolved.session))
+        .filter(|session| session.kind == SessionKind::Colony || session.parent.is_some())
+        .map(|session| session.id);
+    Ok(Action::Start(ApiStart {
+        project,
+        worktree,
+        name,
+        parent,
+    }))
+}
+
 /// Pane `pane` (else the caller's) and its session; `bad_request` saying
 /// `why` when it's a float.
 fn tiled(
@@ -775,7 +808,7 @@ mod tests {
         AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
     };
     use crate::feat::layout::state::test_entry;
-    use crate::feat::sessions::state::AgentStatus;
+    use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind};
     use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
     use crate::{AppState, Log, State};
@@ -1027,6 +1060,102 @@ mod tests {
         assert_eq!(
             text, "agent.prompt caller=1 pane=3 -> ok",
             "a prompt's text never reaches the log"
+        );
+    }
+
+    /// The parent `orb session create` gives the new session when pane 1 of
+    /// session 1, of `kind` and `parent`, asks.
+    fn parent_from(kind: SessionKind, parent: Option<SessionId>) -> Option<SessionId> {
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        if let Some(session) = app.sessions.sessions.first_mut() {
+            session.kind = kind;
+            session.parent = parent;
+        }
+        let planned = plan(
+            &app,
+            &Request {
+                caller: Some(PaneId(1)),
+                op: Op::SessionCreate {
+                    project: None,
+                    worktree: false,
+                    name: None,
+                },
+            },
+        );
+        match planned {
+            Ok(Action::Start(start)) => start.parent,
+            _ => None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn session_create_from_a_colony_pane_makes_its_colonist() {
+        // Given session 1, a colony, with pane 1.
+        // When pane 1 runs `session create`.
+        let parent = parent_from(SessionKind::Colony, None);
+
+        // Then the new session's parent is session 1.
+        assert_eq!(
+            parent,
+            Some(SessionId(1)),
+            "a colony's pane makes a colonist"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_create_from_a_colonist_pane_makes_its_colonist() {
+        // Given session 1, a plain colonist of session 9, with pane 1.
+        // When pane 1 runs `session create`.
+        let parent = parent_from(SessionKind::Plain, Some(SessionId(9)));
+
+        // Then the new session's parent is session 1.
+        assert_eq!(
+            parent,
+            Some(SessionId(1)),
+            "a colonist's pane makes its own colonist"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_create_from_a_normal_pane_is_top_level() {
+        // Given session 1, plain and top level, with pane 1.
+        // When pane 1 runs `session create`.
+        let parent = parent_from(SessionKind::Plain, None);
+
+        // Then the new session has no parent.
+        assert_eq!(
+            parent, None,
+            "a normal session's pane makes a top-level session"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::research(ProjectKind::Research)]
+    #[case::learn(ProjectKind::Learn)]
+    #[case::fresh_world(ProjectKind::FreshWorld)]
+    fn session_create_in_a_fresh_world_is_a_bad_request(#[case] kind: ProjectKind) {
+        // Given session 1, with pane 1, in a fresh world of `kind`.
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        if let Some(project) = app.sessions.projects.first_mut() {
+            project.kind = kind;
+        }
+
+        // When pane 1 runs `session create`.
+        let request = Request {
+            caller: Some(PaneId(1)),
+            op: Op::SessionCreate {
+                project: None,
+                worktree: false,
+                name: None,
+            },
+        };
+        let planned = plan(&app, &request);
+
+        // Then it is refused with bad_request.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "a fresh world takes colonies, not API sessions"
         );
     }
 }

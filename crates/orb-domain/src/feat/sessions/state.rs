@@ -486,6 +486,40 @@ impl Sessions {
         self.projects.iter().find(|project| project.id == id)
     }
 
+    /// The sessions under `id` at any depth: its colonists, theirs, and so
+    /// on, sessions being deleted included. A settled session, and
+    /// everything under it, counts only when `settled`.
+    #[must_use]
+    pub fn below(&self, id: SessionId, settled: bool) -> Vec<SessionId> {
+        let mut found: Vec<SessionId> = Vec::new();
+        let mut next = vec![id];
+        while let Some(parent) = next.pop() {
+            let children: Vec<SessionId> = self
+                .sessions
+                .iter()
+                .filter(|session| {
+                    session.parent == Some(parent)
+                        && (settled || session.settled_at.is_none())
+                        && session.id != id
+                        && !found.contains(&session.id)
+                })
+                .map(|session| session.id)
+                .collect();
+            found.extend(&children);
+            next.extend(children);
+        }
+        found
+    }
+
+    /// The unsettled sessions under `id` at any depth, leaving out those
+    /// being deleted.
+    #[must_use]
+    pub fn under(&self, id: SessionId) -> Vec<SessionId> {
+        let mut found = self.below(id, false);
+        found.retain(|session| !self.deleting.contains(session));
+        found
+    }
+
     /// The agents running in session `id`'s panes (its agent panes'
     /// conversations), oldest first; none while it is being deleted.
     pub fn agents(&self, id: SessionId) -> Vec<&Agent> {
@@ -844,11 +878,20 @@ impl Sessions {
     }
 
     /// Where the cursor goes when session `item` is settled: the next card
-    /// below, else the nearest one above, else the shelf header the settle
-    /// creates.
-    pub fn card_neighbour(&self, item: SidebarItem, layouts: &Layouts) -> Option<SidebarItem> {
-        self.neighbour(item, layouts, |row| matches!(row, SidebarRow::Card { .. }))
-            .or(Some(SidebarItem::SettledShelf))
+    /// below whose session isn't in `skip`, else the nearest one above,
+    /// else the shelf header the settle creates.
+    pub fn card_neighbour(
+        &self,
+        item: SidebarItem,
+        layouts: &Layouts,
+        skip: &[SessionId],
+    ) -> Option<SidebarItem> {
+        self.neighbour(
+            item,
+            layouts,
+            |row| matches!(row, SidebarRow::Card { session, .. } if !skip.contains(&session.id)),
+        )
+        .or(Some(SidebarItem::SettledShelf))
     }
 
     /// Where the cursor goes when `item` is deleted: the next row below,

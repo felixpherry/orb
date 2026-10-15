@@ -97,6 +97,8 @@ impl IntentHandler {
             Intent::OpenWorlds => picker::intent::open_worlds(state),
             Intent::NewIncognito => sessions::intent::new_incognito(state),
             Intent::OpenSessionPicker => picker::intent::open_session_picker(state),
+            Intent::OpenColonists => picker::intent::open_colonists(state),
+            Intent::ToggleColonists => picker::intent::toggle_colonists(state),
             Intent::OpenWorktreePicker => picker::intent::open_worktree_picker(state),
             Intent::OpenSearch => picker::intent::open_search(state),
             Intent::FilterProjects => picker::intent::filter_projects(state),

@@ -1749,6 +1749,8 @@ fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
                 &state.sessions,
                 &layouts_for(&state.sessions.projects),
                 SessionFilter::All,
+                false,
+                None,
             ),
             Focus::Sidebar,
         ));

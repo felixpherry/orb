@@ -282,6 +282,9 @@ pub struct ApiStart {
     pub project: ProjectId,
     pub worktree: bool,
     pub name: Option<String>,
+    /// The session whose pane asked, when it's a colony or a colonist: the
+    /// new session becomes its colonist.
+    pub parent: Option<SessionId>,
 }
 
 /// What an [`ApiStart`] answers: the new session and its first pane, or why
@@ -327,6 +330,7 @@ enum Start {
         project: ProjectId,
         kind: ProjectKind,
         name: Option<String>,
+        parent: Option<SessionId>,
         asker: Asker,
     },
     Move {
@@ -478,9 +482,23 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::PinSession(id) => self.pin_session(id),
             SessionsCommand::UnpinSession(id) => self.unpin_session(id),
             SessionsCommand::RenameSession { session, name } => self.rename_session(session, name),
-            SessionsCommand::SettleSession(id) => self.settle_session(id),
+            SessionsCommand::SettleSession {
+                session,
+                with_colonists: false,
+            } => self.settle_session(session),
+            SessionsCommand::SettleSession {
+                session,
+                with_colonists: true,
+            } => self.settle_with_colonists(session),
             SessionsCommand::UnsettleSession(id) => self.unsettle_session(id),
-            SessionsCommand::DeleteSession(id) => self.delete_session(id),
+            SessionsCommand::DeleteSession {
+                session,
+                with_colonists: false,
+            } => self.delete_session(session),
+            SessionsCommand::DeleteSession {
+                session,
+                with_colonists: true,
+            } => self.delete_with_colonists(session),
             SessionsCommand::Visit(pane) => self.visit(pane),
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),

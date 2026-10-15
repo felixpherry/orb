@@ -8,16 +8,16 @@ use crate::feat::sessions::state::{
     Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
     SidebarItem, SidebarRow, layouts_for, sessions_for,
 };
-use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
+use crate::feat::sessions::validator::{COLONIST_WORKING, SETTLE_IN_PROGRESS};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::intent_handler::test_support::{
     ORPHAN, USED, agent, agent_row, answer_yes, at, branch, choosing_workspace,
-    close_agent_1s_pane, highlight, in_root, jumping, left_pane, left_pane_showing_1, managing,
-    named, on_agent, on_agent_in_another_tab, open_sessions, picked_worktree, picking_agent_1,
-    project_row, removing_alpha, rename_text, renaming, searching, settle, shown_tab_name,
-    state_at, state_with, stopped, two_projects, with_layout, with_projects, worktree_picker_after,
-    worktree_state,
+    close_agent_1s_pane, colony_with_colonists, highlight, in_root, jumping, left_pane,
+    left_pane_showing_1, managing, named, on_agent, on_agent_in_another_tab, open_sessions,
+    picked_worktree, picking_agent_1, project_row, removing_alpha, rename_text, renaming,
+    searching, settle, shown_tab_name, state_at, state_with, stopped, two_projects, with_layout,
+    with_projects, worktree_picker_after, worktree_state,
 };
 use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 use std::path::{Path, PathBuf};
@@ -1002,10 +1002,114 @@ fn settle_confirm_returns_settle_session() {
 
     // Then the sessions actor is asked to settle agent 2.
     assert!(
-        commands.contains(&Command::Sessions(SessionsCommand::SettleSession(
-            SessionId(2)
-        ))),
+        commands.contains(&Command::Sessions(SessionsCommand::SettleSession {
+            session: SessionId(2),
+            with_colonists: false,
+        })),
         "Yes on the settle confirm should return Settle"
+    );
+}
+
+/// Colony 1 with colonist 2 and its colonist 3 (agents `statuses`), all
+/// attached, with `colonists`' answer highlighted in 1's settle confirm.
+fn settling_colony(statuses: [AgentStatus; 3], colonists: bool) -> AppState {
+    let mut state = AppState {
+        attached: [SessionId(1), SessionId(2), SessionId(3)].into(),
+        ..colony_with_colonists(statuses)
+    };
+    IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+    highlight(&mut state, &PickerItem::Covers { colonists });
+    state
+}
+
+#[rstest::rstest]
+fn settle_with_colonists_returns_one_settle_for_the_subtree() {
+    // Given With colonists highlighted in colony 1's settle confirm.
+    let mut state = settling_colony([AgentStatus::Idle; 3], true);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the sessions actor is asked to settle 1 with its colonists.
+    assert_eq!(
+        commands,
+        vec![Command::Sessions(SessionsCommand::SettleSession {
+            session: SessionId(1),
+            with_colonists: true,
+        })],
+        "With colonists should return one settle covering the subtree"
+    );
+}
+
+#[rstest::rstest]
+fn settle_with_colonists_takes_the_subtree_off_the_right_side() {
+    // Given With colonists highlighted in attached colony 1's settle
+    // confirm, its colonists 2 and 3 attached too.
+    let mut state = settling_colony([AgentStatus::Idle; 3], true);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then none of 1–3 is attached.
+    assert!(
+        state.attached.is_empty(),
+        "settling with colonists should detach every session in the subtree"
+    );
+}
+
+#[rstest::rstest]
+fn settle_with_colonists_moves_the_cursor_past_the_colonists() {
+    // Given With colonists highlighted in colony 1's settle confirm, its
+    // colonists 2 and 3 the only other cards.
+    let mut state = settling_colony([AgentStatus::Idle; 3], true);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the cursor skips the settling colonists to the shelf.
+    assert_eq!(
+        state.sessions.cursor,
+        Some(SidebarItem::SettledShelf),
+        "the cursor should not land on a colonist being settled"
+    );
+}
+
+#[rstest::rstest]
+fn settle_with_colonists_is_refused_while_a_colonist_works() {
+    // Given With colonists highlighted in colony 1's settle confirm, its
+    // colonist 3 working.
+    let mut state = settling_colony(
+        [AgentStatus::Idle, AgentStatus::Idle, AgentStatus::Working],
+        true,
+    );
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then nothing is settled and the refusal shows.
+    assert_eq!(
+        (commands, state.sessions.error.as_deref()),
+        (vec![], Some(COLONIST_WORKING)),
+        "a working colonist should refuse the settle with colonists"
+    );
+}
+
+#[rstest::rstest]
+fn colony_only_settle_settles_the_colony_alone() {
+    // Given Colony only highlighted in colony 1's settle confirm.
+    let mut state = settling_colony([AgentStatus::Idle; 3], false);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the sessions actor is asked to settle 1 alone.
+    assert_eq!(
+        commands,
+        vec![Command::Sessions(SessionsCommand::SettleSession {
+            session: SessionId(1),
+            with_colonists: false,
+        })],
+        "Colony only should settle the colony without its colonists"
     );
 }
 
@@ -1083,10 +1187,61 @@ fn delete_confirm_returns_delete_session() {
 
     // Then the sessions actor is asked to delete it.
     assert!(
-        commands.contains(&Command::Sessions(SessionsCommand::DeleteSession(
-            SessionId(1)
-        ))),
+        commands.contains(&Command::Sessions(SessionsCommand::DeleteSession {
+            session: SessionId(1),
+            with_colonists: false,
+        })),
         "Yes on the delete confirm should return Delete"
+    );
+}
+
+/// Colony 1 with colonist 2 and its colonist 3, all attached, and
+/// `With colonists` highlighted in 1's delete confirm.
+fn deleting_colony() -> AppState {
+    let mut state = AppState {
+        attached: [SessionId(1), SessionId(2), SessionId(3)].into(),
+        ..colony_with_colonists([AgentStatus::Idle; 3])
+    };
+    IntentHandler::handle(&Intent::Delete, &mut state);
+    highlight(&mut state, &PickerItem::Covers { colonists: true });
+    state
+}
+
+#[rstest::rstest]
+fn delete_with_colonists_hides_the_whole_subtree() {
+    // Given With colonists highlighted in colony 1's delete confirm.
+    let mut state = deleting_colony();
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then 1–3 are all hidden as being deleted.
+    assert_eq!(
+        state.sessions.deleting,
+        [SessionId(1), SessionId(2), SessionId(3)].into(),
+        "deleting with colonists should hide every session in the subtree"
+    );
+}
+
+#[rstest::rstest]
+fn delete_with_colonists_returns_one_delete_for_the_subtree() {
+    // Given With colonists highlighted in colony 1's delete confirm.
+    let mut state = deleting_colony();
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the sessions actor is asked to delete 1 with its colonists.
+    assert_eq!(
+        commands,
+        vec![
+            Command::Sessions(SessionsCommand::DeleteSession {
+                session: SessionId(1),
+                with_colonists: true,
+            }),
+            Command::Sessions(SessionsCommand::SaveJumps),
+        ],
+        "With colonists should return one delete covering the subtree"
     );
 }
 
@@ -2501,7 +2656,9 @@ fn pressing_the_active_filter_again_lists_all() {
     assert_eq!(
         picker_kind(&state),
         Some(PickerKind::Sessions {
-            filter: SessionFilter::All
+            filter: SessionFilter::All,
+            colonists: false,
+            scope: None
         }),
         "the same filter twice should go back to all"
     );
@@ -2525,7 +2682,9 @@ fn reopening_the_session_picker_starts_on_all() {
     assert_eq!(
         picker_kind(&state),
         Some(PickerKind::Sessions {
-            filter: SessionFilter::All
+            filter: SessionFilter::All,
+            colonists: false,
+            scope: None
         }),
         "every opening should start on all"
     );
@@ -2698,6 +2857,8 @@ fn picker_and_under(state: &AppState) -> Option<(PickerKind, Option<PickerKind>)
 fn all_sessions() -> PickerKind {
     PickerKind::Sessions {
         filter: SessionFilter::All,
+        colonists: false,
+        scope: None,
     }
 }
 
@@ -4859,5 +5020,128 @@ fn confirming_a_shared_colony_name_keeps_it_as_typed() {
             if_active: None,
         })),
         "a shared colony's name should be kept as typed, got {commands:?}"
+    );
+}
+
+#[rstest::rstest]
+fn open_colonists_lists_only_the_colonies_colonists_agents() {
+    // Given colony 1 with colonists 2 and 3 selected, under a filter to
+    // another project.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    state.sessions.filter = Some(ProjectId(2));
+
+    // When handling OpenColonists.
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+
+    // Then the picker lists the colonists' sessions only.
+    let mut listed = session_ids(&state);
+    listed.sort_by_key(|id| id.0);
+    assert_eq!(
+        listed,
+        [SessionId(2), SessionId(3)],
+        "the Colonists picker should list the colony's colonists"
+    );
+}
+
+#[rstest::rstest]
+fn open_colonists_off_a_colony_opens_nothing() {
+    // Given colonist 2 selected, which is no colony.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    state.sessions.cursor = Some(SidebarItem::Session(SessionId(2)));
+
+    // When handling OpenColonists.
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+
+    // Then no picker opens.
+    assert!(
+        state.picker.is_none(),
+        "only a colony opens the Colonists picker"
+    );
+}
+
+#[rstest::rstest]
+fn session_picker_leaves_colonists_out() {
+    // Given colony 1 with colonists 2 and 3.
+    let state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+    // When opening the session picker.
+    let state = open_sessions(state);
+
+    // Then only the colony's agent is listed.
+    assert_eq!(
+        session_ids(&state),
+        [SessionId(1)],
+        "colonists' agents start hidden"
+    );
+}
+
+#[rstest::rstest]
+fn toggle_colonists_lists_colonists_with_the_active_filter() {
+    // Given the session picker filtered to blocked agents, colonist 2
+    // needing input.
+    let mut state = open_sessions(colony_with_colonists([
+        AgentStatus::NeedsInput,
+        AgentStatus::NeedsInput,
+        AgentStatus::Idle,
+    ]));
+    IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Blocked), &mut state);
+
+    // When handling ToggleColonists.
+    IntentHandler::handle(&Intent::ToggleColonists, &mut state);
+
+    // Then blocked colonist 2 is listed beside the colony, still filtered.
+    let mut listed = session_ids(&state);
+    listed.sort_by_key(|id| id.0);
+    assert_eq!(
+        (listed, picker_kind(&state)),
+        (
+            vec![SessionId(1), SessionId(2)],
+            Some(PickerKind::Sessions {
+                filter: SessionFilter::Blocked,
+                colonists: true,
+                scope: None
+            })
+        ),
+        "c should bring in blocked colonists and keep the filter"
+    );
+}
+
+#[rstest::rstest]
+fn toggle_colonists_again_hides_them() {
+    // Given the session picker showing colonists.
+    let mut state = open_sessions(colony_with_colonists([AgentStatus::Idle; 3]));
+    IntentHandler::handle(&Intent::ToggleColonists, &mut state);
+
+    // When handling ToggleColonists again.
+    IntentHandler::handle(&Intent::ToggleColonists, &mut state);
+
+    // Then only the colony's agent is listed.
+    assert_eq!(
+        session_ids(&state),
+        [SessionId(1)],
+        "c again should hide the colonists"
+    );
+}
+
+#[rstest::rstest]
+fn session_picker_hides_colonists_at_each_open() {
+    // Given the session picker showing colonists, then closed.
+    let mut state = open_sessions(colony_with_colonists([AgentStatus::Idle; 3]));
+    IntentHandler::handle(&Intent::ToggleColonists, &mut state);
+    IntentHandler::handle(&Intent::PickerCancel, &mut state);
+    IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+    // When opening the session picker again.
+    let state = open_sessions(state);
+
+    // Then it starts with colonists hidden.
+    assert_eq!(
+        picker_kind(&state),
+        Some(PickerKind::Sessions {
+            filter: SessionFilter::All,
+            colonists: false,
+            scope: None
+        }),
+        "every opening should hide colonists"
     );
 }
