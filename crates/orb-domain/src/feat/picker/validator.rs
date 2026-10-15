@@ -12,6 +12,7 @@ use wherror::Error;
 
 use crate::AppState;
 use crate::feat::picker::state::PickerKind;
+use crate::feat::sessions::state::ProjectKind;
 use crate::feat::worktrees::state::{Verdict, users, verdict};
 
 /// Why picking a project can't proceed.
@@ -24,19 +25,23 @@ pub enum PickProjectError {
     NoProject,
 }
 
-/// Allow picking the highlighted project for a new session.
+/// Allow picking the highlighted project for a new session, or the
+/// highlighted world for a new colony.
 ///
 /// # Errors
 ///
-/// Returns [`PickProjectError::NoPicker`] unless the project picker or the
-/// projects screen is open, and [`PickProjectError::NoProject`] when nothing
+/// Returns [`PickProjectError::NoPicker`] unless the project picker, the
+/// projects screen, the world picker or the worlds screen is open, and [`PickProjectError::NoProject`] when nothing
 /// is highlighted.
 pub fn validate_pick_project(state: &AppState) -> Result<(), PickProjectError> {
     match &state.picker {
         Some(picker)
             if matches!(
                 picker.kind(),
-                PickerKind::Projects | PickerKind::ManageProjects
+                PickerKind::Projects
+                    | PickerKind::ManageProjects
+                    | PickerKind::Worlds
+                    | PickerKind::ManageWorlds
             ) =>
         {
             match picker.selected() {
@@ -113,20 +118,35 @@ pub enum RemoveProjectError {
     NoPicker,
     /// The highlighted row isn't a project.
     NotAProject,
+    /// Research or Learn, which orb adds back at every start.
+    OrbsOwn,
 }
 
-/// Allow asking to remove the project highlighted in the projects screen.
+/// Allow asking to remove the project highlighted in the projects screen,
+/// or the world highlighted in the worlds screen.
 ///
 /// # Errors
 ///
-/// Returns [`RemoveProjectError::NoPicker`] unless the projects screen is
-/// open, and [`RemoveProjectError::NotAProject`] when nothing is highlighted.
+/// Returns [`RemoveProjectError::NoPicker`] unless the projects or worlds
+/// screen is open, [`RemoveProjectError::OrbsOwn`] on Research or Learn, and
+/// [`RemoveProjectError::NotAProject`] when nothing is highlighted.
 pub fn validate_remove_project(state: &AppState) -> Result<(), RemoveProjectError> {
     match &state.picker {
-        Some(picker) if *picker.kind() == PickerKind::ManageProjects => match picker.selected() {
-            Some(PickerItem::Project { .. }) => Ok(()),
-            _ => Err(RemoveProjectError::NotAProject),
-        },
+        Some(picker)
+            if matches!(
+                picker.kind(),
+                PickerKind::ManageProjects | PickerKind::ManageWorlds
+            ) =>
+        {
+            match picker.selected() {
+                Some(PickerItem::Project {
+                    kind: ProjectKind::Research | ProjectKind::Learn,
+                    ..
+                }) => Err(RemoveProjectError::OrbsOwn),
+                Some(PickerItem::Project { .. }) => Ok(()),
+                _ => Err(RemoveProjectError::NotAProject),
+            }
+        }
         _ => Err(RemoveProjectError::NoPicker),
     }
 }

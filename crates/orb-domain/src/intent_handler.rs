@@ -4,6 +4,7 @@ use crate::command::SessionsCommand;
 use crate::feat::layout::intent::{SizeStep, SwapStep};
 use crate::feat::pane::intent::enter_session;
 use crate::feat::picker::intent::{PickerKey, project_item};
+use crate::feat::picker::state::PickerKind;
 use crate::feat::sessions::state::SidebarItem;
 use crate::feat::{git, jumps, layout, pane, picker, sessions, sidebar};
 use crate::ids::SessionId;
@@ -91,7 +92,9 @@ impl IntentHandler {
             Intent::JumpBack => jumps::intent::jump_back(state),
             Intent::JumpForward => jumps::intent::jump_forward(state),
             Intent::NewSession => picker::intent::open_project_picker(state),
+            Intent::NewColony => picker::intent::open_world_picker(state),
             Intent::OpenProjects => picker::intent::open_projects(state),
+            Intent::OpenWorlds => picker::intent::open_worlds(state),
             Intent::NewIncognito => sessions::intent::new_incognito(state),
             Intent::OpenSessionPicker => picker::intent::open_session_picker(state),
             Intent::OpenWorktreePicker => picker::intent::open_worktree_picker(state),
@@ -127,7 +130,6 @@ impl IntentHandler {
             Intent::PickerFilter(pressed) => picker::intent::filter(state, *pressed),
             Intent::Unfold => sessions::intent::unfold(state),
             Intent::Fold => sessions::intent::fold(state),
-            Intent::NewFolder(kind) => sessions::intent::open_folder_name(state, *kind),
             Intent::TogglePin => sessions::intent::toggle_pin(state),
             Intent::Rename => sidebar::intent::rename(state),
             Intent::Search => sidebar::intent::search(state),
@@ -171,15 +173,21 @@ impl IntentHandler {
         commands
     }
 
-    /// Re-lists the projects screen, open or under a picker, after the
-    /// projects changed, keeping the selected project selected.
+    /// Re-lists the projects or worlds screen, open or under a picker, after
+    /// the projects changed, keeping the selected project selected.
     pub fn relist_projects(state: &mut AppState) {
-        let items = state
-            .sessions
-            .projects_by_recency()
-            .into_iter()
-            .map(project_item)
-            .collect();
+        let worlds = state
+            .picker
+            .iter()
+            .flat_map(|picker| [Some(picker), picker.under()])
+            .flatten()
+            .any(|picker| *picker.kind() == PickerKind::ManageWorlds);
+        let projects = if worlds {
+            state.sessions.worlds_by_recency()
+        } else {
+            state.sessions.projects_by_recency()
+        };
+        let items = projects.into_iter().map(project_item).collect();
         if let Some(picker) = &mut state.picker {
             picker.show_projects(items);
         }
@@ -244,13 +252,13 @@ mod tests {
     use crate::feat::layout::tree::NavDirection;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::{PickerKind, PickerState};
-    use crate::feat::sessions::state::{AgentStatus, SidebarItem};
+    use crate::feat::sessions::state::{AgentStatus, ProjectKind, SidebarItem};
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
         ORPHAN, agent, agent_row, choosing_workspace, highlight, in_root, jumping,
         left_pane_showing_1, managing, on_agent, picked_worktree, project_row, removing_alpha,
-        split_layout, state_with, two_agents, two_agents_from_sidebar, workspace_labels,
-        worktree_picker_after,
+        split_layout, state_with, two_agents, two_agents_from_sidebar, two_projects,
+        workspace_labels, worktree_picker_after,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
     use std::path::PathBuf;
@@ -317,6 +325,36 @@ mod tests {
             .flatten()
             .filter(|picker| *picker.kind() == PickerKind::ManageProjects)
             .any(|picker| picker.shown().any(|(item, _)| item == row))
+    }
+
+    #[rstest::rstest]
+    fn relist_projects_lists_a_new_world() {
+        // Given the worlds screen, then shared world gamma added.
+        let mut state = two_projects(None, on_agent(21));
+        IntentHandler::handle(&Intent::OpenWorlds, &mut state);
+        add_gamma(&mut state);
+        if let Some(gamma) = state.sessions.projects.last_mut() {
+            gamma.kind = ProjectKind::SharedWorld;
+        }
+
+        // When re-listing the projects.
+        IntentHandler::relist_projects(&mut state);
+
+        // Then gamma shows as a row of the worlds screen.
+        let gamma = PickerItem::Project {
+            id: ProjectId(3),
+            title: "gamma".to_owned(),
+            root: "/gamma".into(),
+            kind: ProjectKind::SharedWorld,
+        };
+        assert!(
+            state
+                .picker
+                .iter()
+                .filter(|picker| *picker.kind() == PickerKind::ManageWorlds)
+                .any(|picker| picker.shown().any(|(item, _)| *item == gamma)),
+            "a re-list should show the new world in the worlds screen"
+        );
     }
 
     #[rstest::rstest]

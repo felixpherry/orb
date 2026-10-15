@@ -14,8 +14,8 @@ use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerItem {
-    /// A project, matched on its name and path; one of orb's own (Research,
-    /// Learn) only on its name.
+    /// A project, matched on its name and path; a world or Incognito only on
+    /// its name.
     Project {
         id: ProjectId,
         title: String,
@@ -74,6 +74,9 @@ pub enum PickerItem {
         path: PathBuf,
         prompt_offset: u64,
     },
+    /// A world kind to add a folder as, in the `Add <name> as` pick: `Fresh`
+    /// when `fresh`, else `Shared`. Matched on its label.
+    WorldKind { fresh: bool },
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
@@ -85,6 +88,11 @@ pub const ALL_PROJECTS: &str = "All projects";
 /// The text of a [`PickerItem::Confirm`] row.
 pub fn confirm_label(yes: bool) -> &'static str {
     if yes { "Yes" } else { "No" }
+}
+
+/// The text of a [`PickerItem::WorldKind`] row.
+pub fn world_kind_label(fresh: bool) -> &'static str {
+    if fresh { "Fresh" } else { "Shared" }
 }
 
 impl PickerItem {
@@ -413,7 +421,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::Confirm(_)
         | PickerItem::Session { .. }
         | PickerItem::Worktree { .. }
-        | PickerItem::Hit { .. } => false,
+        | PickerItem::Hit { .. }
+        | PickerItem::WorldKind { .. } => false,
     }
 }
 
@@ -460,11 +469,9 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
     // A project is matched on "title\nroot". Typed text never holds a line
     // break, so every offset falls on one side of it.
     let (label, title_len) = match item {
-        PickerItem::Project {
-            title,
-            kind: ProjectKind::Research | ProjectKind::Learn | ProjectKind::Incognito,
-            ..
-        } => (title.clone(), None),
+        PickerItem::Project { title, kind, .. } if *kind != ProjectKind::Normal => {
+            (title.clone(), None)
+        }
         PickerItem::Project { title, root, .. } => {
             (format!("{title}\n{}", root.display()), Some(title.len()))
         }
@@ -477,6 +484,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
+        PickerItem::WorldKind { fresh } => (world_kind_label(*fresh).to_owned(), None),
     };
     let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
@@ -539,6 +547,7 @@ mod tests {
                 PickerItem::Session { label, .. }
                 | PickerItem::Worktree { label, .. }
                 | PickerItem::Hit { label, .. } => label.clone(),
+                PickerItem::WorldKind { fresh } => super::world_kind_label(*fresh).to_owned(),
             })
             .collect()
     }
@@ -623,7 +632,8 @@ mod tests {
                 | PickerItem::Confirm(_)
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
-                | PickerItem::Hit { .. } => None,
+                | PickerItem::Hit { .. }
+                | PickerItem::WorldKind { .. } => None,
             })
             .collect();
         assert_eq!(

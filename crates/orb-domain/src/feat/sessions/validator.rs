@@ -1,5 +1,5 @@
 //! Checks whether the user's sidebar actions can proceed: making a new
-//! session, naming a new Research or Learn session's folder, pinning,
+//! session, naming a new colony, pinning,
 //! settling or deleting the selected session (pin and settle are refused on
 //! an agent row), folding and unfolding a card or the Settled shelf, and
 //! making an Incognito session.
@@ -7,56 +7,61 @@
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{FolderKind, ProjectKind, SidebarItem, folder_slug};
+use crate::feat::sessions::state::{ProjectKind, SidebarItem, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::SessionId;
 
-/// Why making a session in a new folder from the name box can't proceed.
+/// Why making a colony from the `New colony` box can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum NewFolderError {
-    /// The box isn't naming a new folder, or the slug is empty.
+pub enum NewColonyError {
+    /// The box isn't naming a colony, or a fresh world's folder name is
+    /// empty.
     Empty,
-    /// The slug uses something folder names can't: the char or sequence.
+    /// A fresh world's folder name uses something folder names can't: the
+    /// char or sequence.
     Invalid(String),
-    /// `⏎` already asked for the session, and the sessions actor hasn't
+    /// `⏎` already asked for the colony, and the sessions actor hasn't
     /// answered yet.
     Creating,
+    /// Its world is gone, removed or no longer a world.
+    NoWorld,
 }
 
 /// Characters a folder's slug can't hold anywhere.
 const INVALID_CHARS: [char; 8] = ['/', '\\', '~', '^', ':', '?', '*', '['];
 
-/// The mode-line text for a `kind` folder `slug` that is already on disk.
-#[must_use]
-pub fn folder_exists(kind: FolderKind, slug: &str) -> String {
-    match kind {
-        FolderKind::Research => format!("~/.orb/research/{slug} already exists"),
-        FolderKind::Learn => format!("~/.orb/learn/{slug} already exists"),
-    }
-}
-
-/// Allow making the session the name box names, once its slug is a usable
-/// folder name.
+/// Allow making the colony the `New colony` box names: any name in a shared
+/// world; in a fresh world, a usable folder name.
 ///
 /// # Errors
 ///
-/// Returns [`NewFolderError::Empty`] when the box isn't naming a new folder
-/// or the slug is empty, [`NewFolderError::Invalid`] with the offending char
-/// or sequence when the slug holds one of `/ \ ~ ^ : ? * [`, starts with `-`
-/// or `.`, or holds `..`, and [`NewFolderError::Creating`] while the box's
-/// session is being made.
-pub fn validate_new_folder(state: &AppState) -> Result<(), NewFolderError> {
+/// Returns [`NewColonyError::Empty`] when the box isn't naming a colony or a
+/// fresh world's slug is empty, [`NewColonyError::Invalid`] with the
+/// offending char or sequence when that slug holds one of `/ \ ~ ^ : ? * [`,
+/// starts with `-` or `.`, or holds `..`, [`NewColonyError::Creating`] while
+/// the box's colony is being made, and [`NewColonyError::NoWorld`] when its
+/// world is gone, removed or no longer a world.
+pub fn validate_new_colony(state: &AppState) -> Result<(), NewColonyError> {
     let Some(Rename {
-        target: RenameTarget::NewFolder(_),
+        target: RenameTarget::NewColony(world),
         input,
         creating,
     }) = &state.rename
     else {
-        return Err(NewFolderError::Empty);
+        return Err(NewColonyError::Empty);
     };
     if *creating {
-        return Err(NewFolderError::Creating);
+        return Err(NewColonyError::Creating);
+    }
+    let kind = state
+        .sessions
+        .project(*world)
+        .filter(|project| !project.removed && project.kind.is_world())
+        .map(|project| project.kind)
+        .ok_or(NewColonyError::NoWorld)?;
+    if !kind.is_fresh_world() {
+        return Ok(());
     }
     let slug = folder_slug(input.text());
     let invalid = slug
@@ -65,8 +70,8 @@ pub fn validate_new_folder(state: &AppState) -> Result<(), NewFolderError> {
         .or_else(|| ["-", "."].into_iter().find(|lead| slug.starts_with(lead)))
         .or_else(|| slug.contains("..").then_some(".."));
     match (slug.is_empty(), invalid) {
-        (true, _) => Err(NewFolderError::Empty),
-        (false, Some(what)) => Err(NewFolderError::Invalid(what.to_owned())),
+        (true, _) => Err(NewColonyError::Empty),
+        (false, Some(what)) => Err(NewColonyError::Invalid(what.to_owned())),
         (false, None) => Ok(()),
     }
 }
@@ -296,14 +301,14 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        DeleteError, FoldError, FoldTarget, NewFolderError, NewIncognitoError, NewSessionError,
+        DeleteError, FoldError, FoldTarget, NewColonyError, NewIncognitoError, NewSessionError,
         TogglePinError, ToggleSettleError, UnfoldError, validate_delete, validate_fold,
-        validate_new_folder, validate_new_incognito, validate_new_session, validate_toggle_pin,
+        validate_new_colony, validate_new_incognito, validate_new_session, validate_toggle_pin,
         validate_toggle_settle, validate_unfold,
     };
     use crate::feat::sessions::state::{
-        Agent, AgentStatus, FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
-        layouts_for, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, layouts_for,
+        sessions_for,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
@@ -710,16 +715,18 @@ mod tests {
         );
     }
 
-    /// The name box for a new `kind` session holding `text`.
-    fn naming(kind: FolderKind, text: &str) -> AppState {
-        AppState {
-            rename: Some(Rename {
-                target: RenameTarget::NewFolder(kind),
-                input: TextInput::new(text),
-                creating: false,
-            }),
-            ..AppState::default()
+    /// The `New colony` box holding `text`, for project 1, a world of `kind`.
+    fn naming(kind: ProjectKind, text: &str) -> AppState {
+        let mut state = crate::intent_handler::test_support::with_projects(&["kit"]);
+        for project in &mut state.sessions.projects {
+            project.kind = kind;
         }
+        state.rename = Some(Rename {
+            target: RenameTarget::NewColony(ProjectId(1)),
+            input: TextInput::new(text),
+            creating: false,
+        });
+        state
     }
 
     #[rstest::rstest]
@@ -736,15 +743,15 @@ mod tests {
     #[case("a..b", "..")]
     fn new_folder_rejects_what_folders_cant_hold(#[case] text: &str, #[case] what: &str) {
         // Given the name box holding the text.
-        let state = naming(FolderKind::Research, text);
+        let state = naming(ProjectKind::Research, text);
 
         // When validating the new folder.
-        let result = validate_new_folder(&state);
+        let result = validate_new_colony(&state);
 
         // Then it names what can't be used.
         assert_eq!(
             result,
-            Err(NewFolderError::Invalid(what.to_owned())),
+            Err(NewColonyError::Invalid(what.to_owned())),
             "{text:?} should be refused"
         );
     }
@@ -752,37 +759,37 @@ mod tests {
     #[rstest::rstest]
     fn new_folder_rejects_an_empty_name() {
         // Given the name box holding only spaces.
-        let state = naming(FolderKind::Research, "   ");
+        let state = naming(ProjectKind::Research, "   ");
 
         // When validating the new folder.
-        let result = validate_new_folder(&state);
+        let result = validate_new_colony(&state);
 
         // Then it's refused as empty.
-        assert_eq!(result, Err(NewFolderError::Empty), "a blank name");
+        assert_eq!(result, Err(NewColonyError::Empty), "a blank name");
     }
 
     #[rstest::rstest]
     fn new_folder_while_creating_is_creating() {
         // Given the name box holding a fresh name that `⏎` already asked for.
-        let mut state = naming(FolderKind::Research, "tokio cancel");
+        let mut state = naming(ProjectKind::Research, "tokio cancel");
         if let Some(rename) = &mut state.rename {
             rename.creating = true;
         }
 
         // When validating the new folder.
-        let result = validate_new_folder(&state);
+        let result = validate_new_colony(&state);
 
         // Then it's refused until the actor answers.
-        assert_eq!(result, Err(NewFolderError::Creating), "a second ⏎");
+        assert_eq!(result, Err(NewColonyError::Creating), "a second ⏎");
     }
 
     #[rstest::rstest]
     fn new_folder_allowed_for_a_fresh_slug() {
         // Given the name box holding a fresh name.
-        let state = naming(FolderKind::Research, "tokio cancel");
+        let state = naming(ProjectKind::Research, "tokio cancel");
 
         // When validating the new folder.
-        let result = validate_new_folder(&state);
+        let result = validate_new_colony(&state);
 
         // Then it's allowed.
         assert_eq!(result, Ok(()), "a fresh slug");

@@ -1,12 +1,11 @@
 //! The name box: a LazyVim-style input centred at the top of the screen,
 //! where the user types orb's own name for a session (`Rename Session`), a
-//! tab, a pane or an agent's pane (`Rename Agent`), the folder name of a new Research or Learn session
-//! (`New Research session`), or the name of a new session (`New session`).
+//! tab, a pane or an agent's pane (`Rename Agent`), the name of a new
+//! colony (`New colony`), or the name of a new session (`New session`).
 
 use crate::mouse::HitMap;
 use crate::picker::visible;
 use crate::sidebar::{BLUE1, FG, YELLOW};
-use orb_domain::feat::sessions::state::FolderKind;
 use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
@@ -72,8 +71,7 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut H
 fn title(target: RenameTarget) -> &'static str {
     match target {
         RenameTarget::Session(_) => " Rename Session ",
-        RenameTarget::NewFolder(FolderKind::Research) => " New Research session ",
-        RenameTarget::NewFolder(FolderKind::Learn) => " New Learn session ",
+        RenameTarget::NewColony(_) => " New colony ",
         RenameTarget::Tab { .. } => " Rename Tab ",
         RenameTarget::Pane(_) => " Rename Pane ",
         RenameTarget::Agent(_) => " Rename Agent ",
@@ -83,7 +81,6 @@ fn title(target: RenameTarget) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::sessions::state::FolderKind;
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
     use orb_domain::ids::{PaneId, ProjectId, SessionId};
     use orb_domain::{Focus, TextInput};
@@ -146,11 +143,7 @@ mod tests {
     #[case(RenameTarget::Tab { owner: SessionId(1), tab: 0 }, " Rename Tab ")]
     #[case(RenameTarget::Pane(PaneId(1)), " Rename Pane ")]
     #[case(RenameTarget::Agent(PaneId(1)), " Rename Agent ")]
-    #[case(
-        RenameTarget::NewFolder(FolderKind::Research),
-        " New Research session "
-    )]
-    #[case(RenameTarget::NewFolder(FolderKind::Learn), " New Learn session ")]
+    #[case(RenameTarget::NewColony(ProjectId(1)), " New colony ")]
     #[case(
         RenameTarget::NewSession { project: ProjectId(1), return_to: Focus::Sidebar },
         " New session "

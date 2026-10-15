@@ -75,13 +75,22 @@ pub enum PickTarget {
 pub enum PickerKind {
     /// `<C-g> n`: pick the project of a new session.
     Projects,
+    /// `<C-g> c`: pick the world of a new colony.
+    Worlds,
     /// `<C-g> P`: the projects screen, to start a session in, add or remove
     /// projects.
     ManageProjects,
-    /// `a` in the projects screen: pick a directory to add as a project. `listed` is the directory
-    /// text (e.g. `~/dev/`) the items were read from; `None` while the input
-    /// isn't a path.
-    Directories { listed: Option<String> },
+    /// `<C-g> C`: the worlds screen, to start a colony in, add or remove
+    /// worlds.
+    ManageWorlds,
+    /// `a` in the projects or worlds screen: pick a directory to add as a
+    /// project, or as a world when `world`. `listed` is the directory text
+    /// (e.g. `~/dev/`) the items were read from; `None` while the input isn't
+    /// a path.
+    Directories { listed: Option<String>, world: bool },
+    /// `⏎` on a directory in world mode: add `root` as a shared or fresh
+    /// world.
+    WorldKind { root: PathBuf },
     /// `<C-g> w`: pick where `target`'s session runs.
     Workspace { target: PickTarget },
     /// A new worktree's base for `target`: the refs of the project's `root`,
@@ -228,6 +237,36 @@ impl PickerState {
             kind: PickerKind::ManageProjects,
             mode: PickerMode::List { pending_g: false },
             ..Self::projects(items, return_to)
+        }
+    }
+
+    /// The world picker over `items`, in the order given.
+    pub fn worlds(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Worlds,
+            ..Self::projects(items, return_to)
+        }
+    }
+
+    /// The worlds screen over `items`, in the order given, opening in list
+    /// mode.
+    pub fn manage_worlds(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::ManageWorlds,
+            mode: PickerMode::List { pending_g: false },
+            ..Self::projects(items, return_to)
+        }
+    }
+
+    /// The `Shared`/`Fresh` pick for adding `root` as a world, with `Shared`
+    /// selected.
+    pub fn world_kind(root: PathBuf, return_to: Focus) -> Self {
+        Self {
+            list: PickerList::new(vec![
+                PickerItem::WorldKind { fresh: false },
+                PickerItem::WorldKind { fresh: true },
+            ]),
+            ..Self::confirm(PickerKind::WorldKind { root }, return_to)
         }
     }
 
@@ -423,6 +462,7 @@ impl PickerState {
         let picker = Self {
             kind: PickerKind::Directories {
                 listed: Some("~/".to_owned()),
+                world: false,
             },
             list,
             return_to,
@@ -433,6 +473,20 @@ impl PickerState {
             search_preview: None,
             under: None,
             mode: PickerMode::Filter,
+        };
+        (picker, home)
+    }
+
+    /// A directory picker like [`Self::directories`], picking a folder to
+    /// add as a world.
+    pub fn world_directories(home: PathBuf, return_to: Focus) -> (Self, PathBuf) {
+        let (picker, home) = Self::directories(home, return_to);
+        let picker = Self {
+            kind: PickerKind::Directories {
+                listed: Some("~/".to_owned()),
+                world: true,
+            },
+            ..picker
         };
         (picker, home)
     }
@@ -462,6 +516,7 @@ impl PickerState {
     pub fn show_directories(&mut self, dir: &Path, names: Vec<String>) {
         let PickerKind::Directories {
             listed: Some(listed),
+            ..
         } = &self.kind
         else {
             return;
@@ -505,11 +560,14 @@ impl PickerState {
         }
     }
 
-    /// Shows `items`, fresh project rows, in the projects screen (this picker
+    /// Shows `items`, fresh project rows, in the projects or worlds screen (this picker
     /// or the one under it), filtered by the typed text, keeping the selected
     /// project selected while it's still shown. Other pickers ignore it.
     pub fn show_projects(&mut self, items: Vec<PickerItem>) {
-        if self.kind != PickerKind::ManageProjects {
+        if !matches!(
+            self.kind,
+            PickerKind::ManageProjects | PickerKind::ManageWorlds
+        ) {
             if let Some(list) = &mut self.under {
                 list.show_projects(items);
             }
@@ -768,7 +826,8 @@ impl PickerState {
                 | PickerItem::Confirm(_)
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
-                | PickerItem::Hit { .. },
+                | PickerItem::Hit { .. }
+                | PickerItem::WorldKind { .. },
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -927,7 +986,7 @@ impl PickerState {
     /// search picker's rows come from the search index, so it keeps them.
     fn edited(&mut self) -> Option<PathBuf> {
         let input = self.list.input().to_owned();
-        let PickerKind::Directories { listed } = &mut self.kind else {
+        let PickerKind::Directories { listed, .. } = &mut self.kind else {
             if !matches!(self.kind, PickerKind::Search { .. }) {
                 self.list.refilter(&input);
             }

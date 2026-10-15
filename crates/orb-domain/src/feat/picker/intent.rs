@@ -20,7 +20,8 @@ use crate::feat::picker::validator::{
 };
 use crate::feat::sessions::intent::new_session;
 use crate::feat::sessions::intent::{
-    delete_session, filter_to, pick_project, remove_project, settle_session, still_deletable,
+    delete_session, filter_to, open_colony_name, pick_project, remove_project, settle_session,
+    still_deletable,
 };
 use crate::feat::sessions::state::Project;
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
@@ -40,6 +41,18 @@ pub(crate) fn open_project_picker(state: &mut AppState) -> Vec<Command> {
     vec![]
 }
 
+/// Opens the world picker over the worlds, in worlds order.
+pub(crate) fn open_world_picker(state: &mut AppState) -> Vec<Command> {
+    let items = state
+        .sessions
+        .worlds_by_recency()
+        .into_iter()
+        .map(project_item)
+        .collect();
+    open_picker(state, PickerState::worlds(items, state.focus));
+    vec![]
+}
+
 /// Opens the projects screen over orb's projects, most recent first.
 pub(crate) fn open_projects(state: &mut AppState) -> Vec<Command> {
     let items = state
@@ -49,6 +62,19 @@ pub(crate) fn open_projects(state: &mut AppState) -> Vec<Command> {
         .map(project_item)
         .collect();
     open_picker(state, PickerState::manage_projects(items, state.focus));
+    vec![]
+}
+
+/// Opens the worlds screen over Research, Learn and the user's worlds, in
+/// worlds order.
+pub(crate) fn open_worlds(state: &mut AppState) -> Vec<Command> {
+    let items = state
+        .sessions
+        .worlds_by_recency()
+        .into_iter()
+        .map(project_item)
+        .collect();
+    open_picker(state, PickerState::manage_worlds(items, state.focus));
     vec![]
 }
 
@@ -74,19 +100,22 @@ pub(crate) fn open_search(state: &mut AppState) -> Vec<Command> {
     })]
 }
 
-/// Opens the project filter: all projects, orb's own folders, then the
-/// projects most recent first.
+/// Opens the project filter: all projects, the worlds in worlds order,
+/// Incognito, then the projects most recent first.
 pub(crate) fn filter_projects(state: &mut AppState) -> Vec<Command> {
     let items = std::iter::once(PickerItem::AllProjects)
         .chain(
-            [
-                ProjectKind::Research,
-                ProjectKind::Learn,
-                ProjectKind::Incognito,
-            ]
-            .into_iter()
-            .filter_map(|kind| state.sessions.own_project(kind))
-            .map(project_item),
+            state
+                .sessions
+                .worlds_by_recency()
+                .into_iter()
+                .map(project_item),
+        )
+        .chain(
+            state
+                .sessions
+                .own_project(ProjectKind::Incognito)
+                .map(project_item),
         )
         .chain(
             state
@@ -102,13 +131,22 @@ pub(crate) fn filter_projects(state: &mut AppState) -> Vec<Command> {
 }
 
 /// Opens the directory picker to add a project, over the projects screen when
-/// it's open, and asks for its first listing.
+/// it's open, or to add a world over the worlds screen, and asks for its
+/// first listing.
 pub(crate) fn add_project(state: &mut AppState) -> Vec<Command> {
-    let (picker, dir) = PickerState::directories(state.home.clone(), state.focus);
-    let projects = state
-        .picker
-        .take_if(|open| *open.kind() == PickerKind::ManageProjects);
-    let picker = match projects {
+    let screen = state.picker.take_if(|open| {
+        matches!(
+            open.kind(),
+            PickerKind::ManageProjects | PickerKind::ManageWorlds
+        )
+    });
+    let (picker, dir) = match &screen {
+        Some(list) if *list.kind() == PickerKind::ManageWorlds => {
+            PickerState::world_directories(state.home.clone(), state.focus)
+        }
+        _ => PickerState::directories(state.home.clone(), state.focus),
+    };
+    let picker = match screen {
         Some(list) => picker.over(list),
         None => picker,
     };
@@ -476,6 +514,29 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
         }
         Some(PickerKind::Worktrees) => vec![],
         Some(PickerKind::DeleteWorktree { .. }) => leave_delete_worktree(state),
+        Some(PickerKind::Directories { world: true, .. }) => pick_world_root(state),
+        Some(PickerKind::WorldKind { root }) => {
+            let root = root.clone();
+            let kind = match state.picker.as_ref().and_then(PickerState::selected) {
+                Some(&PickerItem::WorldKind { fresh: true }) => Some(ProjectKind::FreshWorld),
+                Some(&PickerItem::WorldKind { fresh: false }) => Some(ProjectKind::SharedWorld),
+                _ => None,
+            };
+            back_to_list(state, false);
+            kind.map(|kind| Command::Sessions(SessionsCommand::AddWorld { root, kind }))
+                .into_iter()
+                .collect()
+        }
+        Some(PickerKind::Worlds | PickerKind::ManageWorlds) => {
+            let valid = validate_pick_project(state);
+            match (
+                valid,
+                close_picker(state).as_ref().and_then(PickerState::selected),
+            ) {
+                (Ok(()), Some(&PickerItem::Project { id, .. })) => open_colony_name(state, id),
+                _ => vec![],
+            }
+        }
         _ => match (validate_pick_project(state), validate_add_directory(state)) {
             (Ok(()), _) => match close_picker(state).as_ref().and_then(PickerState::selected) {
                 Some(&PickerItem::Project { id, .. }) => pick_project(state, id),
@@ -495,6 +556,24 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
             _ => vec![],
         },
     }
+}
+
+/// `⏎` in the directory picker for a world: the `Add <name> as` pick over
+/// the worlds screen, for the highlighted or typed directory.
+fn pick_world_root(state: &mut AppState) -> Vec<Command> {
+    let root = validate_add_directory(state).ok().and_then(|()| {
+        state
+            .picker
+            .as_ref()
+            .and_then(PickerState::directory_to_add)
+    });
+    let Some(root) = root else { return vec![] };
+    back_to_list(state, false);
+    if let Some(list) = state.picker.take() {
+        let return_to = list.return_to();
+        state.picker = Some(PickerState::world_kind(root, return_to).over(list));
+    }
+    vec![]
 }
 
 /// `d` in the picker: the delete-worktree confirm, the close-agent confirm,

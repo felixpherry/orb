@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Agent, AgentId, AgentStatus, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search,
-    Session, SessionId, SessionKind, Sessions, SidebarItem, SidebarRow, layouts_for, most_urgent,
-    sessions_for,
+    Agent, AgentId, AgentStatus, FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
+    Search, Session, SessionId, SessionKind, Sessions, SidebarItem, SidebarRow, WorldDirs,
+    layouts_for, most_urgent, sessions_for, world_dirs,
 };
 use crate::TextInput;
 use crate::feat::layout::state::Layouts;
@@ -2088,4 +2088,71 @@ fn project_kind_is_world(#[case] kind: ProjectKind, #[case] expected: bool) {
 fn project_kind_is_fresh_world(#[case] kind: ProjectKind, #[case] expected: bool) {
     // Given a project kind; When asking whether it's a fresh world; Then it matches.
     assert_eq!(kind.is_fresh_world(), expected, "{kind:?} is_fresh_world");
+}
+
+#[rstest::rstest]
+fn worlds_by_recency_lists_only_worlds_newest_first() {
+    // Given a Normal, an Incognito, a Research, a SharedWorld with newer
+    // activity, and a removed FreshWorld.
+    let of = |id, kind, agents| Project {
+        kind,
+        ..project(id, agents)
+    };
+    let sessions = fill(Sessions {
+        projects: vec![
+            of(1, ProjectKind::Normal, vec![last_active(1, 30)]),
+            of(2, ProjectKind::Incognito, vec![last_active(2, 30)]),
+            of(3, ProjectKind::Research, vec![last_active(3, 10)]),
+            of(4, ProjectKind::SharedWorld, vec![last_active(4, 20)]),
+            Project {
+                removed: true,
+                ..of(5, ProjectKind::FreshWorld, vec![last_active(5, 30)])
+            },
+        ],
+        ..Sessions::default()
+    });
+
+    // When ordering the worlds by recency.
+    let ids: Vec<i64> = sessions
+        .worlds_by_recency()
+        .iter()
+        .map(|project| project.id.0)
+        .collect();
+
+    // Then only the shared world and Research are listed, newest first.
+    assert_eq!(ids, vec![4, 3], "only live worlds, newest first");
+}
+
+#[rstest::rstest]
+#[case(ProjectKind::Research, Some(WorldDirs::Fresh {
+    kit: "/o/templates/research".into(),
+    colonies: "/o/research".into(),
+    seed: Some(FolderKind::Research),
+}))]
+#[case(ProjectKind::Learn, Some(WorldDirs::Fresh {
+    kit: "/o/templates/learn".into(),
+    colonies: "/o/learn".into(),
+    seed: Some(FolderKind::Learn),
+}))]
+#[case(ProjectKind::SharedWorld, Some(WorldDirs::Shared("/w/kit".into())))]
+#[case(ProjectKind::FreshWorld, Some(WorldDirs::Fresh {
+    kit: "/w/kit".into(),
+    colonies: "/o/worlds/kit".into(),
+    seed: None,
+}))]
+#[case(ProjectKind::Normal, None)]
+fn world_dirs_by_kind(#[case] kind: ProjectKind, #[case] expected: Option<WorldDirs>) {
+    // Given a project titled `kit` at /w/kit, of `kind`.
+    let project = Project {
+        kind,
+        title: "kit".into(),
+        root: "/w/kit".into(),
+        ..project(1, vec![])
+    };
+
+    // When finding its world folders under /o.
+    let dirs = world_dirs(std::path::Path::new("/o"), &project);
+
+    // Then they're the folders its kind runs colonies in.
+    assert_eq!(dirs, expected, "world folders for {kind:?}");
 }

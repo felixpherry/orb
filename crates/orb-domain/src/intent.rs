@@ -5,7 +5,7 @@ use std::fmt;
 use crate::PaneMode;
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::picker::state::SessionFilter;
-use crate::feat::sessions::state::{FolderKind, SidebarItem};
+use crate::feat::sessions::state::SidebarItem;
 use crate::ids::PaneId;
 
 /// A user action produced by the keymap and applied by the
@@ -124,6 +124,8 @@ pub enum Intent {
     NewSession,
     /// Make a session in orb's Incognito folder, with one shell.
     NewIncognito,
+    /// Open the world picker to make a colony in one.
+    NewColony,
     /// Open the session picker over the agents inside the project filter,
     /// newest chat first, to jump into one.
     OpenSessionPicker,
@@ -133,6 +135,9 @@ pub enum Intent {
     /// Open the projects screen, listing projects in `<C-g> n` order, to
     /// start a session in one, add one or remove one.
     OpenProjects,
+    /// Open the worlds screen, listing Research, Learn and the user's worlds
+    /// in worlds order, to start a colony in one, add one or remove one.
+    OpenWorlds,
     /// Open the search picker, which finds typed text in the prompts and
     /// replies of every agent's transcripts, newest message first.
     OpenSearch,
@@ -157,10 +162,8 @@ pub enum Intent {
     /// the Settled shelf's sessions from its header or a settled session
     /// (`h`).
     Fold,
-    /// Name a new session in orb's own `kind` folder.
-    NewFolder(FolderKind),
-    /// Open the directory picker, over the projects screen, to add a project
-    /// (`a`).
+    /// Open the directory picker, over the projects or worlds screen, to add
+    /// a project or a world (`a`).
     AddProject,
     /// Open the workspace picker for the selected agent before its first
     /// prompt.
@@ -218,7 +221,8 @@ pub enum Intent {
     PickerLast,
     /// `g` in list mode: pressed twice, select the first item.
     PickerG,
-    /// Ask to remove the project highlighted in the projects screen, or to
+    /// Ask to remove the project highlighted in the projects screen, or the
+    /// world highlighted in the worlds screen, or to
     /// delete the worktree highlighted in the worktree picker, or to delete
     /// the session highlighted in the session picker (`d`).
     PickerRemove,
@@ -282,9 +286,11 @@ impl fmt::Display for Intent {
             Self::JumpForward => "jump forward",
             Self::NewSession => "new session",
             Self::NewIncognito => "incognito",
+            Self::NewColony => "new colony",
             Self::OpenSessionPicker => "sessions",
             Self::OpenWorktreePicker => "worktrees",
             Self::OpenProjects => "projects",
+            Self::OpenWorlds => "worlds",
             Self::OpenSearch => "grep",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
@@ -298,8 +304,6 @@ impl fmt::Display for Intent {
             Self::Delete | Self::PickerBackspace => "delete",
             Self::Unfold => "open",
             Self::Fold => "close",
-            Self::NewFolder(FolderKind::Research) => "research session",
-            Self::NewFolder(FolderKind::Learn) => "learn session",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
@@ -324,7 +328,6 @@ mod tests {
     use super::Intent;
     use crate::feat::layout::tree::{NavDirection, Split};
     use crate::feat::picker::state::SessionFilter;
-    use crate::feat::sessions::state::FolderKind;
     use crate::ids::PaneId;
 
     #[rstest::rstest]
@@ -397,14 +400,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(FolderKind::Research, "research session")]
-    #[case(FolderKind::Learn, "learn session")]
-    fn new_folder_displays_its_kind(#[case] kind: FolderKind, #[case] expected: &str) {
-        // Given / When / Then: which-key labels NewFolder by its kind.
-        assert_eq!(
-            Intent::NewFolder(kind).to_string(),
-            expected,
-            "which-key label"
-        );
+    #[case(Intent::NewColony, "new colony")]
+    #[case(Intent::OpenWorlds, "worlds")]
+    fn colony_keys_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
+        // Given / When / Then: which-key labels the colony keys.
+        assert_eq!(intent.to_string(), expected, "which-key label");
     }
 }

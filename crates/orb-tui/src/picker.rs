@@ -29,6 +29,7 @@ use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::picker::list::{
     ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
+    world_kind_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::feat::sessions::state::{ProjectKind, Sessions};
@@ -43,7 +44,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::mouse::HitMap;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, BRANCH, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER,
-    FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
+    FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split, world_look,
 };
 
 /// Nerd Font's code-fork glyph, before the worktree workspace rows and the
@@ -174,12 +175,28 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
             let label = layouts.agent_name(*pane, sessions.agent_in(*pane));
             return Cow::Owned(format!("Close {label}?"));
         }
+        PickerKind::RemoveProject { project }
+            if sessions
+                .project(*project)
+                .is_some_and(|project| project.kind.is_world()) =>
+        {
+            "Remove world?"
+        }
+        PickerKind::WorldKind { root } => {
+            let name = root.file_name().map_or_else(
+                || root.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            return Cow::Owned(format!("Add {name} as"));
+        }
         PickerKind::Projects | PickerKind::ManageProjects => "Projects",
+        PickerKind::Worlds | PickerKind::ManageWorlds => "Worlds",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
         PickerKind::Search { .. } => "Search",
         PickerKind::ProjectFilter => "Filter projects",
-        PickerKind::Directories { .. } => "Add project",
+        PickerKind::Directories { world: false, .. } => "Add project",
+        PickerKind::Directories { world: true, .. } => "Add world",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
         PickerKind::Base { .. } => "New worktree from",
@@ -203,7 +220,9 @@ pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
         (_, true, _) => confirm.into_iter().chain([("Esc", "back")]).collect(),
         (true, _, _) => {
             let own: &[(&str, &str)] = match kind {
-                PickerKind::ManageProjects => &[("a", "add"), ("d", "remove")],
+                PickerKind::ManageProjects | PickerKind::ManageWorlds => {
+                    &[("a", "add"), ("d", "remove")]
+                }
                 PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "close")],
                 _ => &[("d", "delete")],
             };
@@ -247,6 +266,7 @@ fn confirm_verb(kind: &PickerKind) -> Option<&'static str> {
     match kind {
         PickerKind::Worktrees => None,
         PickerKind::ManageProjects => Some("new session"),
+        PickerKind::Worlds | PickerKind::ManageWorlds => Some("new colony"),
         PickerKind::Sessions { .. } => Some("open"),
         PickerKind::ProjectFilter => Some("filter"),
         _ => Some("select"),
@@ -276,6 +296,7 @@ pub(crate) fn input_spans(picker: &PickerState, shown: String) -> Vec<Span<'stat
 fn placeholder(kind: &PickerKind) -> &'static str {
     match kind {
         PickerKind::ManageProjects => "search projects",
+        PickerKind::ManageWorlds => "search worlds",
         PickerKind::Worktrees => "search worktrees",
         PickerKind::Sessions { .. } => "search sessions",
         _ => "search",
@@ -380,13 +401,10 @@ fn row_content(
     home: &Path,
 ) -> (Vec<Span<'static>>, Option<RightColumn>) {
     match item {
-        PickerItem::Project {
-            title,
-            kind: ProjectKind::Research | ProjectKind::Learn | ProjectKind::Incognito,
-            ..
-        } => {
-            let folder = icon(FOLDER, badge(title, true).style.fg.unwrap_or(BLUE));
-            (labelled(folder, title, &matches.name), None)
+        PickerItem::Project { title, kind, .. } if *kind != ProjectKind::Normal => {
+            let (glyph, fg) =
+                world_look(*kind).unwrap_or((FOLDER, badge(title, true).style.fg.unwrap_or(BLUE)));
+            (labelled(icon(glyph, fg), title, &matches.name), None)
         }
         PickerItem::Project { title, root, .. } => {
             let shown = tilde(root, home);
@@ -444,6 +462,18 @@ fn row_content(
         PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (highlight(label, &matches.name, |_| FG), None),
+        PickerItem::WorldKind { fresh } => {
+            let kind = if *fresh {
+                ProjectKind::FreshWorld
+            } else {
+                ProjectKind::SharedWorld
+            };
+            let (glyph, fg) = world_look(kind).unwrap_or((FOLDER, BLUE));
+            (
+                labelled(icon(glyph, fg), world_kind_label(*fresh), &matches.name),
+                None,
+            )
+        }
     }
 }
 
@@ -1017,6 +1047,12 @@ mod tests {
     #[case::clean_worktree(delete_worktree(false), "Delete worktree?")]
     #[case::dirty_worktree(delete_worktree(true), "Delete worktree and its uncommitted changes?")]
     #[case::manage_projects(PickerState::manage_projects(vec![], Focus::Sidebar), "Projects")]
+    #[case::manage_worlds(PickerState::manage_worlds(vec![], Focus::Sidebar), "Worlds")]
+    #[case::world_directories(
+        PickerState::world_directories(PathBuf::from(HOME), Focus::Sidebar).0,
+        "Add world"
+    )]
+    #[case::world_kind(PickerState::world_kind("/x/kit".into(), Focus::Sidebar), "Add kit as")]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
@@ -1250,6 +1286,58 @@ mod tests {
         let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
         let at = find(&buf, expected).map(|(_, y)| y);
         assert_eq!(at, bottom, "the row of the hints {expected:?}");
+    }
+
+    #[rstest::rstest]
+    fn worlds_screen_hints_name_its_keys() {
+        // Given the worlds screen, listing.
+        let picker = PickerState::manage_worlds(vec![], Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then its bottom border holds the list keys.
+        let expected = "↑↓/j/k rows · / search · a add · d remove · ⏎ new colony · Esc close";
+        let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
+        let at = find(&buf, expected).map(|(_, y)| y);
+        assert_eq!(at, bottom, "the row of the hints {expected:?}");
+    }
+
+    #[rstest::rstest]
+    fn remove_confirm_on_a_world_asks_to_remove_the_world() {
+        // Given shared world 1, and the confirm for removing it.
+        let sessions = Sessions {
+            projects: vec![Project {
+                id: ProjectId(1),
+                title: "kit".to_owned(),
+                root: "/x/kit".into(),
+                created_at: UNIX_EPOCH,
+                removed: false,
+                repo: false,
+                agents: vec![],
+                kind: ProjectKind::SharedWorld,
+            }],
+            ..Sessions::default()
+        };
+        let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
+
+        // When drawing it.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 40));
+        render(
+            &picker,
+            Path::new(HOME),
+            &sessions,
+            &Layouts::default(),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+            &mut HitMap::default(),
+        );
+
+        // Then its top border asks to remove the world.
+        let top = border_rows(&buf).map(|(top, _)| top);
+        let at = find(&buf, " Remove world? ").map(|(_, y)| y);
+        assert_eq!(at, top, "the row of the title");
     }
 
     #[rstest::rstest]
@@ -1662,12 +1750,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::research(ProjectKind::Research, "Research", "/Users/me/.orb/research")]
-    #[case::incognito(ProjectKind::Incognito, "Incognito", "/tmp/orb-incognito")]
+    #[case::research(
+        ProjectKind::Research,
+        "Research",
+        "/Users/me/.orb/research",
+        "\u{f0c3}"
+    )]
+    #[case::incognito(ProjectKind::Incognito, "Incognito", "/tmp/orb-incognito", FOLDER)]
     fn orbs_own_project_row_reads_just_its_name(
         #[case] kind: ProjectKind,
         #[case] title: &str,
         #[case] root: &str,
+        #[case] glyph: &str,
     ) {
         // Given the project filter over orb and one of orb's own projects.
         let own = PickerItem::Project {
@@ -1685,13 +1779,13 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then its row, the second, is its folder and name, with no path or
+        // Then its row, the second, is its icon and name, with no path or
         // title on the right.
         let row = lines(&buf)
             .into_iter()
             .find(|line| line.contains(title))
             .map(|line| line.trim_matches(['│', ' ']).to_owned());
-        assert_eq!(row, Some(format!("2. {FOLDER} {title}")), "the {title} row");
+        assert_eq!(row, Some(format!("2. {glyph} {title}")), "the {title} row");
     }
 
     #[rstest::rstest]

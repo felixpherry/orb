@@ -29,8 +29,8 @@ use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
 use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
 use crate::feat::sessions::state::{
-    Agent, AgentStatus, FolderKind, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session,
-    SessionKind, SidebarItem,
+    Agent, AgentStatus, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session, SessionKind,
+    SidebarItem,
 };
 use crate::feat::sessions::store::{
     AgentRow, FloatRow, NewPaneAgent, SessionFloats, SessionRow, SettledOverride, Store,
@@ -6525,13 +6525,26 @@ fn creating(
     Ok((orb_root, orb, actor, state))
 }
 
+/// orb's own world of `kind`, which start adds.
+fn world_of(state: &State, kind: ProjectKind) -> ProjectId {
+    state
+        .read()
+        .sessions
+        .own_project(kind)
+        .map_or(ProjectId(0), |project| project.id)
+}
+
 #[rstest::rstest]
 fn new_research_session_seeds_a_missing_template() -> Result<(), Report<StoreError>> {
     // Given no Research template.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then the template is written.
     assert!(
@@ -6547,10 +6560,14 @@ fn new_research_session_seeds_a_missing_template() -> Result<(), Report<StoreErr
 #[rstest::rstest]
 fn new_research_session_copies_the_template_into_its_folder() -> Result<(), Report<StoreError>> {
     // Given no Research template.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then its folder has AGENTS.md and a CLAUDE.md link to it.
     let dir = orb_root.path().join("research/tokio-cancel");
@@ -6566,10 +6583,14 @@ fn new_research_session_copies_the_template_into_its_folder() -> Result<(), Repo
 #[rstest::rstest]
 fn new_research_session_copies_the_kit() -> Result<(), Report<StoreError>> {
     // Given no Research template.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then its folder has the kit's investigator subagent.
     assert!(
@@ -6583,37 +6604,12 @@ fn new_research_session_copies_the_kit() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn new_research_session_adds_the_research_project() -> Result<(), Report<StoreError>> {
-    // Given no Research project.
-    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
-
-    // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
-
-    // Then orb's Research project shows, rooted in orb's research folder.
-    let research: Vec<(String, PathBuf)> = state
-        .read()
-        .sessions
-        .projects
-        .iter()
-        .filter(|project| project.kind == ProjectKind::Research)
-        .map(|project| (project.title.clone(), project.root.clone()))
-        .collect();
-    assert_eq!(
-        research,
-        vec![("Research".to_owned(), orb_root.path().join("research"))],
-        "the Research project should be added"
-    );
-    Ok(())
-}
-
-#[rstest::rstest]
 fn new_learn_session_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
     // Given no Learn project.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Learn session `rust-async`.
-    actor.new_folder_session(FolderKind::Learn, "rust-async", None);
+    actor.new_colony(world_of(&state, ProjectKind::Learn), "rust-async", None);
 
     // Then its folder is under orb's learn folder.
     assert!(
@@ -6629,7 +6625,11 @@ fn new_research_session_is_a_colony() -> Result<(), Report<StoreError>> {
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then a colony runs in its folder.
     let session = only_session(&state)?;
@@ -6650,7 +6650,7 @@ fn new_learn_session_has_one_tab_with_one_shell_pane() -> Result<(), Report<Stor
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Learn session `rust-async`.
-    actor.new_folder_session(FolderKind::Learn, "rust-async", None);
+    actor.new_colony(world_of(&state, ProjectKind::Learn), "rust-async", None);
 
     // Then its layout holds one tab of one pane in its folder.
     let id = only_session(&state)?.id;
@@ -6675,13 +6675,17 @@ fn new_learn_session_has_one_tab_with_one_shell_pane() -> Result<(), Report<Stor
 #[rstest::rstest]
 fn new_folder_session_keeps_a_curated_template() -> Result<(), Report<StoreError>> {
     // Given a Research template the user wrote.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
     let template = orb_root.path().join("templates/research");
     fs::create_dir_all(&template).change_context(StoreError)?;
     fs::write(template.join("AGENTS.md"), "mine").change_context(StoreError)?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then the folder gets the user's AGENTS.md.
     let text = fs::read_to_string(orb_root.path().join("research/tokio-cancel/AGENTS.md"))
@@ -6692,17 +6696,19 @@ fn new_folder_session_keeps_a_curated_template() -> Result<(), Report<StoreError
 
 #[rstest::rstest]
 fn new_folder_session_refused_when_its_folder_exists() -> Result<(), Report<StoreError>> {
-    // Given a folder `x` already under orb's research folder.
-    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    // Given a folder `x` already under orb's research folder, with orb's
+    // folder as home.
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
     fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
+    state.write().home = orb_root.path().to_path_buf();
 
     // When making Research session `x`.
-    actor.new_folder_session(FolderKind::Research, "x", None);
+    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
 
     // Then the mode line says the folder exists.
     assert_eq!(
         error_of(&actor).as_deref(),
-        Some("~/.orb/research/x already exists"),
+        Some("~/research/x already exists"),
         "an existing folder should be refused"
     );
     Ok(())
@@ -6715,7 +6721,7 @@ fn refused_folder_session_adds_no_session() -> Result<(), Report<StoreError>> {
     fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
     // When making Research session `x`.
-    actor.new_folder_session(FolderKind::Research, "x", None);
+    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
 
     // Then no session shows.
     assert!(
@@ -6725,12 +6731,12 @@ fn refused_folder_session_adds_no_session() -> Result<(), Report<StoreError>> {
     Ok(())
 }
 
-/// Opens the name box for a new `kind` session holding `text`, as `⏎`
-/// leaves it: waiting for the actor, with the keys.
-fn waiting_name_box(state: &State, kind: FolderKind, text: &str) {
+/// Opens the `New colony` box for a colony in `world` holding `text`, as
+/// `⏎` leaves it: waiting for the actor, with the keys.
+fn waiting_name_box(state: &State, world: ProjectId, text: &str) {
     let mut app = state.write();
     app.rename = Some(Rename {
-        target: RenameTarget::NewFolder(kind),
+        target: RenameTarget::NewColony(world),
         input: TextInput::new(text),
         creating: true,
     });
@@ -6751,10 +6757,18 @@ fn name_box_of(state: &State) -> (Option<(String, bool)>, Focus) {
 fn made_folder_session_closes_the_name_box() -> Result<(), Report<StoreError>> {
     // Given the name box waiting for Research session `tokio-cancel`.
     let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
-    waiting_name_box(&state, FolderKind::Research, "tokio cancel");
+    waiting_name_box(
+        &state,
+        world_of(&state, ProjectKind::Research),
+        "tokio cancel",
+    );
 
     // When making it.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then the box is closed and the sidebar has the keys.
     assert_eq!(
@@ -6771,10 +6785,10 @@ fn refused_folder_name_keeps_the_name_box_open() -> Result<(), Report<StoreError
     // exists.
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
     fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
-    waiting_name_box(&state, FolderKind::Research, "x");
+    waiting_name_box(&state, world_of(&state, ProjectKind::Research), "x");
 
     // When making it.
-    actor.new_folder_session(FolderKind::Research, "x", None);
+    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
 
     // Then the box stays open with the name, no longer waiting.
     assert_eq!(
@@ -6792,7 +6806,11 @@ fn new_folder_session_outside_the_filter_clears_it() -> Result<(), Report<StoreE
     state.write().sessions.filter = Some(orb);
 
     // When making Research session `tokio-cancel`, outside orb.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then the filter goes back to all projects.
     assert_eq!(
@@ -6812,7 +6830,11 @@ fn new_folder_session_outside_the_filter_saves_the_cleared_filter() -> Result<()
     actor.save_ui();
 
     // When making Research session `tokio-cancel`, outside orb.
-    actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
+    actor.new_colony(
+        world_of(&state, ProjectKind::Research),
+        "tokio-cancel",
+        None,
+    );
 
     // Then the store holds no filter.
     assert_eq!(
@@ -6831,7 +6853,7 @@ fn refused_folder_session_keeps_the_filter() -> Result<(), Report<StoreError>> {
     state.write().sessions.filter = Some(orb);
 
     // When making Research session `x`.
-    actor.new_folder_session(FolderKind::Research, "x", None);
+    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
 
     // Then the filter stays on orb.
     assert_eq!(
@@ -8850,6 +8872,240 @@ async fn api_start_in_a_new_worktree_replies_with_its_session() -> Result<(), Re
         dir,
         git.added().map(|(path, _)| path),
         "the replied session runs in the new worktree"
+    );
+    Ok(())
+}
+
+/// A new directory `base/<sub>/<name>`, for a world named `name`.
+fn world_dir(base: &Path, sub: &str, name: &str) -> Result<PathBuf, Report<StoreError>> {
+    let dir = base.join(sub).join(name);
+    fs::create_dir_all(&dir).change_context(StoreError)?;
+    Ok(dir)
+}
+
+#[rstest::rstest]
+#[case("Kit", Some("kit"))]
+#[case("research", None)]
+fn add_world_refuses_a_taken_name(
+    #[case] name: &str,
+    #[case] existing: Option<&str>,
+) -> Result<(), Report<StoreError>> {
+    // Given the built-in worlds and maybe a world named `existing`.
+    let (_orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    if let Some(existing) = existing {
+        actor.add_world(
+            world_dir(base.path(), "a", existing)?,
+            ProjectKind::FreshWorld,
+        );
+    }
+
+    // When adding a world from another folder named `name`.
+    actor.add_world(world_dir(base.path(), "b", name)?, ProjectKind::FreshWorld);
+
+    // Then it's refused because the name is taken.
+    assert_eq!(
+        error_of(&actor),
+        Some(format!("World {name} already exists")),
+        "a world name should be taken whatever its case"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn add_world_refuses_orbs_own_folder() -> Result<(), Report<StoreError>> {
+    // Given the built-in Research world in orb's folder.
+    let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+
+    // When adding Research's folder as a fresh world.
+    actor.add_world(orb_root.path().join("research"), ProjectKind::FreshWorld);
+
+    // Then it's refused as one of orb's own folders.
+    assert!(
+        error_of(&actor).is_some_and(|error| error.ends_with("is one of orb's own folders")),
+        "orb's own folders can't become worlds"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn add_world_turns_a_normal_project_into_a_world() -> Result<(), Report<StoreError>> {
+    // Given the orb project.
+    let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+
+    // When adding its folder as a shared world.
+    actor.add_world(PathBuf::from(PROJECT_ROOT), ProjectKind::SharedWorld);
+
+    // Then it's the one project at that folder, now a shared world.
+    let at_root: Vec<(ProjectId, ProjectKind)> = state
+        .read()
+        .sessions
+        .projects
+        .iter()
+        .filter(|project| project.root == Path::new(PROJECT_ROOT))
+        .map(|project| (project.id, project.kind))
+        .collect();
+    assert_eq!(
+        at_root,
+        [(orb, ProjectKind::SharedWorld)],
+        "the project should become the world"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn add_world_shows_a_notice() -> Result<(), Report<StoreError>> {
+    // Given no world named kit.
+    let (_orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+
+    // When adding folder kit as a fresh world.
+    actor.add_world(world_dir(base.path(), "a", "kit")?, ProjectKind::FreshWorld);
+
+    // Then the notice names the world.
+    assert_eq!(
+        message_notices(&actor),
+        ["Added world kit"],
+        "adding a world should say it was added"
+    );
+    Ok(())
+}
+
+/// Adds `root` as a world of `kind` and returns its id.
+fn added_world(
+    actor: &mut SessionsActor,
+    state: &State,
+    root: &Path,
+    kind: ProjectKind,
+) -> ProjectId {
+    actor.add_world(root.to_path_buf(), kind);
+    state
+        .read()
+        .sessions
+        .projects
+        .iter()
+        .find(|project| project.root == root)
+        .map_or(ProjectId(0), |project| project.id)
+}
+
+/// A fresh world `kit` whose kit holds `AGENTS.md` and a `.git` folder.
+fn fresh_kit(
+    actor: &mut SessionsActor,
+    state: &State,
+    base: &Path,
+) -> Result<ProjectId, Report<StoreError>> {
+    let kit = world_dir(base, "a", "kit")?;
+    fs::write(kit.join("AGENTS.md"), "kit").change_context(StoreError)?;
+    fs::create_dir_all(kit.join(".git")).change_context(StoreError)?;
+    fs::write(kit.join(".git/HEAD"), "ref").change_context(StoreError)?;
+    Ok(added_world(actor, state, &kit, ProjectKind::FreshWorld))
+}
+
+#[rstest::rstest]
+fn fresh_colony_copies_the_kit_without_git() -> Result<(), Report<StoreError>> {
+    // Given a fresh world `kit` whose kit is a git repository.
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let world = fresh_kit(&mut actor, &state, base.path())?;
+
+    // When making colony `a` in it.
+    actor.new_colony(world, "a", None);
+
+    // Then its folder has the kit's files but not its `.git`.
+    let dir = orb_root.path().join("worlds/kit/a");
+    assert_eq!(
+        (dir.join("AGENTS.md").is_file(), dir.join(".git").exists()),
+        (true, false),
+        "a fresh colony should copy the kit without .git"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn fresh_colony_refused_when_its_folder_exists() -> Result<(), Report<StoreError>> {
+    // Given a fresh world `kit` whose colony folder `a` already exists.
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let world = fresh_kit(&mut actor, &state, base.path())?;
+    fs::create_dir_all(orb_root.path().join("worlds/kit/a")).change_context(StoreError)?;
+
+    // When making colony `a` in it.
+    actor.new_colony(world, "a", None);
+
+    // Then it's refused and no session shows.
+    assert_eq!(
+        (
+            error_of(&actor).is_some_and(|error| error.ends_with("already exists")),
+            state.read().sessions.sessions.is_empty(),
+        ),
+        (true, true),
+        "an existing colony folder should be refused"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn shared_colony_runs_in_the_worlds_folder() -> Result<(), Report<StoreError>> {
+    // Given a shared world.
+    let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let root = world_dir(base.path(), "a", "orchestrators")?;
+    let world = added_world(&mut actor, &state, &root, ProjectKind::SharedWorld);
+
+    // When making colony `triage` in it.
+    actor.new_colony(world, "triage", None);
+
+    // Then a colony named `triage` runs in the world's folder.
+    let session = only_session(&state)?;
+    assert_eq!(
+        (session.kind, session.dir, session.name),
+        (SessionKind::Colony, root, Some("triage".to_owned())),
+        "a shared colony should run in the world's folder"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn shared_colony_refused_when_its_folder_is_gone() -> Result<(), Report<StoreError>> {
+    // Given a shared world whose folder was removed after adding it.
+    let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let root = world_dir(base.path(), "a", "orchestrators")?;
+    let world = added_world(&mut actor, &state, &root, ProjectKind::SharedWorld);
+    fs::remove_dir(&root).change_context(StoreError)?;
+
+    // When making colony `triage` in it.
+    actor.new_colony(world, "triage", None);
+
+    // Then it's refused and no session shows.
+    assert_eq!(
+        (
+            error_of(&actor).is_some_and(|error| error.starts_with("couldn't find")),
+            state.read().sessions.sessions.is_empty(),
+        ),
+        (true, true),
+        "a shared world without its folder should refuse colonies"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn removing_a_world_keeps_its_colonies() -> Result<(), Report<StoreError>> {
+    // Given a shared world with a colony.
+    let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let root = world_dir(base.path(), "a", "orchestrators")?;
+    let world = added_world(&mut actor, &state, &root, ProjectKind::SharedWorld);
+    actor.new_colony(world, "triage", None);
+
+    // When removing the world.
+    actor.remove_project(world);
+
+    // Then the colony is still there.
+    assert_eq!(
+        state.read().sessions.sessions.len(),
+        1,
+        "removing a world should keep its colonies"
     );
     Ok(())
 }

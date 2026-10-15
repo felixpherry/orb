@@ -5,7 +5,7 @@ use crate::feat::layout::tree::Split;
 use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{PickTarget, PickerKind, PickerState, SessionFilter};
 use crate::feat::sessions::state::{
-    Agent, AgentStatus, FolderKind, PaneLaunch, ProjectKind, Session, SessionKind, Sessions,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
     SidebarItem, SidebarRow, layouts_for, sessions_for,
 };
 use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
@@ -167,7 +167,8 @@ fn add_project_opens_the_directory_picker_at_home() {
         (
             Focus::Picker,
             Some(&PickerKind::Directories {
-                listed: Some("~/".into())
+                listed: Some("~/".into()),
+                world: false,
             })
         ),
         "AddProject should open the directory picker at ~/"
@@ -852,7 +853,7 @@ fn if_active_of(commands: &[Command]) -> Vec<Option<SessionId>> {
                 SessionsCommand::NewSession { if_active, .. }
                 | SessionsCommand::ChangeWorkspace { if_active, .. }
                 | SessionsCommand::SwitchBranch { if_active, .. }
-                | SessionsCommand::NewFolderSession { if_active, .. },
+                | SessionsCommand::NewColony { if_active, .. },
             ) => Some(*if_active),
             _ => None,
         })
@@ -933,15 +934,15 @@ fn switch_branch_to_the_root_carries_the_session_active_when_asked() {
 fn folder_session_carries_the_session_active_when_asked() {
     // Given the name box for a new Research session holding `notes`,
     // with session 1 active.
-    let mut state = AppState {
+    let mut state = with_research(AppState {
         focus: Focus::Rename,
         rename: Some(Rename {
-            target: RenameTarget::NewFolder(FolderKind::Research),
+            target: RenameTarget::NewColony(ProjectId(9)),
             input: TextInput::new("notes"),
             creating: false,
         }),
         ..state_with(vec![in_root(1)], 1)
-    };
+    });
     state.sessions.enter(SessionId(1));
 
     // When confirming.
@@ -1304,14 +1305,24 @@ fn filter_projects_lists_all_projects_then_the_projects() {
 }
 
 #[rstest::rstest]
-fn filter_projects_lists_orbs_projects_after_all_projects() {
-    // Given Learn, alpha, Incognito, Research and beta, in that order.
-    let mut state = with_projects(&["learn", "alpha", "incognito", "research", "beta"]);
+fn filter_projects_lists_worlds_then_incognito_after_all_projects() {
+    // Given Learn, alpha, Incognito, Research, beta and shared world
+    // orchestrators, in that order, none with agents.
+    let mut state = with_projects(&[
+        "learn",
+        "alpha",
+        "incognito",
+        "research",
+        "beta",
+        "orchestrators",
+    ]);
     for (project, kind) in state.sessions.projects.iter_mut().zip([
         ProjectKind::Learn,
         ProjectKind::Normal,
         ProjectKind::Incognito,
         ProjectKind::Research,
+        ProjectKind::Normal,
+        ProjectKind::SharedWorld,
     ]) {
         project.kind = kind;
     }
@@ -1319,31 +1330,26 @@ fn filter_projects_lists_orbs_projects_after_all_projects() {
     // When handling FilterProjects.
     IntentHandler::handle(&Intent::FilterProjects, &mut state);
 
-    // Then Research, Learn and Incognito follow All projects, once each,
-    // before the projects.
+    // Then the worlds follow All projects by title on the tie, then
+    // Incognito, then the projects.
     let rows: Vec<PickerItem> = state
         .picker
         .iter()
         .flat_map(PickerState::shown)
         .map(|(item, _)| item.clone())
         .collect();
-    let own = |id, title: &str, kind| PickerItem::Project {
-        id: ProjectId(id),
-        title: title.to_owned(),
-        root: format!("/{title}").into(),
-        kind,
-    };
     assert_eq!(
         rows,
         vec![
             PickerItem::AllProjects,
-            own(4, "research", ProjectKind::Research),
-            own(1, "learn", ProjectKind::Learn),
-            own(3, "incognito", ProjectKind::Incognito),
+            world_row(1, "learn", ProjectKind::Learn),
+            world_row(6, "orchestrators", ProjectKind::SharedWorld),
+            world_row(4, "research", ProjectKind::Research),
+            world_row(3, "incognito", ProjectKind::Incognito),
             project_row(2, "alpha"),
             project_row(5, "beta"),
         ],
-        "Research, Learn and Incognito should come right after All projects"
+        "the worlds, then Incognito, should come right after All projects"
     );
 }
 
@@ -2075,21 +2081,36 @@ fn search_cancel_clears_the_search_and_restores_the_old_selection() {
     );
 }
 
-/// The name box for a new Research session holding `text`.
+/// `state` with orb's Research world as project 9.
+fn with_research(mut state: AppState) -> AppState {
+    state.sessions.projects.push(Project {
+        id: ProjectId(9),
+        title: "Research".into(),
+        root: "/orb/research".into(),
+        created_at: SystemTime::UNIX_EPOCH,
+        removed: false,
+        repo: false,
+        agents: vec![],
+        kind: ProjectKind::Research,
+    });
+    state
+}
+
+/// The `New colony` box for a Research colony holding `text`.
 fn naming_research(text: &str) -> AppState {
-    AppState {
+    with_research(AppState {
         focus: Focus::Rename,
         rename: Some(Rename {
-            target: RenameTarget::NewFolder(FolderKind::Research),
+            target: RenameTarget::NewColony(ProjectId(9)),
             input: TextInput::new(text),
             creating: false,
         }),
         ..AppState::default()
-    }
+    })
 }
 
 #[rstest::rstest]
-fn confirming_a_research_name_returns_new_folder_session() {
+fn confirming_a_research_name_returns_new_colony() {
     // Given the name box holding `GT-514 login`.
     let mut state = naming_research("GT-514 login");
 
@@ -2098,8 +2119,8 @@ fn confirming_a_research_name_returns_new_folder_session() {
 
     // Then a Research session is asked for under the case-kept slug.
     assert!(
-        commands.contains(&Command::Sessions(SessionsCommand::NewFolderSession {
-            kind: FolderKind::Research,
+        commands.contains(&Command::Sessions(SessionsCommand::NewColony {
+            world: ProjectId(9),
             name: "GT-514-login".into(),
             if_active: None,
         })),
@@ -4479,5 +4500,364 @@ fn picking_an_agent_makes_its_session_active() {
         state.sessions.active(),
         Some(SessionId(1)),
         "picking an agent should make its session active"
+    );
+}
+
+/// Normal project alpha (1), orb's Research (2) and shared world kit (3) at
+/// home `~/`, with the worlds screen opened from the sidebar.
+fn worlds_screen() -> AppState {
+    let mut state = AppState {
+        home: HOME.into(),
+        ..alpha_and_two_worlds()
+    };
+    IntentHandler::handle(&Intent::OpenWorlds, &mut state);
+    state
+}
+
+/// A row for project `id` titled `title` at `/<title>`, of `kind`.
+fn world_row(id: i64, title: &str, kind: ProjectKind) -> PickerItem {
+    PickerItem::Project {
+        id: ProjectId(id),
+        title: title.to_owned(),
+        root: format!("/{title}").into(),
+        kind,
+    }
+}
+
+/// [`worlds_screen`], then `a`, with the directory picker listing `dev`.
+fn adding_a_world() -> AppState {
+    let mut state = worlds_screen();
+    IntentHandler::handle(&Intent::AddProject, &mut state);
+    if let Some(picker) = &mut state.picker {
+        picker.show_directories(Path::new(HOME), vec!["dev".to_owned()]);
+    }
+    state
+}
+
+#[rstest::rstest]
+fn open_worlds_lists_the_worlds_in_worlds_order() {
+    // Given alpha, Research and kit, none with agents.
+    // When handling OpenWorlds.
+    let state = worlds_screen();
+
+    // Then the worlds screen lists only kit and Research, by title on the tie.
+    let rows: Vec<PickerItem> = state
+        .picker
+        .iter()
+        .flat_map(PickerState::shown)
+        .map(|(item, _)| item.clone())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            world_row(3, "kit", ProjectKind::SharedWorld),
+            world_row(2, "research", ProjectKind::Research),
+        ],
+        "the worlds screen should list only the worlds, in worlds order"
+    );
+}
+
+/// Normal project alpha (1), orb's Research (2) and shared world kit (3),
+/// with the keys in the sidebar.
+fn alpha_and_two_worlds() -> AppState {
+    let mut state = with_projects(&["alpha", "research", "kit"]);
+    for (project, kind) in state
+        .sessions
+        .projects
+        .iter_mut()
+        .skip(1)
+        .zip([ProjectKind::Research, ProjectKind::SharedWorld])
+    {
+        project.kind = kind;
+    }
+    state
+}
+
+#[rstest::rstest]
+fn project_picker_leaves_worlds_out() {
+    // Given alpha, Research and kit.
+    let mut state = alpha_and_two_worlds();
+
+    // When handling NewSession.
+    IntentHandler::handle(&Intent::NewSession, &mut state);
+
+    // Then the project picker lists only alpha.
+    let rows: Vec<PickerItem> = state
+        .picker
+        .iter()
+        .flat_map(PickerState::shown)
+        .map(|(item, _)| item.clone())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![project_row(1, "alpha")],
+        "<C-g> n should list only the Normal projects"
+    );
+}
+
+#[rstest::rstest]
+fn projects_screen_leaves_worlds_out() {
+    // Given alpha, Research and kit.
+    let mut state = alpha_and_two_worlds();
+
+    // When handling OpenProjects.
+    IntentHandler::handle(&Intent::OpenProjects, &mut state);
+
+    // Then the projects screen lists only alpha.
+    let rows: Vec<PickerItem> = state
+        .picker
+        .iter()
+        .flat_map(PickerState::shown)
+        .map(|(item, _)| item.clone())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![project_row(1, "alpha")],
+        "<C-g> P should list only the Normal projects"
+    );
+}
+
+#[rstest::rstest]
+fn a_in_the_worlds_screen_opens_the_directory_picker_for_a_world() {
+    // Given the worlds screen.
+    let mut state = worlds_screen();
+
+    // When handling AddProject.
+    IntentHandler::handle(&Intent::AddProject, &mut state);
+
+    // Then a world-mode directory picker is drawn over the worlds screen.
+    let picker = state.picker.as_ref();
+    assert!(
+        matches!(
+            (
+                picker.map(PickerState::kind),
+                picker.and_then(PickerState::under).map(PickerState::kind),
+            ),
+            (
+                Some(PickerKind::Directories { world: true, .. }),
+                Some(PickerKind::ManageWorlds)
+            )
+        ),
+        "a should open the directory picker for a world over the worlds screen"
+    );
+}
+
+#[rstest::rstest]
+fn picking_a_directory_for_a_world_asks_shared_or_fresh() {
+    // Given the world directory picker with `dev` highlighted.
+    let mut state = adding_a_world();
+
+    // When handling PickerConfirm.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the Shared/Fresh pick for ~/dev is drawn over the worlds screen.
+    let picker = state.picker.as_ref();
+    assert_eq!(
+        (
+            picker.map(PickerState::kind),
+            picker.and_then(PickerState::under).map(PickerState::kind),
+        ),
+        (
+            Some(&PickerKind::WorldKind {
+                root: Path::new(HOME).join("dev")
+            }),
+            Some(&PickerKind::ManageWorlds)
+        ),
+        "a picked directory should ask whether the world is shared or fresh"
+    );
+}
+
+#[rstest::rstest]
+fn picking_fresh_returns_add_world() {
+    // Given the Shared/Fresh pick for ~/dev with Fresh highlighted.
+    let mut state = adding_a_world();
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+    highlight(&mut state, &PickerItem::WorldKind { fresh: true });
+
+    // When handling PickerConfirm.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then ~/dev is added as a fresh world.
+    assert_eq!(
+        commands,
+        vec![Command::Sessions(SessionsCommand::AddWorld {
+            root: Path::new(HOME).join("dev"),
+            kind: ProjectKind::FreshWorld,
+        })],
+        "Fresh should add the folder as a fresh world"
+    );
+}
+
+#[rstest::rstest]
+fn picking_a_world_kind_returns_to_the_worlds_screen() {
+    // Given the Shared/Fresh pick for ~/dev.
+    let mut state = adding_a_world();
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // When handling PickerConfirm.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the worlds screen is back with the keys.
+    assert_eq!(
+        (state.picker.as_ref().map(PickerState::kind), state.focus),
+        (Some(&PickerKind::ManageWorlds), Focus::Picker),
+        "picking a world kind should go back to the worlds screen"
+    );
+}
+
+#[rstest::rstest]
+fn d_on_research_in_the_worlds_screen_does_nothing() {
+    // Given the worlds screen with Research highlighted.
+    let mut state = worlds_screen();
+    highlight(&mut state, &world_row(2, "research", ProjectKind::Research));
+
+    // When handling PickerRemove.
+    IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+    // Then the worlds screen stays open, no confirm over it.
+    assert_eq!(
+        state.picker.as_ref().map(PickerState::kind),
+        Some(&PickerKind::ManageWorlds),
+        "Research can't be removed"
+    );
+}
+
+#[rstest::rstest]
+fn d_on_a_world_asks_to_remove_it() {
+    // Given the worlds screen with kit highlighted.
+    let mut state = worlds_screen();
+    highlight(&mut state, &world_row(3, "kit", ProjectKind::SharedWorld));
+
+    // When handling PickerRemove.
+    IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+    // Then the remove confirm for kit is drawn over the worlds screen.
+    let picker = state.picker.as_ref();
+    assert_eq!(
+        (
+            picker.map(PickerState::kind),
+            picker.and_then(PickerState::under).map(PickerState::kind),
+        ),
+        (
+            Some(&PickerKind::RemoveProject {
+                project: ProjectId(3)
+            }),
+            Some(&PickerKind::ManageWorlds)
+        ),
+        "d on a world should ask to confirm its removal"
+    );
+}
+
+#[rstest::rstest]
+fn world_picker_lists_only_worlds() {
+    // Given alpha, Research, kit and Incognito.
+    let mut state = with_projects(&["alpha", "research", "kit", "incognito"]);
+    for (project, kind) in state.sessions.projects.iter_mut().skip(1).zip([
+        ProjectKind::Research,
+        ProjectKind::SharedWorld,
+        ProjectKind::Incognito,
+    ]) {
+        project.kind = kind;
+    }
+
+    // When handling NewColony.
+    IntentHandler::handle(&Intent::NewColony, &mut state);
+
+    // Then the world picker lists only kit and Research.
+    let picker = state.picker.as_ref();
+    let rows: Vec<PickerItem> = picker
+        .into_iter()
+        .flat_map(PickerState::shown)
+        .map(|(item, _)| item.clone())
+        .collect();
+    assert_eq!(
+        (picker.map(PickerState::kind), rows),
+        (
+            Some(&PickerKind::Worlds),
+            vec![
+                world_row(3, "kit", ProjectKind::SharedWorld),
+                world_row(2, "research", ProjectKind::Research),
+            ]
+        ),
+        "<C-g> c should list only the worlds"
+    );
+}
+
+/// The `New colony` box's target, text and whether the keys are in it.
+fn colony_box(state: &AppState) -> (Option<(RenameTarget, String)>, Focus) {
+    (
+        state
+            .rename
+            .as_ref()
+            .map(|rename| (rename.target, rename.input.text().to_owned())),
+        state.focus,
+    )
+}
+
+#[rstest::rstest]
+fn picking_a_world_opens_the_new_colony_box() {
+    // Given the world picker with kit highlighted.
+    let mut state = alpha_and_two_worlds();
+    IntentHandler::handle(&Intent::NewColony, &mut state);
+    highlight(&mut state, &world_row(3, "kit", ProjectKind::SharedWorld));
+
+    // When handling PickerConfirm.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the empty New colony box for kit takes the keys.
+    assert_eq!(
+        colony_box(&state),
+        (
+            Some((RenameTarget::NewColony(ProjectId(3)), String::new())),
+            Focus::Rename
+        ),
+        "picking a world should ask for the colony's name"
+    );
+}
+
+#[rstest::rstest]
+fn enter_in_the_worlds_screen_opens_the_new_colony_box() {
+    // Given the worlds screen with Research highlighted.
+    let mut state = worlds_screen();
+    highlight(&mut state, &world_row(2, "research", ProjectKind::Research));
+
+    // When handling PickerConfirm.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the empty New colony box for Research takes the keys.
+    assert_eq!(
+        colony_box(&state),
+        (
+            Some((RenameTarget::NewColony(ProjectId(2)), String::new())),
+            Focus::Rename
+        ),
+        "⏎ on a world should ask for the colony's name"
+    );
+}
+
+#[rstest::rstest]
+fn confirming_a_shared_colony_name_keeps_it_as_typed() {
+    // Given the New colony box for shared world kit holding ` fix  the bug `.
+    let mut state = AppState {
+        focus: Focus::Rename,
+        rename: Some(Rename {
+            target: RenameTarget::NewColony(ProjectId(3)),
+            input: TextInput::new(" fix  the bug "),
+            creating: false,
+        }),
+        ..alpha_and_two_worlds()
+    };
+
+    // When handling PickerConfirm.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the colony is asked for under the trimmed name, not a slug.
+    assert!(
+        commands.contains(&Command::Sessions(SessionsCommand::NewColony {
+            world: ProjectId(3),
+            name: "fix  the bug".into(),
+            if_active: None,
+        })),
+        "a shared colony's name should be kept as typed, got {commands:?}"
     );
 }

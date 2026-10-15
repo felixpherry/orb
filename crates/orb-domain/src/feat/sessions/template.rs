@@ -1,5 +1,5 @@
-//! Folder templates: the folder a new Research or Learn session's folder is
-//! copied from, written from orb's built-in default when the user has none.
+//! Folder templates: the folder a new colony in a fresh world is copied from,
+//! written from orb's built-in default when the user has none.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -132,7 +132,7 @@ pub fn seed(dir: &Path, kind: FolderKind) -> Result<(), Report<TemplateError>> {
 }
 
 /// Copies `from` into `to`, which must not exist yet, keeping symlinks as
-/// symlinks.
+/// symlinks and leaving out every entry named `.git`, at any depth.
 ///
 /// # Errors
 ///
@@ -150,6 +150,9 @@ pub fn copy(from: &Path, to: &Path) -> Result<(), Report<TemplateError>> {
         .attach(format!("failed to read {}", from.display()))?;
     for entry in entries {
         let entry = entry.change_context(TemplateError)?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let (src, dst) = (entry.path(), to.join(entry.file_name()));
         let kind = fs::symlink_metadata(&src)
             .change_context(TemplateError)?
@@ -318,6 +321,33 @@ mod tests {
         assert!(
             to.join(".claude/agents/x.md").is_file(),
             "dotfile folders should be copied"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn copy_skips_git_at_any_depth() -> Result<(), Report<TemplateError>> {
+        // Given a folder with `.git` at its top and in a subfolder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let (from, to) = (root.path().join("from"), root.path().join("to"));
+        for dir in [from.join(".git"), from.join("sub/.git")] {
+            fs::create_dir_all(&dir).change_context(TemplateError)?;
+            fs::write(dir.join("HEAD"), "ref").change_context(TemplateError)?;
+        }
+        fs::write(from.join("sub/a.md"), "a").change_context(TemplateError)?;
+
+        // When copying it.
+        copy(&from, &to)?;
+
+        // Then neither `.git` is copied, and the other file is.
+        assert_eq!(
+            (
+                to.join(".git").exists(),
+                to.join("sub/.git").exists(),
+                to.join("sub/a.md").is_file()
+            ),
+            (false, false, true),
+            "every `.git` should be left out and the rest copied"
         );
         Ok(())
     }

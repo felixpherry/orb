@@ -628,6 +628,19 @@ pub(crate) fn kind_look(kind: FolderKind) -> (&'static str, Color) {
     }
 }
 
+/// A world's icon and colour: shared `nf-fa-globe` green1, Research
+/// `nf-fa-flask` blue2, Learn `nf-fa-book` purple, fresh `nf-fa-copy` cyan;
+/// `None` for other projects.
+pub(crate) fn world_look(kind: ProjectKind) -> Option<(&'static str, Color)> {
+    match kind {
+        ProjectKind::SharedWorld => Some(("\u{f0ac}", GREEN1)),
+        ProjectKind::Research => Some(kind_look(FolderKind::Research)),
+        ProjectKind::Learn => Some(kind_look(FolderKind::Learn)),
+        ProjectKind::FreshWorld => Some(("\u{f0c5}", CYAN)),
+        ProjectKind::Normal | ProjectKind::Incognito => None,
+    }
+}
+
 /// A colony's world icon and colour, for Research and Learn: Research
 /// `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
 fn session_look(kind: SessionKind, project: ProjectKind) -> Option<(&'static str, Color)> {

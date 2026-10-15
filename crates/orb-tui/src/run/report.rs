@@ -47,13 +47,18 @@ pub(super) fn started_attach(
     }
 }
 
-/// Whether the projects screen is open, or under the open picker.
+/// Whether the projects or worlds screen is open, or under the open picker.
 fn projects_open(state: &AppState) -> bool {
     state.picker.as_ref().is_some_and(|picker| {
         [Some(picker), picker.under()]
             .into_iter()
             .flatten()
-            .any(|shown| *shown.kind() == PickerKind::ManageProjects)
+            .any(|shown| {
+                matches!(
+                    shown.kind(),
+                    PickerKind::ManageProjects | PickerKind::ManageWorlds
+                )
+            })
     })
 }
 

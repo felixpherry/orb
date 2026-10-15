@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
-use crate::feat::sessions::state::FolderKind;
+use crate::feat::sessions::state::ProjectKind;
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
 /// Something that must happen in response to an intent.
@@ -91,6 +91,9 @@ pub enum SessionsCommand {
     },
     /// Add the directory as a project.
     AddProject(PathBuf),
+    /// Add `root` as a world of `kind` (`SharedWorld` or `FreshWorld`), named
+    /// after its folder; an existing project at `root` becomes that world.
+    AddWorld { root: PathBuf, kind: ProjectKind },
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
     /// Pin the session to the top of the sidebar; a settled session
@@ -120,10 +123,11 @@ pub enum SessionsCommand {
     /// Remove the project from `<C-g> n` and the project filter; its sessions
     /// stay.
     RemoveProject(ProjectId),
-    /// Make a `kind` session in orb's own folder `name` (a slug), with one
-    /// shell.
-    NewFolderSession {
-        kind: FolderKind,
+    /// Make a colony in world `world` with one shell: in a fresh world in a
+    /// new folder `name` (a slug) copied from its kit; in a shared world in
+    /// its folder, named `name` unless empty.
+    NewColony {
+        world: ProjectId,
         name: String,
         /// The session active when the user asked; what this start opens
         /// opens only while it still is.

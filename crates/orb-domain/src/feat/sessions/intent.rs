@@ -5,12 +5,10 @@ use crate::command::{SessionsCommand, Workspace};
 use crate::feat::git::intent::workspace_items;
 use crate::feat::picker::intent::open_picker;
 use crate::feat::picker::state::{PickTarget, PickerState};
-use crate::feat::sessions::state::{
-    FolderKind, ProjectKind, SessionKind, SidebarItem, folder_slug,
-};
+use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem, folder_slug};
 use crate::feat::sessions::validator::{
-    FoldTarget, NewFolderError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete,
-    validate_fold, validate_new_folder, validate_new_incognito, validate_new_session,
+    FoldTarget, NewColonyError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete,
+    validate_fold, validate_new_colony, validate_new_incognito, validate_new_session,
     validate_toggle_pin, validate_toggle_settle, validate_unfold,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
@@ -262,10 +260,10 @@ fn unfilter(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         .collect()
 }
 
-/// Opens the empty name box for a new session in orb's own `kind` folder.
-pub(crate) fn open_folder_name(state: &mut AppState, kind: FolderKind) -> Vec<Command> {
+/// Opens the empty `New colony` box for a colony in `world`.
+pub(crate) fn open_colony_name(state: &mut AppState, world: ProjectId) -> Vec<Command> {
     state.rename = Some(Rename {
-        target: RenameTarget::NewFolder(kind),
+        target: RenameTarget::NewColony(world),
         input: TextInput::default(),
         creating: false,
     });
@@ -286,28 +284,29 @@ fn deletes_folder(state: &AppState, session: SessionId) -> bool {
     })
 }
 
-/// `⏎` in the name box for a new Research or Learn session: an empty name,
-/// one already asked for, or one while another session is being made does
-/// nothing; an invalid one shows why on the mode line, keeping the box open;
-/// a valid one asks for the session, and the sessions actor closes the box
-/// once it's made.
-pub(crate) fn confirm_folder_name(state: &mut AppState) -> Vec<Command> {
-    match (validate_new_folder(state), validate_new_session(state)) {
-        (Err(NewFolderError::Invalid(what)), _) => {
+/// `⏎` in the `New colony` box: an empty folder name in a fresh world, one
+/// already asked for, a gone world, or one while another session is being
+/// made does nothing; an invalid folder name shows why on the mode line,
+/// keeping the box open; a valid one asks for the colony, and the sessions
+/// actor closes the box once it's made.
+pub(crate) fn confirm_colony_name(state: &mut AppState) -> Vec<Command> {
+    match (validate_new_colony(state), validate_new_session(state)) {
+        (Err(NewColonyError::Invalid(what)), _) => {
             state.sessions.error = Some(format!("Name can't use {what}"));
         }
-        (Ok(()), Ok(())) => return new_folder_session(state),
+        (Ok(()), Ok(())) => return new_colony(state),
         _ => {}
     }
     vec![]
 }
 
-/// Asks the sessions actor for the session the name box names, keeping the
-/// box open until the actor answers: marks the start and records the row it
-/// leaves as a jump, as [`new_session`] does.
-fn new_folder_session(state: &mut AppState) -> Vec<Command> {
+/// Asks the sessions actor for the colony the box names, keeping the box
+/// open until the actor answers: a fresh world's folder slug, or a shared
+/// world's trimmed name (empty = unnamed). Marks the start and records the
+/// row it leaves as a jump, as [`new_session`] does.
+fn new_colony(state: &mut AppState) -> Vec<Command> {
     let Some(Rename {
-        target: RenameTarget::NewFolder(kind),
+        target: RenameTarget::NewColony(world),
         input,
         creating,
     }) = &mut state.rename
@@ -315,9 +314,19 @@ fn new_folder_session(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     *creating = true;
-    let command = Command::Sessions(SessionsCommand::NewFolderSession {
-        kind: *kind,
-        name: folder_slug(input.text()),
+    let world = *world;
+    let fresh = state
+        .sessions
+        .project(world)
+        .is_some_and(|project| project.kind.is_fresh_world());
+    let name = if fresh {
+        folder_slug(input.text())
+    } else {
+        input.text().trim().to_owned()
+    };
+    let command = Command::Sessions(SessionsCommand::NewColony {
+        world,
+        name,
         if_active: state.sessions.active(),
     });
     state.sessions.starting = true;
@@ -357,17 +366,13 @@ mod tests {
     use crate::command::{SessionsCommand, Workspace};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerKind;
-    use crate::feat::sessions::state::{
-        AgentStatus, FolderKind, ProjectKind, SessionKind, SidebarItem,
-    };
+    use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind, SidebarItem};
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
-    use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, at, incognito, on_agent_in_another_tab, rename_text, settle, state_at, state_with,
-        stopped,
+        agent, at, incognito, on_agent_in_another_tab, settle, state_at, state_with, stopped,
     };
-    use crate::{AppState, Command, Focus, Intent, IntentHandler};
+    use crate::{AppState, Command, Intent, IntentHandler};
 
     #[rstest::rstest]
     fn l_on_the_shelf_opens_it() {
@@ -684,30 +689,6 @@ mod tests {
         assert_eq!(
             state.sessions.filter, None,
             "a filter hiding the new Incognito session should be cleared"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_folder_opens_the_empty_name_box() {
-        // Given no projects.
-        let mut state = AppState::default();
-
-        // When handling NewFolder(Research).
-        IntentHandler::handle(&Intent::NewFolder(FolderKind::Research), &mut state);
-
-        // Then an empty name box names a Research session, with the keys.
-        assert_eq!(
-            (
-                state.rename.as_ref().map(|rename| rename.target),
-                rename_text(&state),
-                state.focus
-            ),
-            (
-                Some(RenameTarget::NewFolder(FolderKind::Research)),
-                Some(""),
-                Focus::Rename
-            ),
-            "<C-g> gr should open the name box"
         );
     }
 

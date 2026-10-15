@@ -4,7 +4,7 @@
 use crate::command::SessionsCommand;
 use crate::feat::pane::intent::{focus_right, show_pane};
 use crate::feat::picker::intent::PickerKey;
-use crate::feat::sessions::intent::{confirm_folder_name, confirm_session_name};
+use crate::feat::sessions::intent::{confirm_colony_name, confirm_session_name};
 use crate::feat::sessions::state::{Search, SidebarItem};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::validate_rename;
@@ -148,10 +148,10 @@ pub(crate) fn rename_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
         (
             PickerKey::Confirm,
             Some(Rename {
-                target: RenameTarget::NewFolder(_),
+                target: RenameTarget::NewColony(_),
                 ..
             }),
-        ) => return confirm_folder_name(state),
+        ) => return confirm_colony_name(state),
         (
             PickerKey::Confirm,
             Some(Rename {
@@ -186,7 +186,7 @@ pub(crate) fn rename_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
                         name,
                     })]
                 }
-                RenameTarget::NewFolder(_) | RenameTarget::NewSession { .. } => vec![],
+                RenameTarget::NewColony(_) | RenameTarget::NewSession { .. } => vec![],
                 // The keys go back to the panes.
                 RenameTarget::Tab { owner, tab } => {
                     state.layouts.rename_tab(owner, tab, name);

@@ -6,12 +6,13 @@
 //! the sidebar and in panes, outside which-key: they must win over a pane's
 //! program, and Ctrl+[ must never match a plain Esc. `<C-g>` is the
 //! which-key leader in both; its popup lists only the keys that do something
-//! for the selection (`<C-g> w`/`<C-g> b` not on Incognito, Research and
-//! Learn sessions, `<C-g> p`, `<C-g> <C-g>` and `<C-g> h` only in a pane,
+//! for the selection (`<C-g> w`/`<C-g> b` not on Incognito sessions or
+//! colonies, `<C-g> p`, `<C-g> <C-g>` and `<C-g> h` only in a pane,
 //! `<C-g> t` only with a session selected and its `b` only in a pane, `<C-g>
 //! f` and `<C-g> l` only in the sidebar); `<C-g> h` moves the keys to the
-//! sidebar, `<C-g> l` into the panes, `<C-g> e` hides or shows the sidebar
-//! and `<C-g> q` quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
+//! sidebar, `<C-g> l` into the panes, `<C-g> e` hides or shows the sidebar,
+//! `<C-g> q` quits, `<C-g> c` starts a colony and `<C-g> C` opens the
+//! worlds screen. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
 //! row) go through the same keymap. In a pane every other key goes to its
 //! program. An open picker, the rename box and
@@ -24,7 +25,7 @@ use std::fmt;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
-use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
+use orb_domain::feat::sessions::state::{SessionKind, Sessions};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -171,7 +172,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     keymap.describe_group("<leader>", "leader");
     keymap.describe_group("<leader>p", "pane");
     keymap.describe_group("<leader>t", "tab");
-    keymap.describe_group("<leader>g", "new");
     for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
@@ -253,15 +253,10 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 KeyCategory::Sessions,
                 scope,
             )
+            .bind("<leader>c", Intent::NewColony, KeyCategory::Sessions, scope)
             .bind(
-                "<leader>gr",
-                Intent::NewFolder(FolderKind::Research),
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>gl",
-                Intent::NewFolder(FolderKind::Learn),
+                "<leader>C",
+                Intent::OpenWorlds,
                 KeyCategory::Sessions,
                 scope,
             )
@@ -558,10 +553,10 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
-/// What `key` does in a list-mode picker of `kind` (the projects screen and
-/// the session and worktree pickers until `/`); `None` when it does nothing.
-/// Letters are commands here, not filter text; `a` adds a project in the
-/// projects screen, and `a`/`b`/`w`/`i`/`s` filter the session picker.
+/// What `key` does in a list-mode picker of `kind` (the projects and worlds
+/// screens and the session and worktree pickers until `/`); `None` when it
+/// does nothing. Letters are commands here, not filter text; `a` adds a
+/// project or a world in the projects or worlds screen, and `a`/`b`/`w`/`i`/`s` filter the session picker.
 pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE)
@@ -578,7 +573,9 @@ pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Inte
         (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Intent::PickerRemove),
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
-        (KeyCode::Char('a'), KeyModifiers::NONE) if *kind == PickerKind::ManageProjects => {
+        (KeyCode::Char('a'), KeyModifiers::NONE)
+            if matches!(kind, PickerKind::ManageProjects | PickerKind::ManageWorlds) =>
+        {
             Some(Intent::AddProject)
         }
         (KeyCode::Char(letter @ ('a' | 'b' | 'w' | 'i' | 's')), KeyModifiers::NONE)
@@ -604,7 +601,7 @@ mod tests {
 
     use crate::test_support::{layouts_for, sessions_for};
     use orb_domain::feat::sessions::state::{
-        Agent, AgentStatus, FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, SessionKind, Sessions, SidebarItem,
     };
     use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use orb_domain::{Focus, Intent, PaneMode};
@@ -725,6 +722,19 @@ mod tests {
             intent,
             Some(Intent::AddProject),
             "a in the projects screen should add a project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn a_in_the_worlds_screen_adds() {
+        // Given / When routing `a` in the worlds screen's list.
+        let intent = picker_list_route(&PickerKind::ManageWorlds, key(KeyCode::Char('a')));
+
+        // Then it opens the directory picker to add a world.
+        assert_eq!(
+            intent,
+            Some(Intent::AddProject),
+            "a in the worlds screen should add a world"
         );
     }
 
@@ -964,6 +974,31 @@ mod tests {
         assert_eq!(
             selection, expected,
             "the selection on {cursor:?} in a {kind:?} project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn colony_leaves_leader_w_unbound() {
+        // Given a colony in a shared world selected in the sidebar.
+        let mut sessions = lone(ProjectKind::SharedWorld, SidebarItem::Session(SessionId(1)));
+        for session in &mut sessions.sessions {
+            session.kind = SessionKind::Colony;
+        }
+        let scope = Scope::new(
+            Focus::Sidebar,
+            Selection::of(&sessions, &layouts_for(&sessions.projects)),
+        );
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `w`.
+        let intent = press(&mut keys, key(KeyCode::Char('w')));
+
+        // Then nothing happens and no sequence is left waiting.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "<C-g> w should do nothing on a colony"
         );
     }
 
@@ -1696,8 +1731,6 @@ mod tests {
     #[case(Scope::Pane, "w", Intent::ChangeWorkspace)]
     #[case(Scope::Sidebar, "b", Intent::SwitchBranch)]
     #[case(Scope::Pane, "b", Intent::SwitchBranch)]
-    #[case(Scope::SidebarEmpty, "gr", Intent::NewFolder(FolderKind::Research))]
-    #[case(Scope::Pane, "gl", Intent::NewFolder(FolderKind::Learn))]
     #[case(Scope::Sidebar, "/", Intent::OpenSearch)]
     #[case(Scope::Pane, "/", Intent::OpenSearch)]
     #[case(Scope::SidebarEmpty, "W", Intent::OpenWorktreePicker)]
@@ -1733,6 +1766,10 @@ mod tests {
     #[case(Scope::PaneIncognito, "h", Intent::LeavePane)]
     #[case(Scope::Sidebar, "l", Intent::FocusPanes)]
     #[case(Scope::SidebarEmpty, "l", Intent::FocusPanes)]
+    #[case(Scope::SidebarEmpty, "c", Intent::NewColony)]
+    #[case(Scope::PaneIncognito, "c", Intent::NewColony)]
+    #[case(Scope::Sidebar, "C", Intent::OpenWorlds)]
+    #[case(Scope::Pane, "C", Intent::OpenWorlds)]
     fn leader_keys_yield_their_intents(
         #[case] scope: Scope,
         #[case] then: &str,
@@ -1758,13 +1795,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ P Space W b e f g i l n q t w")]
-    #[case(Scope::SidebarEmpty, "/ P Space W e f g i l n q")]
-    #[case(Scope::SidebarIncognito, "/ P Space W e f g i l n q t")]
-    #[case(Scope::Pane, "/ <C-g> P Space W b e g h i m n p q r t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> P Space W e g h i m n p q r t")]
-    #[case(Scope::SidebarAgent, "/ P Space W b e f g i l n q t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ P Space W e f g i l n q t")]
+    #[case(Scope::Sidebar, "/ C P Space W b c e f i l n q t w")]
+    #[case(Scope::SidebarEmpty, "/ C P Space W c e f i l n q")]
+    #[case(Scope::SidebarIncognito, "/ C P Space W c e f i l n q t")]
+    #[case(Scope::Pane, "/ <C-g> C P Space W b c e h i m n p q r t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::SidebarAgent, "/ C P Space W b c e f i l n q t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ C P Space W c e f i l n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 
@@ -1800,23 +1837,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_g_popup_lists_research_and_learn(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::SidebarIncognito,
-            Scope::Pane,
-            Scope::PaneIncognito
-        )]
-        scope: Scope,
-    ) {
-        // Given orb's keymap in `scope`.
+    fn leader_g_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
 
-        // When listing the keys after `<C-g> g`.
-        let found = leader_popup(scope, &[key(KeyCode::Char('g'))]).join(" ");
+        // When pressing `g`.
+        let intent = press(&mut keys, key(KeyCode::Char('g')));
 
-        // Then they are the Research and Learn keys.
-        assert_eq!(found, "l r", "<C-g> g keys in {scope:?}");
+        // Then nothing happens and no sequence is left waiting.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "<C-g> g should do nothing in {scope:?}"
+        );
     }
 
     #[rstest::rstest]

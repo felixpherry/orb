@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -64,7 +64,7 @@ pub struct Session {
     pub last_activity_at: SystemTime,
 }
 
-/// Which of orb's own folders a session lives in.
+/// orb's built-in fresh worlds, whose kits orb seeds when missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderKind {
     /// `~/.orb/research/<name>/`.
@@ -78,6 +78,42 @@ pub enum FolderKind {
 #[must_use]
 pub fn folder_slug(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
+/// Where a world's colonies run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldDirs {
+    /// Every colony runs in the world's own folder.
+    Shared(PathBuf),
+    /// Each colony runs in its own copy of `kit`, a folder under `colonies`;
+    /// `seed` is orb's built-in kit, written to `kit` when it's missing.
+    Fresh {
+        kit: PathBuf,
+        colonies: PathBuf,
+        seed: Option<FolderKind>,
+    },
+}
+
+/// `project`'s world folders under orb's own folder `orb_root`; `None`
+/// when it isn't a world.
+#[must_use]
+pub fn world_dirs(orb_root: &Path, project: &Project) -> Option<WorldDirs> {
+    let built_in = |dir: &str, seed| WorldDirs::Fresh {
+        kit: orb_root.join("templates").join(dir),
+        colonies: orb_root.join(dir),
+        seed: Some(seed),
+    };
+    match project.kind {
+        ProjectKind::Research => Some(built_in("research", FolderKind::Research)),
+        ProjectKind::Learn => Some(built_in("learn", FolderKind::Learn)),
+        ProjectKind::FreshWorld => Some(WorldDirs::Fresh {
+            kit: project.root.clone(),
+            colonies: orb_root.join("worlds").join(&project.title),
+            seed: None,
+        }),
+        ProjectKind::SharedWorld => Some(WorldDirs::Shared(project.root.clone())),
+        ProjectKind::Normal | ProjectKind::Incognito => None,
+    }
 }
 
 /// Whether a project is one the user added, a world colonies run in, or one
@@ -394,15 +430,17 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    /// The projects the user added and didn't remove, most recently active
+    /// Non-removed projects whose kind passes `keep`, most recently active
     /// first: by their agents' latest activity, else when they were added.
-    /// Ties go by title, then id. orb's own projects (Research, Learn,
-    /// Incognito) aren't listed.
-    pub fn projects_by_recency(&self) -> Vec<&Project> {
+    /// Ties go by title, then id.
+    fn by_recency<F>(&self, keep: F) -> Vec<&Project>
+    where
+        F: Fn(ProjectKind) -> bool,
+    {
         let mut projects: Vec<&Project> = self
             .projects
             .iter()
-            .filter(|project| !project.removed && project.kind == ProjectKind::Normal)
+            .filter(|project| !project.removed && keep(project.kind))
             .collect();
         projects.sort_by_key(|&project| {
             let latest = project
@@ -414,6 +452,20 @@ impl Sessions {
             (Reverse(latest), &project.title, project.id.0)
         });
         projects
+    }
+
+    /// The projects the user added and didn't remove, most recently active
+    /// first: by their agents' latest activity, else when they were added.
+    /// Ties go by title, then id. orb's own projects (Research, Learn,
+    /// Incognito) and the worlds aren't listed.
+    pub fn projects_by_recency(&self) -> Vec<&Project> {
+        self.by_recency(|kind| kind == ProjectKind::Normal)
+    }
+
+    /// The worlds (Research, Learn and the user's) not removed, in
+    /// `projects_by_recency`'s order.
+    pub fn worlds_by_recency(&self) -> Vec<&Project> {
+        self.by_recency(ProjectKind::is_world)
     }
 
     /// orb's own project of `kind` (Research, Learn or Incognito), unless it

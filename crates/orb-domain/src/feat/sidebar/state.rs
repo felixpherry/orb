@@ -1,8 +1,7 @@
 //! The sidebar's size and visibility, the last frame's row layout, and the
-//! name box, which names a session, a new session's folder, a tab, a pane
-//! or an agent's pane.
+//! name box, which names a session, a new colony, a tab, a pane or an
+//! agent's pane.
 
-use crate::feat::sessions::state::FolderKind;
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{Focus, TextInput};
 
@@ -66,14 +65,14 @@ impl SidebarView {
     }
 }
 
-/// What the name box names: a session, a new session's folder, a tab, a
+/// What the name box names: a session, a new colony, a tab, a
 /// pane, or an agent's pane from its sidebar row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameTarget {
     /// The session being renamed.
     Session(SessionId),
-    /// The folder of a new session in orb's own `kind` folder.
-    NewFolder(FolderKind),
+    /// The name of a new colony in world `ProjectId`.
+    NewColony(ProjectId),
     /// Tab `tab` (0-based) of `owner`'s layout.
     Tab { owner: SessionId, tab: usize },
     /// A pane of the shown layout.

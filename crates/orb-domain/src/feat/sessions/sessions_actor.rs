@@ -70,10 +70,10 @@
 //! commands. Whenever it kills a session's panes, the session leaves the
 //! right side first.
 //!
-//! It makes Research and Learn sessions: each in a new folder under orb's
-//! own project for its kind, added when first needed, copied from the user's
-//! template for the kind; orb writes that template from its built-in default
-//! when it's missing, and never overwrites a folder that already exists.
+//! It makes colonies: in a shared world, in the world's own folder; in a
+//! fresh world, in a new folder under it copied from the world's kit (orb
+//! writes Research's and Learn's kits from their built-in defaults when
+//! missing), never overwriting a folder that already exists.
 //!
 //! It adds projects and removes them: a removed project leaves `<C-g> n` and the
 //! project filter, its sessions stay, and adding it again
@@ -104,14 +104,13 @@ use tokio::sync::Notify;
 use super::pane_status::{PaneReport, match_records, pane_status};
 use super::state::{
     Agent, AgentStatus, FolderKind, NEW_AGENT, Notice, NoticeKind, PaneLaunch, Project,
-    ProjectKind, Session, SessionKind, Sessions, SidebarItem,
+    ProjectKind, Session, SessionKind, Sessions, SidebarItem, WorldDirs, world_dirs,
 };
 use super::store::{
     AgentRow, FloatRow, NewPaneAgent, PaneRow, SessionFloats, SessionRow, SettledOverride, Store,
     StoreError, TabRow, Ui,
 };
 use super::template;
-use super::validator::folder_exists;
 use crate::command::{SessionsCommand, Workspace};
 use crate::common::{Log, Outcome, Reporter, Services, State};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
@@ -474,6 +473,7 @@ impl Message<SessionsCommand> for SessionsActor {
                 if_active,
             } => self.switch_branch(session, &git_ref, to_root, if_active),
             SessionsCommand::AddProject(root) => self.add_project(root),
+            SessionsCommand::AddWorld { root, kind } => self.add_world(root, kind),
             SessionsCommand::RefreshSessions => self.poke.notify_one(),
             SessionsCommand::PinSession(id) => self.pin_session(id),
             SessionsCommand::UnpinSession(id) => self.unpin_session(id),
@@ -485,13 +485,11 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
             SessionsCommand::RemoveProject(id) => self.remove_project(id),
-            SessionsCommand::NewFolderSession {
-                kind,
+            SessionsCommand::NewColony {
+                world,
                 name,
                 if_active,
-            } => {
-                self.new_folder_session(kind, &name, if_active);
-            }
+            } => self.new_colony(world, &name, if_active),
             SessionsCommand::RestoreWorktree(id) => {
                 if let Some(job) = self.restore_worktree(id) {
                     job.spawn(ctx.actor_ref().clone());
