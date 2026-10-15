@@ -182,10 +182,8 @@ fn focus(
     let from = state.jump_from();
     state.layouts.reveal(session, pane);
     let row = state.entry_row(session);
-    if matches!(row, SidebarItem::Agent { .. }) && !state.sessions.searching() {
-        state.sessions.unfold(session);
-    }
     let mut commands = pick(state, from, row, row);
+    state.sessions.reveal_cursor(&state.layouts);
     commands.push(save_layout(session));
     if matches!(keys, Focus::Picker | Focus::Rename | Focus::Search) {
         state.focus = keys;
@@ -199,8 +197,9 @@ mod tests {
     use crate::Focus;
     use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::Split;
+    use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, SessionId};
-    use crate::intent_handler::test_support::left_pane_showing_1;
+    use crate::intent_handler::test_support::{colony_with_colonists, left_pane_showing_1};
 
     #[rstest::rstest]
     #[case::close_pane(Change::ClosePane(PaneId(2)))]
@@ -251,6 +250,27 @@ mod tests {
             (state.focus, state.shown_session(), focused),
             (Focus::Pane, Some(SessionId(2)), Some(PaneId(2))),
             "focus shows the pane and moves the keys into it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_on_a_hidden_colonists_pane_opens_its_colonists_row() {
+        // Given colonist 2 hidden under colony 1's folded colonists row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When focusing colonist 2's pane.
+        let _ = apply(
+            &mut state,
+            &Change::Focus {
+                session: SessionId(2),
+                pane: Some(PaneId(2)),
+            },
+        );
+
+        // Then colony 1's colonists row is open.
+        assert!(
+            state.sessions.colonists_open.contains(&SessionId(1)),
+            "focusing a hidden colonist's pane should open its colonists row"
         );
     }
 }

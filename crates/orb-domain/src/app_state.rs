@@ -113,16 +113,18 @@ impl AppState {
         }
     }
 
-    /// The active marker's row: the active session's card while it's folded,
-    /// else the agent row of its focused pane, or its card when that pane is
+    /// The active marker's row: the active session's card while it's folded
+    /// or a colonist hiding its one agent row, else the agent row of its focused pane, or its card when that pane is
     /// a shell. Follows every focus change inside the session.
     pub fn active_row(&self) -> Option<SidebarItem> {
         let id = self.sessions.active()?;
-        Some(if self.sessions.hides_agents(id) {
-            SidebarItem::Session(id)
-        } else {
-            self.entry_row(id)
-        })
+        Some(
+            if self.sessions.hides_agents(id) || self.sessions.hides_one_agent(id, &self.layouts) {
+                SidebarItem::Session(id)
+            } else {
+                self.entry_row(id)
+            },
+        )
     }
 
     /// The session `␣w` and `␣b` act on: the shown one while the keys are in
@@ -431,5 +433,23 @@ mod tests {
 
         // Then there is none.
         assert_eq!(mode, None, "a pane mode only counts in a pane");
+    }
+
+    #[rstest::rstest]
+    fn active_row_of_a_one_agent_colonist_is_its_card() {
+        // Given colonist 3 (one agent, no colonists) active.
+        let mut state =
+            crate::intent_handler::test_support::colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.enter(SessionId(3));
+
+        // When asking for the active row.
+        let row = state.active_row();
+
+        // Then it is colonist 3's card.
+        assert_eq!(
+            row,
+            Some(SidebarItem::Session(SessionId(3))),
+            "a colonist hiding its one agent row is active on its card"
+        );
     }
 }

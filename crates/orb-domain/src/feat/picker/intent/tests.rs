@@ -5044,6 +5044,25 @@ fn open_colonists_lists_only_the_colonies_colonists_agents() {
 }
 
 #[rstest::rstest]
+fn open_colonists_on_a_colonys_colonists_row_lists_its_colonists() {
+    // Given the cursor on colony 1's colonists row.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+    // When handling OpenColonists.
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+
+    // Then the picker lists the colony's colonists.
+    let mut listed = session_ids(&state);
+    listed.sort_by_key(|id| id.0);
+    assert_eq!(
+        listed,
+        [SessionId(2), SessionId(3)],
+        "<C-g> , on a colonists row should list the colony's colonists"
+    );
+}
+
+#[rstest::rstest]
 fn open_colonists_off_a_colony_opens_nothing() {
     // Given colonist 2 selected, which is no colony.
     let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
@@ -5143,5 +5162,31 @@ fn session_picker_hides_colonists_at_each_open() {
             scope: None
         }),
         "every opening should hide colonists"
+    );
+}
+
+#[rstest::rstest]
+fn picking_a_hidden_colonists_agent_opens_its_colonists_row() {
+    // Given the Colonists picker of colony 1, whose colonists row is
+    // folded, with colonist 2's agent highlighted.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+    let row = state
+        .picker
+        .iter()
+        .flat_map(PickerState::shown)
+        .map(|(item, _)| item.clone())
+        .find(|item| matches!(item, PickerItem::Session { id, .. } if *id == SessionId(2)));
+    if let Some(row) = row {
+        highlight(&mut state, &row);
+    }
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then colony 1's colonists row is open.
+    assert!(
+        state.sessions.colonists_open.contains(&SessionId(1)),
+        "picking a hidden colonist's agent should open its colonists row"
     );
 }

@@ -10,7 +10,8 @@ pub const JUMP_LIMIT: usize = 20;
 /// the one the last `<C-[>`/`<C-]>` landed on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JumpList {
-    /// Oldest first; at most [`JUMP_LIMIT`], never the Settled header.
+    /// Oldest first; at most [`JUMP_LIMIT`], never the Settled header nor a
+    /// colonists row.
     entries: Vec<SidebarItem>,
     /// The entry the last `<C-[>`/`<C-]>` landed on; `None` while the user
     /// isn't moving through the list.
@@ -19,7 +20,8 @@ pub struct JumpList {
 
 impl JumpList {
     /// A list of `items`, oldest first, as saved: the newest
-    /// [`JUMP_LIMIT`], each once, without the Settled header.
+    /// [`JUMP_LIMIT`], each once, without the Settled header or colonists
+    /// rows.
     #[must_use]
     pub fn from_saved(items: Vec<SidebarItem>) -> Self {
         let mut list = Self::default();
@@ -37,9 +39,9 @@ impl JumpList {
 
     /// Adds `item` as the newest row, moving it there if it's already
     /// listed and dropping the oldest past [`JUMP_LIMIT`]. The Settled header
-    /// is never added.
+    /// and colonists rows are never added.
     pub fn record(&mut self, item: SidebarItem) {
-        if item == SidebarItem::SettledShelf {
+        if matches!(item, SidebarItem::SettledShelf | SidebarItem::Colonists(_)) {
             return;
         }
         self.entries.retain(|&entry| entry != item);
@@ -228,6 +230,18 @@ mod tests {
 
         // Then the list is unchanged.
         assert_eq!(list, list_of(&[1, 2]), "the header is never a jump");
+    }
+
+    #[rstest::rstest]
+    fn record_skips_a_colonists_row() {
+        // Given agents 1 and 2.
+        let mut list = list_of(&[1, 2]);
+
+        // When recording session 1's colonists row.
+        list.record(SidebarItem::Colonists(SessionId(1)));
+
+        // Then the list is unchanged.
+        assert_eq!(list, list_of(&[1, 2]), "a colonists row is never a jump");
     }
 
     #[rstest::rstest]

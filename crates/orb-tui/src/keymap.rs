@@ -14,7 +14,8 @@
 //! `<C-g> q` quits, `<C-g> c` starts a colony and `<C-g> C` opens the
 //! worlds screen. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
-//! row) go through the same keymap. In a pane every other key goes to its
+//! row, `l`/`h`/`⏎` but none of `r`/`p`/`s`/`d` on a colonists row) go
+//! through the same keymap. In a pane every other key goes to its
 //! program. An open picker, the rename box and
 //! the sidebar search take typed characters and have their own fixed keys.
 //! The projects screen and the session and worktree pickers open in list
@@ -25,7 +26,7 @@ use std::fmt;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
-use orb_domain::feat::sessions::state::{SessionKind, Sessions};
+use orb_domain::feat::sessions::state::{SessionKind, Sessions, SidebarItem};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -65,13 +66,22 @@ pub(crate) enum Selection {
     OwnFolderAgent,
     /// An agent row of a colony.
     ColonyAgent,
-    /// No row, or the settled shelf's header.
+    /// A colony's colonists row.
+    ColonyColonists,
+    /// No row, the settled shelf's header, or the colonists row of a
+    /// session that isn't a colony.
     Nothing,
 }
 
 impl Selection {
     /// What `sessions`' cursor is on.
     pub(crate) fn of(sessions: &Sessions, layouts: &Layouts) -> Self {
+        if let Some(SidebarItem::Colonists(id)) = sessions.cursor {
+            return match sessions.session(id) {
+                Some(session) if session.kind == SessionKind::Colony => Self::ColonyColonists,
+                _ => Self::Nothing,
+            };
+        }
         let agent = sessions.selected_agent(layouts).is_some();
         match (sessions.selected_session(), agent) {
             (Some(session), true) if session.kind == SessionKind::Colony => Self::ColonyAgent,
@@ -101,7 +111,8 @@ impl Selection {
 pub(crate) enum Scope {
     /// The sidebar on a session.
     Sidebar,
-    /// The sidebar with no session selected.
+    /// The sidebar with no session selected, or on a colonists row of a
+    /// session that isn't a colony.
     SidebarEmpty,
     /// The sidebar on an Incognito session:
     /// [`Scope::Sidebar`]'s keys but `<C-g> w`/`<C-g> b`.
@@ -125,6 +136,9 @@ pub(crate) enum Scope {
     /// The sidebar on an agent row of a colony: [`Scope::SidebarAgent`]'s
     /// keys but `<C-g> w`/`<C-g> b`, plus `<C-g> ,`.
     SidebarAgentColony,
+    /// The sidebar on a colony's colonists row: [`Scope::SidebarEmpty`]'s
+    /// keys plus `<C-g> ,`.
+    SidebarColonists,
 }
 
 impl Scope {
@@ -136,7 +150,10 @@ impl Scope {
             (Focus::Pane, Selection::OwnFolderSession | Selection::OwnFolderAgent) => {
                 Self::PaneIncognito
             }
-            (Focus::Pane, Selection::Colony | Selection::ColonyAgent) => Self::PaneColony,
+            (
+                Focus::Pane,
+                Selection::Colony | Selection::ColonyAgent | Selection::ColonyColonists,
+            ) => Self::PaneColony,
             (Focus::Pane, Selection::Session | Selection::Agent | Selection::Nothing) => Self::Pane,
             (Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search, Selection::Colony) => {
                 Self::SidebarColony
@@ -145,6 +162,10 @@ impl Scope {
                 Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::ColonyAgent,
             ) => Self::SidebarAgentColony,
+            (
+                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::ColonyColonists,
+            ) => Self::SidebarColonists,
             (
                 Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Session,
@@ -190,7 +211,7 @@ pub(crate) const LEADER: KeyEvent = KeyEvent::new(KeyCode::Char('g'), KeyModifie
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
-    const SIDEBAR: [Scope; 7] = [
+    const SIDEBAR: [Scope; 8] = [
         Scope::Sidebar,
         Scope::SidebarEmpty,
         Scope::SidebarIncognito,
@@ -198,6 +219,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::SidebarAgent,
         Scope::SidebarAgentIncognito,
         Scope::SidebarAgentColony,
+        Scope::SidebarColonists,
     ];
     const PANE: [Scope; 3] = [Scope::Pane, Scope::PaneIncognito, Scope::PaneColony];
     const SESSION: [Scope; 9] = [
@@ -327,6 +349,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in [
         Scope::SidebarColony,
         Scope::SidebarAgentColony,
+        Scope::SidebarColonists,
         Scope::PaneColony,
     ] {
         keymap.bind(
@@ -1001,6 +1024,7 @@ mod tests {
     #[case(Focus::Sidebar, Selection::ColonyAgent, Scope::SidebarAgentColony)]
     #[case(Focus::Pane, Selection::Colony, Scope::PaneColony)]
     #[case(Focus::Pane, Selection::ColonyAgent, Scope::PaneColony)]
+    #[case(Focus::Sidebar, Selection::ColonyColonists, Scope::SidebarColonists)]
     fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
         #[case] selection: Selection,
@@ -1110,6 +1134,48 @@ mod tests {
 
         // Then it is the colony's.
         assert_eq!(selection, expected, "the selection on {cursor:?}");
+    }
+
+    #[rstest::rstest]
+    #[case::colony(SessionKind::Colony, Selection::ColonyColonists)]
+    #[case::other(SessionKind::Plain, Selection::Nothing)]
+    fn selection_on_a_colonists_row(#[case] kind: SessionKind, #[case] expected: Selection) {
+        // Given the cursor on session 1's colonists row.
+        let mut sessions = lone(
+            ProjectKind::SharedWorld,
+            SidebarItem::Colonists(SessionId(1)),
+        );
+        for session in &mut sessions.sessions {
+            session.kind = kind;
+        }
+
+        // When reading the selection.
+        let selection = Selection::of(&sessions, &layouts_for(&sessions.projects));
+
+        // Then it is a colony's colonists row only when 1 is a colony.
+        assert_eq!(
+            selection, expected,
+            "the selection on a {kind:?}'s colonists row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn colonists_row_leaves_r_p_s_d_unbound(
+        #[values(Scope::SidebarColonists, Scope::SidebarEmpty)] scope: Scope,
+        #[values('r', 'p', 's', 'd')] pressed: char,
+    ) {
+        // Given the keymap on a colonists row.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then nothing happens and no sequence starts.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "`{pressed}` should do nothing in {scope:?}"
+        );
     }
 
     #[rstest::rstest]
@@ -1949,6 +2015,7 @@ mod tests {
     #[case(Scope::SidebarColony, ",", Intent::OpenColonists)]
     #[case(Scope::SidebarAgentColony, ",", Intent::OpenColonists)]
     #[case(Scope::PaneColony, ",", Intent::OpenColonists)]
+    #[case(Scope::SidebarColonists, ",", Intent::OpenColonists)]
     fn leader_keys_yield_their_intents(
         #[case] scope: Scope,
         #[case] then: &str,
@@ -1984,6 +2051,7 @@ mod tests {
     #[case(Scope::SidebarColony, ", / C P Space W c e f i l n q t")]
     #[case(Scope::SidebarAgentColony, ", / C P Space W c e f i l n q t")]
     #[case(Scope::PaneColony, ", / <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::SidebarColonists, ", / C P Space W c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

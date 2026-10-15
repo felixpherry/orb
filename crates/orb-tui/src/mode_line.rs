@@ -86,7 +86,7 @@ fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
         (Some(session), Some(row)) => {
             let agent = match row {
                 SidebarItem::Agent { pane, .. } => sessions.agent_in(pane),
-                SidebarItem::Session(_) | SidebarItem::SettledShelf => {
+                SidebarItem::Session(_) | SidebarItem::SettledShelf | SidebarItem::Colonists(_) => {
                     sessions.agents(session.id).into_iter().next()
                 }
             };

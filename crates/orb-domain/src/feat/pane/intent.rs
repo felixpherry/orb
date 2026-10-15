@@ -7,19 +7,39 @@ use crate::feat::sessions::state::SidebarItem;
 use crate::ids::SessionId;
 use crate::{AppState, Command, Focus};
 
-/// `⏎` on a sidebar row: on the settled shelf opens or closes it; on an
-/// agent row reveals its pane and attaches; else attaches to the selected
-/// session.
+/// `⏎` on a sidebar row: on the settled shelf or a colonists row opens or
+/// closes it; on an agent row, or on the card of a colonist whose one agent
+/// shows no row, reveals that agent's pane and attaches; else attaches to
+/// the selected session.
 pub(crate) fn attach(state: &mut AppState) -> Vec<Command> {
-    if state.sessions.cursor == Some(SidebarItem::SettledShelf) {
-        if state.sessions.shelf_open {
-            state.sessions.close_shelf();
-        } else {
-            state.sessions.open_shelf();
+    match state.sessions.cursor {
+        Some(SidebarItem::SettledShelf) => {
+            if state.sessions.shelf_open {
+                state.sessions.close_shelf();
+            } else {
+                state.sessions.open_shelf();
+            }
+            return vec![];
         }
-        return vec![];
+        Some(SidebarItem::Colonists(id)) => {
+            if state.sessions.colonists_open.contains(&id) {
+                state.sessions.fold_colonists(id);
+            } else {
+                state.sessions.unfold_colonists(id);
+            }
+            return vec![];
+        }
+        _ => {}
     }
-    match state.sessions.selected_agent(&state.layouts) {
+    let agent = state.sessions.selected_agent(&state.layouts).or_else(|| {
+        let id = state.sessions.selected_session()?.id;
+        if !state.sessions.hides_one_agent(id, &state.layouts) {
+            return None;
+        }
+        let pane = state.sessions.agent_rows(id, &state.layouts).first()?.1;
+        Some((id, pane))
+    });
+    match agent {
         Some((session, pane)) => {
             state.layouts.reveal(session, pane);
             let mut commands = attach_session(state);
@@ -152,9 +172,9 @@ mod tests {
     use crate::feat::sidebar::state::SidebarView;
     use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, agent_row, attached, jumping, left_pane, left_pane_showing_1, on_agent,
-        on_agent_in_another_tab, settle, shown_focus, split_layout, state_at, state_with, stopped,
-        two_agents_from_sidebar, two_projects, with_layout,
+        agent, agent_row, attached, colony_with_colonists, jumping, left_pane, left_pane_showing_1,
+        on_agent, on_agent_in_another_tab, settle, shown_focus, split_layout, state_at, state_with,
+        stopped, two_agents_from_sidebar, two_projects, with_layout,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler, PaneMode};
 
@@ -791,6 +811,56 @@ mod tests {
             state.sessions.cursor,
             Some(on_agent(21)),
             "a filtered-out active row should not take the hover"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn enter_on_a_colonists_row_toggles_it(#[case] open: bool) {
+        // Given the cursor on colony 1's colonists row, `open` or folded.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        if open {
+            state.sessions.colonists_open.insert(SessionId(1));
+        }
+        state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the colonists row flipped.
+        assert_eq!(
+            state.sessions.colonists_open.contains(&SessionId(1)),
+            !open,
+            "⏎ on a colonists row should toggle it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_one_agent_colonist_shows_its_agents_pane() {
+        // Given every colonists row open, the cursor on colonist 3 (one
+        // agent, no agent row) whose agent's pane is in tab 1 while tab 2
+        // is shown.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state
+            .sessions
+            .colonists_open
+            .extend([SessionId(1), SessionId(2)]);
+        state.layouts.new_tab(SessionId(3), test_entry(60));
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(3)));
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then tab 1 is shown with the agent's pane focused.
+        let layout = state.layouts.get(SessionId(3));
+        assert_eq!(
+            (
+                layout.map(SessionLayout::active),
+                layout.and_then(SessionLayout::focused)
+            ),
+            (Some(0), Some(PaneId(3))),
+            "⏎ on a one-agent colonist should show its agent's pane"
         );
     }
 }

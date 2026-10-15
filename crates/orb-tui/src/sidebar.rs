@@ -13,6 +13,9 @@
 //! last line with `⌄`, or with `›` while folded and its rows hidden. The
 //! hovered row's first line is highlighted, and the active row's (the one the
 //! right side shows) title is blue and bold.
+//! A session with colonists ends its rows with a one-line `colonists` row
+//! (their count and `⌄`/`›`), and a folded session shown only on the way to
+//! a stuck colonist is one dim `›` line.
 //! Settled sessions fold into a shelf at the bottom, drawn as one-line rows
 //! while it's open. The sidebar scrolls to keep the whole selected row in
 //! view, unless the wheel scrolled it while the keys are elsewhere.
@@ -237,15 +240,16 @@ fn prompt<'a>(
     )
 }
 
-/// `shown/total`, like snacks' match count: the sessions listed, out of
-/// every session not being deleted. Agent rows aren't counted.
+/// `shown/total`, like snacks' match count: the sessions listed as cards
+/// or settled rows, out of every session not being deleted. Path lines,
+/// agent rows and colonists rows aren't counted.
 fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
     let shown = rows
         .iter()
         .filter(|row| {
-            !matches!(
+            matches!(
                 row,
-                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
+                SidebarRow::Card { path: false, .. } | SidebarRow::Settled { .. }
             )
         })
         .count();
@@ -417,11 +421,16 @@ fn place(rows: Vec<SidebarRow<'_>>, lines: u16) -> (Vec<(SidebarRow<'_>, u16)>, 
     (placed, top)
 }
 
-/// How many lines a row takes: a session's card 3, any other row 1.
+/// How many lines a row takes: a session's card 3, any other row (a path
+/// line and a colonists row included) 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Card { .. } => 3,
-        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } | SidebarRow::Agent { .. } => 1,
+        SidebarRow::Card { path: false, .. } => 3,
+        SidebarRow::Card { path: true, .. }
+        | SidebarRow::ShelfHeader { .. }
+        | SidebarRow::Settled { .. }
+        | SidebarRow::Agent { .. }
+        | SidebarRow::Colonists { .. } => 1,
     }
 }
 
@@ -446,7 +455,14 @@ fn render_row(
     buf: &mut Buffer,
 ) {
     match row {
-        SidebarRow::Card { project, session } => render_card(
+        SidebarRow::Card {
+            session,
+            path: true,
+            ..
+        } => render_path(sessions, session, area, buf),
+        SidebarRow::Card {
+            project, session, ..
+        } => render_card(
             sessions,
             project,
             session,
@@ -467,6 +483,7 @@ fn render_row(
             agent,
             pane,
             last,
+            ..
         } => {
             let label = layouts.agent_name(*pane, Some(agent));
             render_agent(
@@ -482,7 +499,43 @@ fn render_row(
                 buf,
             );
         }
+        SidebarRow::Colonists { session, open, .. } => {
+            render_colonists(sessions.colonists(session.id).len(), *open, area, buf);
+        }
     }
+}
+
+/// A folded session shown only on the way to a stuck colonist: one dim
+/// line, `›` and its title, with where the search matched it.
+fn render_path(sessions: &Sessions, session: &Session, area: Rect, buf: &mut Buffer) {
+    let title = sessions.title(session);
+    let matched = sessions.title_matches(&title).unwrap_or_default();
+    render_split(
+        Line::from(
+            [span(" › ", COMMENT)]
+                .into_iter()
+                .chain(highlight(&title, &matched, |_| COMMENT))
+                .collect::<Vec<_>>(),
+        ),
+        Line::default(),
+        area,
+        buf,
+    );
+}
+
+/// A session's colonists row: `colonists`, then how many on the right and
+/// `⌄` while `open` or `›` while folded.
+fn render_colonists(count: usize, open: bool, area: Rect, buf: &mut Buffer) {
+    let chevron = if open { FOLD_OPEN } else { FOLD_CLOSED };
+    render_split(
+        Line::from(span(" colonists", FG_DARK)),
+        Line::from(vec![
+            span(format!("{count} "), COMMENT),
+            span(chevron, DARK3),
+        ]),
+        area,
+        buf,
+    );
 }
 
 /// A session's card: its most urgent agent's status icon (the idle circle

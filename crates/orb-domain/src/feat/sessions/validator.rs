@@ -7,7 +7,7 @@
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{ProjectKind, SidebarItem, folder_slug};
+use crate::feat::sessions::state::{ProjectKind, SidebarItem, SidebarRow, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::SessionId;
 
@@ -254,6 +254,10 @@ pub enum FoldTarget {
     Shelf,
     /// A session's card, by its agent rows.
     Card(SessionId),
+    /// A session's colonists row.
+    Colonists(SessionId),
+    /// No fold: the cursor moves up to this row.
+    Move(SidebarItem),
 }
 
 /// Why unfolding at the cursor can't proceed.
@@ -268,21 +272,26 @@ pub enum UnfoldError {
     NoAgents,
 }
 
-/// Allow unfolding the Settled shelf from its header, or a card that has
-/// agent rows.
+/// Allow unfolding the Settled shelf from its header, a colonists row, or a
+/// card that shows agent rows.
 ///
 /// # Errors
 ///
-/// Returns [`UnfoldError::NotOnCard`] off the header and cards,
+/// Returns [`UnfoldError::NotOnCard`] off the header, colonists rows and
+/// cards,
 /// [`UnfoldError::Settled`] on a settled session, and
 /// [`UnfoldError::NoAgents`] on a card without agent rows.
 pub fn validate_unfold(state: &AppState) -> Result<FoldTarget, UnfoldError> {
     let sessions = &state.sessions;
     match sessions.cursor {
         Some(SidebarItem::SettledShelf) => Ok(FoldTarget::Shelf),
+        Some(SidebarItem::Colonists(id)) => Ok(FoldTarget::Colonists(id)),
         Some(SidebarItem::Session(id)) => match sessions.session(id) {
             Some(session) if session.settled_at.is_some() => Err(UnfoldError::Settled),
-            Some(_) if !sessions.agent_rows(id, &state.layouts).is_empty() => {
+            Some(_)
+                if !sessions.agent_rows(id, &state.layouts).is_empty()
+                    && !sessions.hides_one_agent(id, &state.layouts) =>
+            {
                 Ok(FoldTarget::Card(id))
             }
             _ => Err(UnfoldError::NoAgents),
@@ -304,8 +313,12 @@ pub enum FoldError {
 }
 
 /// Allow folding the Settled shelf from its header or a settled session in
-/// the open shelf, and a card that has agent rows from the card or one of
-/// its agent rows.
+/// the open shelf, a card that has agent rows from the card or one of its
+/// agent rows, and an open colonists row. Off a colonist whose agent rows
+/// don't show, the cursor moves up instead: to the colonists row above it,
+/// else to the dim path line above a stuck colonist; off a folded colonists
+/// row, to its card. A colonist lifted to the top level by a settled colony
+/// doesn't move.
 ///
 /// # Errors
 ///
@@ -322,11 +335,37 @@ pub fn validate_fold(state: &AppState) -> Result<FoldTarget, FoldError> {
                 Ok(FoldTarget::Shelf)
             }
             Some(session) if session.settled_at.is_some() => Err(FoldError::NotInShelf),
-            Some(_) if !sessions.agent_rows(id, &state.layouts).is_empty() => {
-                Ok(FoldTarget::Card(id))
+            Some(session) => {
+                let rows: Vec<SidebarItem> = sessions
+                    .sidebar(&state.layouts)
+                    .iter()
+                    .map(SidebarRow::item)
+                    .collect();
+                let shows_agents = rows
+                    .iter()
+                    .any(|row| matches!(row, SidebarItem::Agent { session, .. } if *session == id));
+                let up = || {
+                    let parent = session.parent.filter(|_| !sessions.top(id))?;
+                    [SidebarItem::Colonists(parent), SidebarItem::Session(parent)]
+                        .into_iter()
+                        .find(|item| rows.contains(item))
+                };
+                if shows_agents {
+                    Ok(FoldTarget::Card(id))
+                } else if let Some(item) = up() {
+                    Ok(FoldTarget::Move(item))
+                } else if !sessions.agent_rows(id, &state.layouts).is_empty() {
+                    Ok(FoldTarget::Card(id))
+                } else {
+                    Err(FoldError::NoAgents)
+                }
             }
-            _ => Err(FoldError::NoAgents),
+            None => Err(FoldError::NoAgents),
         },
+        Some(SidebarItem::Colonists(id)) if sessions.colonists_open.contains(&id) => {
+            Ok(FoldTarget::Colonists(id))
+        }
+        Some(SidebarItem::Colonists(id)) => Ok(FoldTarget::Move(SidebarItem::Session(id))),
         None => Err(FoldError::NoSelection),
     }
 }
@@ -748,6 +787,23 @@ mod tests {
             result,
             Err(UnfoldError::Settled),
             "a settled row has no agent rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unfold_on_a_colonists_row_targets_it() {
+        // Given session 1's colonists row selected.
+        let mut state = on_session(AgentStatus::Idle);
+        state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+        // When validating an unfold.
+        let result = validate_unfold(&state);
+
+        // Then it targets that colonists row.
+        assert_eq!(
+            result,
+            Ok(FoldTarget::Colonists(SessionId(1))),
+            "l on a colonists row should open it"
         );
     }
 

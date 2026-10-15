@@ -1753,12 +1753,12 @@ fn float_layout(text: &str) -> FloatLayout {
 }
 
 /// How a jump-list row is saved: its kind and id (an agent by its pane); the
-/// Settled header isn't.
+/// Settled header and colonists rows aren't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
     match item {
         SidebarItem::Session(id) => Some(("session", id.0)),
         SidebarItem::Agent { pane, .. } => Some(("agent", pane.0)),
-        SidebarItem::SettledShelf => None,
+        SidebarItem::SettledShelf | SidebarItem::Colonists(_) => None,
     }
 }
 

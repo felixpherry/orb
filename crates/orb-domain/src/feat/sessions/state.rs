@@ -318,15 +318,26 @@ pub enum SidebarItem {
     SettledShelf,
     /// An agent's line under its session's card, keyed by the agent's pane.
     Agent { session: SessionId, pane: PaneId },
+    /// The colonists row under session `id`'s card.
+    Colonists(SessionId),
 }
 
-/// One sidebar row, in display order.
-#[derive(Debug, Clone, Copy)]
+/// One sidebar row, in display order. `depth` is how many levels down the
+/// tree it sits (a top-level card is 0), `rails` whether each level above
+/// it carries a guide line down past it, and `last` whether it's its
+/// parent's last child.
+#[derive(Debug, Clone)]
 pub enum SidebarRow<'a> {
     /// A pinned or active session's three-line card.
     Card {
         project: &'a Project,
         session: &'a Session,
+        depth: usize,
+        rails: Vec<bool>,
+        last: bool,
+        /// A session shown only on the way to a stuck colonist under a
+        /// folded colonists row: one dim line.
+        path: bool,
     },
     /// The Settled shelf's header.
     ShelfHeader {
@@ -342,12 +353,23 @@ pub enum SidebarRow<'a> {
         session: &'a Session,
     },
     /// An agent pane's line under its session's card; `last` is the card's
-    /// last agent.
+    /// last child (its agent rows, then its colonists row).
     Agent {
         session: &'a Session,
         agent: &'a Agent,
         pane: PaneId,
+        depth: usize,
+        rails: Vec<bool>,
         last: bool,
+    },
+    /// The row under `session`'s card that holds its colonists.
+    Colonists {
+        session: &'a Session,
+        depth: usize,
+        rails: Vec<bool>,
+        last: bool,
+        /// Its colonists show: the row is open, or a search has text.
+        open: bool,
     },
 }
 
@@ -363,6 +385,7 @@ impl SidebarRow<'_> {
                 session: session.id,
                 pane: *pane,
             },
+            Self::Colonists { session, .. } => SidebarItem::Colonists(session.id),
         }
     }
 }
@@ -381,7 +404,7 @@ pub struct Search {
 /// start ends, `fetching`, the cursor and `filter` after a restore, the
 /// cursor on a new session, removing a session from `deleting`) and by the
 /// intent handler (the cursor on navigation, settle and delete, `active`,
-/// `shelf_open`, `folded`, `starting` when a start begins, adding a session
+/// `shelf_open`, `folded`, `colonists_open`, `starting` when a start begins, adding a session
 /// to `deleting`, `filter`, `error`). The frontend loop moves `error` into
 /// the message box.
 #[derive(Debug, Clone, Default)]
@@ -427,6 +450,10 @@ pub struct Sessions {
     /// Sessions whose cards hide their agent rows. Written only by the
     /// intent handler; empty at start and never saved.
     pub folded: HashSet<SessionId>,
+    /// Sessions whose colonists row shows all its colonists. Written only by
+    /// the intent handler; empty at start (every colonists row folded) and
+    /// never saved.
+    pub colonists_open: HashSet<SessionId>,
 }
 
 impl Sessions {
@@ -520,6 +547,110 @@ impl Sessions {
         found
     }
 
+    /// Session `id`'s unsettled colonists, not being deleted, in sidebar
+    /// order: pinned (newest pin first), then the rest (newest created or
+    /// un-settled first); ties go to the higher id.
+    pub fn colonists(&self, id: SessionId) -> Vec<&Session> {
+        in_sidebar_order(self.sessions.iter().filter(|session| {
+            session.parent == Some(id)
+                && session.settled_at.is_none()
+                && !self.deleting.contains(&session.id)
+        }))
+    }
+
+    /// The agent most needing the user among session `id`'s own agents and
+    /// those of every session under it; a card's status icon is its.
+    pub fn status(&self, id: SessionId) -> Option<&Agent> {
+        most_urgent(
+            std::iter::once(id)
+                .chain(self.under(id))
+                .flat_map(|session| self.agents(session)),
+        )
+    }
+
+    /// Whether one of session `id`'s own agents waits for an approval or an
+    /// answer.
+    pub fn stuck(&self, id: SessionId) -> bool {
+        self.agents(id).iter().any(|agent| {
+            matches!(
+                agent.status,
+                AgentStatus::NeedsApproval | AgentStatus::NeedsInput
+            )
+        })
+    }
+
+    /// Whether the project filter lets the sidebar list session `id`: it
+    /// isn't being deleted, and there's no filter, or it's in the filtered
+    /// project, or it's under a listed session.
+    pub fn listed(&self, id: SessionId) -> bool {
+        let Some(filter) = self.filter else {
+            return self.session(id).is_some() && !self.deleting.contains(&id);
+        };
+        // Ids are reused, so a parent link may loop: stop after every session.
+        let mut at = id;
+        for _ in 0..self.sessions.len() {
+            let Some(session) = self.session(at) else {
+                return false;
+            };
+            if self.deleting.contains(&at) {
+                return false;
+            }
+            if session.project == filter {
+                return true;
+            }
+            let Some(parent) = session.parent else {
+                return false;
+            };
+            at = parent;
+        }
+        false
+    }
+
+    /// Whether session `id` sits at the sidebar's top level: it's unsettled,
+    /// and it has no parent, or its parent is gone, settled, being deleted
+    /// or not listed.
+    pub fn top(&self, id: SessionId) -> bool {
+        let Some(session) = self.session(id) else {
+            return false;
+        };
+        session.settled_at.is_none()
+            && session.parent.is_none_or(|parent| {
+                self.session(parent)
+                    .is_none_or(|parent| parent.settled_at.is_some())
+                    || !self.listed(parent)
+            })
+    }
+
+    /// Whether colonist `id` shows no agent row: it's not at the top level,
+    /// and it has exactly one agent row and no colonists. `⏎` on its card
+    /// reaches that agent.
+    pub fn hides_one_agent(&self, id: SessionId, layouts: &Layouts) -> bool {
+        !self.top(id) && self.agent_rows(id, layouts).len() == 1 && self.colonists(id).is_empty()
+    }
+
+    /// Whether a search lists session `id`: no search has text, or it or a
+    /// session under it matches. A match's ancestors show as its path.
+    pub fn shows_in_search(&self, id: SessionId, layouts: &Layouts) -> bool {
+        std::iter::once(id)
+            .chain(self.under(id))
+            .filter_map(|id| self.session(id))
+            .any(|session| self.hits(session, layouts))
+    }
+
+    /// Whether `session` matches the search: no search has text, or its
+    /// title or the name one of its agent rows shows matches.
+    fn hits(&self, session: &Session, layouts: &Layouts) -> bool {
+        !self.searching()
+            || self.title_matches(&self.title(session)).is_some()
+            || self
+                .agent_rows(session.id, layouts)
+                .into_iter()
+                .any(|(agent, pane)| {
+                    self.title_matches(layouts.agent_name(pane, Some(agent)))
+                        .is_some()
+                })
+    }
+
     /// The agents running in session `id`'s panes (its agent panes'
     /// conversations), oldest first; none while it is being deleted.
     pub fn agents(&self, id: SessionId) -> Vec<&Agent> {
@@ -600,45 +731,36 @@ impl Sessions {
             .flat_map(|project| project.agents.iter())
     }
 
-    /// The sidebar's rows: pinned sessions (newest pin first), active sessions (newest created or
-    /// un-settled first), each card followed by one row per agent pane unless
-    /// it's folded, then, if any is settled, the shelf header and the
-    /// settled sessions (newest settle first). A collapsed shelf still lists
-    /// the cursor's settled session. Ties go to the higher id. Sessions being
+    /// The sidebar's rows, as a tree. The top level holds the unsettled
+    /// sessions with no parent, or whose parent is settled, gone or not
+    /// listed: pinned (newest pin first), then active (newest created or
+    /// un-settled first). Each card is followed by its agent rows (unless
+    /// it's folded, or it's a colonist with one agent and no colonists),
+    /// then by its colonists row when it has colonists, then by those
+    /// colonists: all of them when the row is open; only the stuck ones,
+    /// with each folded session on the way as a dim path line, when it's
+    /// folded. Then, if any is settled, the shelf header and the settled
+    /// sessions (newest settle first); a collapsed shelf still lists the
+    /// cursor's settled session. Ties go to the higher id. Sessions being
     /// deleted aren't listed. While a project filter is set, only that
-    /// project's rows are. While a search has text, only the sessions whose
-    /// title, or one of whose agent rows' names, matches it are,
-    /// settled ones even while the shelf is closed, and the shelf header only
-    /// when a settled session matches, reading as open; a folded card lists
-    /// its agent rows then too.
+    /// project's sessions and the sessions under them are. While a search
+    /// has text, only the sessions that match it by title or an agent row's
+    /// name are, with their ancestors as the way to them: every colonists
+    /// row on the way reads as open, a match lists all its agent rows (a
+    /// folded card's too) and an ancestor shown only for the way lists
+    /// none; settled matches show even while the shelf is closed, the shelf
+    /// header only when one matches, reading as open.
     pub fn sidebar(&self, layouts: &Layouts) -> Vec<SidebarRow<'_>> {
-        let (mut settled, live): (Vec<_>, Vec<_>) = self
-            .listed_sessions(layouts)
-            .into_iter()
-            .partition(|(_, session)| session.settled_at.is_some());
-        let (mut pinned, mut active): (Vec<_>, Vec<_>) = live
-            .into_iter()
-            .partition(|(_, session)| session.pinned_at.is_some());
-        pinned.sort_by_key(|(_, session)| Reverse((session.pinned_at, session.id.0)));
-        active.sort_by_key(|(_, session)| Reverse((session.active_since, session.id.0)));
-        settled.sort_by_key(|(_, session)| Reverse((session.settled_at, session.id.0)));
         let mut rows: Vec<SidebarRow<'_>> = Vec::new();
-        for (project, session) in pinned.into_iter().chain(active) {
-            rows.push(SidebarRow::Card { project, session });
-            if self.hides_agents(session.id) {
-                continue;
-            }
-            let agents = self.agent_rows(session.id, layouts);
-            let count = agents.len();
-            rows.extend(agents.into_iter().enumerate().map(|(at, (agent, pane))| {
-                SidebarRow::Agent {
-                    session,
-                    agent,
-                    pane,
-                    last: at + 1 == count,
-                }
-            }));
+        let tops = self.sessions.iter().filter(|session| {
+            self.listed(session.id)
+                && self.top(session.id)
+                && self.shows_in_search(session.id, layouts)
+        });
+        for session in in_sidebar_order(tops) {
+            self.emit_card(session, &Spot::top(), false, layouts, &mut rows);
         }
+        let settled = self.settled_listed(layouts);
         if !settled.is_empty() {
             let open = self.shelf_open || self.searching();
             rows.push(SidebarRow::ShelfHeader {
@@ -655,6 +777,144 @@ impl Sessions {
             );
         }
         rows
+    }
+
+    /// Pushes `session`'s card at `spot`, then what hangs under it: its
+    /// agent rows and its colonists row with what that shows, or, for a
+    /// session on the way to a stuck colonist (`stuck_only`), just the
+    /// colonists that are stuck or have a stuck session under them. A
+    /// session whose project is gone isn't listed.
+    fn emit_card<'a>(
+        &'a self,
+        session: &'a Session,
+        spot: &Spot,
+        stuck_only: bool,
+        layouts: &Layouts,
+        rows: &mut Vec<SidebarRow<'a>>,
+    ) {
+        let Some(project) = self.project(session.project) else {
+            return;
+        };
+        let id = session.id;
+        rows.push(SidebarRow::Card {
+            project,
+            session,
+            depth: spot.depth,
+            rails: spot.rails.clone(),
+            last: spot.last,
+            path: stuck_only && !self.stuck(id),
+        });
+        if stuck_only {
+            let stuck = self.stuck_colonists(id);
+            let count = stuck.len();
+            for (at, colonist) in stuck.into_iter().enumerate() {
+                self.emit_card(colonist, &spot.child(at + 1 == count), true, layouts, rows);
+            }
+            return;
+        }
+        let agents = if self.hides_agents(id)
+            || self.hides_one_agent(id, layouts)
+            || !self.hits(session, layouts)
+        {
+            Vec::new()
+        } else {
+            self.agent_rows(id, layouts)
+        };
+        let colonists_row = self
+            .colonists(id)
+            .iter()
+            .any(|colonist| self.shows_in_search(colonist.id, layouts));
+        let count = agents.len() + usize::from(colonists_row);
+        for (at, (agent, pane)) in agents.into_iter().enumerate() {
+            let child = spot.child(at + 1 == count);
+            rows.push(SidebarRow::Agent {
+                session,
+                agent,
+                pane,
+                depth: child.depth,
+                rails: child.rails,
+                last: child.last,
+            });
+        }
+        if colonists_row {
+            self.emit_colonists(session, &spot.child(true), layouts, rows);
+        }
+    }
+
+    /// Pushes the colonists row under `session` at `spot`, then: while a
+    /// search has text, each colonist that shows in it; while the row is
+    /// open, each colonist; while it's folded, each colonist that's stuck
+    /// or has a stuck session under it, on the way to those only.
+    fn emit_colonists<'a>(
+        &'a self,
+        session: &'a Session,
+        spot: &Spot,
+        layouts: &Layouts,
+        rows: &mut Vec<SidebarRow<'a>>,
+    ) {
+        let id = session.id;
+        let open = self.colonists_open.contains(&id);
+        let (shown, stuck_only) = match (self.searching(), open) {
+            (true, _) => (
+                self.colonists(id)
+                    .into_iter()
+                    .filter(|colonist| self.shows_in_search(colonist.id, layouts))
+                    .collect(),
+                false,
+            ),
+            (false, true) => (self.colonists(id), false),
+            (false, false) => (self.stuck_colonists(id), true),
+        };
+        rows.push(SidebarRow::Colonists {
+            session,
+            depth: spot.depth,
+            rails: spot.rails.clone(),
+            last: spot.last,
+            open: open || self.searching(),
+        });
+        let count = shown.len();
+        for (at, colonist) in shown.into_iter().enumerate() {
+            self.emit_card(
+                colonist,
+                &spot.child(at + 1 == count),
+                stuck_only,
+                layouts,
+                rows,
+            );
+        }
+    }
+
+    /// Session `id`'s colonists that are stuck or have a stuck session
+    /// under them, in sidebar order.
+    fn stuck_colonists(&self, id: SessionId) -> Vec<&Session> {
+        self.colonists(id)
+            .into_iter()
+            .filter(|colonist| {
+                self.stuck(colonist.id)
+                    || self
+                        .under(colonist.id)
+                        .into_iter()
+                        .any(|below| self.stuck(below))
+            })
+            .collect()
+    }
+
+    /// The settled sessions the sidebar may list, newest settle first (ties
+    /// to the higher id), with their projects: listed by the project filter
+    /// and matching the search.
+    fn settled_listed(&self, layouts: &Layouts) -> Vec<(&Project, &Session)> {
+        let mut settled: Vec<(&Project, &Session)> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.settled_at.is_some()
+                    && self.listed(session.id)
+                    && self.hits(session, layouts)
+            })
+            .filter_map(|session| Some((self.project(session.project)?, session)))
+            .collect();
+        settled.sort_by_key(|(_, session)| Reverse((session.settled_at, session.id.0)));
+        settled
     }
 
     /// Where the search's terms matched `title`, as sorted byte offsets:
@@ -895,21 +1155,21 @@ impl Sessions {
     }
 
     /// Where the cursor goes when `item` is deleted: the next row below,
-    /// else the nearest one above, skipping shelf headers and agent rows;
-    /// else the shelf header if another session is settled.
+    /// else the nearest one above, skipping shelf headers, agent rows and
+    /// colonists rows; else the shelf header if another session is settled.
     pub fn row_neighbour(&self, item: SidebarItem, layouts: &Layouts) -> Option<SidebarItem> {
         self.neighbour(item, layouts, |row| {
             !matches!(
                 row,
-                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
+                SidebarRow::ShelfHeader { .. }
+                    | SidebarRow::Agent { .. }
+                    | SidebarRow::Colonists { .. }
             )
         })
         .or_else(|| {
-            self.listed_sessions(layouts)
+            self.settled_listed(layouts)
                 .into_iter()
-                .any(|(_, session)| {
-                    SidebarItem::Session(session.id) != item && session.settled_at.is_some()
-                })
+                .any(|(_, session)| SidebarItem::Session(session.id) != item)
                 .then_some(SidebarItem::SettledShelf)
         })
     }
@@ -946,23 +1206,67 @@ impl Sessions {
         self.folded.remove(&id);
     }
 
-    /// Whether a jump can land on `item`: it still exists, isn't being
-    /// deleted, and the project filter lists it. Never the Settled header; an
-    /// agent row only while its pane still runs an agent.
-    pub fn jumpable(&self, item: SidebarItem, layouts: &Layouts) -> bool {
-        let mut projects = self.listed_projects();
-        match item {
-            SidebarItem::Session(id) => {
-                !self.deleting.contains(&id)
-                    && self.session(id).is_some_and(|session| {
-                        projects.any(|project| project.id == session.project)
-                    })
+    /// Show every colonist under session `id`'s colonists row.
+    pub fn unfold_colonists(&mut self, id: SessionId) {
+        self.colonists_open.insert(id);
+    }
+
+    /// Fold session `id`'s colonists row back to its stuck colonists; the
+    /// cursor stays where it is.
+    pub fn fold_colonists(&mut self, id: SessionId) {
+        self.colonists_open.remove(&id);
+    }
+
+    /// Opens what hides the cursor's row, unless a search has text: a
+    /// hidden one-agent colonist's agent row moves the cursor to its card,
+    /// another hidden agent row unfolds its card, and every colonists row
+    /// above the row's session opens. A listed row (a stuck colonist under a
+    /// folded colonists row included) opens nothing.
+    pub fn reveal_cursor(&mut self, layouts: &Layouts) {
+        let Some(item) = self.cursor else {
+            return;
+        };
+        if self.searching() || self.items(layouts).contains(&item) {
+            return;
+        }
+        let mut at = match item {
+            SidebarItem::Agent { session, .. } if self.hides_one_agent(session, layouts) => {
+                self.cursor = Some(SidebarItem::Session(session));
+                session
             }
+            SidebarItem::Agent { session, .. } => {
+                self.unfold(session);
+                session
+            }
+            SidebarItem::Session(id) | SidebarItem::Colonists(id) => id,
+            SidebarItem::SettledShelf => return,
+        };
+        // Ids are reused, so a parent link may loop: stop after every session.
+        for _ in 0..self.sessions.len() {
+            let parent = match self.session(at) {
+                Some(session) if !self.top(at) && session.settled_at.is_none() => session.parent,
+                _ => None,
+            };
+            let Some(parent) = parent else {
+                return;
+            };
+            self.colonists_open.insert(parent);
+            at = parent;
+        }
+    }
+
+    /// Whether a jump can land on `item`: it still exists, isn't being
+    /// deleted, and the project filter lists it. Never the Settled header
+    /// nor a colonists row; an agent row only while its pane still runs an
+    /// agent.
+    pub fn jumpable(&self, item: SidebarItem, layouts: &Layouts) -> bool {
+        match item {
+            SidebarItem::Session(id) => self.listed(id),
             SidebarItem::Agent { session, pane } => {
                 self.jumpable(SidebarItem::Session(session), layouts)
                     && self.runs_agent(session, pane, layouts)
             }
-            SidebarItem::SettledShelf => false,
+            SidebarItem::SettledShelf | SidebarItem::Colonists(_) => false,
         }
     }
 
@@ -990,40 +1294,6 @@ impl Sessions {
         self.shown_agents().any(|agent| agent.status.in_progress())
     }
 
-    /// The projects the filter lets the sidebar list.
-    fn listed_projects(&self) -> impl Iterator<Item = &Project> {
-        self.projects
-            .iter()
-            .filter(|project| self.filter.is_none_or(|filter| filter == project.id))
-    }
-
-    /// The sessions the sidebar may list, with their projects: in a listed
-    /// project, not being deleted, and matching the search by their title or
-    /// the name one of their agent rows shows.
-    fn listed_sessions(&self, layouts: &Layouts) -> Vec<(&Project, &Session)> {
-        self.sessions
-            .iter()
-            .filter(|session| !self.deleting.contains(&session.id))
-            .filter_map(|session| {
-                let project = self
-                    .listed_projects()
-                    .find(|project| project.id == session.project)?;
-                Some((project, session))
-            })
-            .filter(|(_, session)| {
-                !self.searching()
-                    || self.title_matches(&self.title(session)).is_some()
-                    || self
-                        .agent_rows(session.id, layouts)
-                        .into_iter()
-                        .any(|(agent, pane)| {
-                            self.title_matches(layouts.agent_name(pane, Some(agent)))
-                                .is_some()
-                        })
-            })
-            .collect()
-    }
-
     /// Every agent but those being deleted.
     fn shown_agents(&self) -> impl Iterator<Item = &Agent> {
         self.all_agents().filter(|agent| !self.is_deleting(agent))
@@ -1036,12 +1306,19 @@ impl Sessions {
             .is_some_and(|search| !search.input.text().trim().is_empty())
     }
 
-    /// The rows the search steps through, in display order: every row but
-    /// the shelf header, so agent rows are stops too.
+    /// The rows the search steps through, in display order: the cards of
+    /// the sessions that match, their agent rows and the settled rows;
+    /// never a session shown only as the way to a match, a colonists row
+    /// or the shelf header.
     fn matches(&self, layouts: &Layouts) -> Vec<SidebarItem> {
-        self.items(layouts)
-            .into_iter()
-            .filter(|&item| item != SidebarItem::SettledShelf)
+        self.sidebar(layouts)
+            .iter()
+            .filter(|row| match row {
+                SidebarRow::Card { session, path, .. } => !path && self.hits(session, layouts),
+                SidebarRow::Agent { .. } | SidebarRow::Settled { .. } => true,
+                SidebarRow::ShelfHeader { .. } | SidebarRow::Colonists { .. } => false,
+            })
+            .map(SidebarRow::item)
             .collect()
     }
 
@@ -1078,6 +1355,45 @@ impl Sessions {
     }
 }
 
+/// A row's place in the sidebar's tree.
+struct Spot {
+    /// How many levels down it sits; a top-level card is 0.
+    depth: usize,
+    /// Whether each level above it carries a guide line down past it.
+    rails: Vec<bool>,
+    /// Whether it's its parent's last child.
+    last: bool,
+}
+
+impl Spot {
+    /// A top-level card's spot.
+    fn top() -> Self {
+        Self {
+            depth: 0,
+            rails: Vec::new(),
+            last: true,
+        }
+    }
+
+    /// The spot of a child of this row's, `last` among its siblings. A
+    /// top-level row passes no guide line down.
+    fn child(&self, last: bool) -> Self {
+        let rails = match self.depth {
+            0 => Vec::new(),
+            _ => {
+                let mut rails = self.rails.clone();
+                rails.push(!self.last);
+                rails
+            }
+        };
+        Self {
+            depth: self.depth + 1,
+            rails,
+            last,
+        }
+    }
+}
+
 /// How many of the rows at `indices`, walked in order, fit in half of
 /// `layout`'s visible height; at least one. A row the layout doesn't know
 /// counts as one line.
@@ -1097,6 +1413,21 @@ where
         .take_while(|&lines| lines <= half)
         .count()
         .max(1)
+}
+
+/// `sessions` in sidebar order: pinned (newest pin first), then the rest
+/// (newest created or un-settled first); ties go to the higher id.
+fn in_sidebar_order<'a, I>(sessions: I) -> Vec<&'a Session>
+where
+    I: IntoIterator<Item = &'a Session>,
+{
+    let (mut pinned, mut active): (Vec<&Session>, Vec<&Session>) = sessions
+        .into_iter()
+        .partition(|session| session.pinned_at.is_some());
+    pinned.sort_by_key(|session| Reverse((session.pinned_at, session.id.0)));
+    active.sort_by_key(|session| Reverse((session.active_since, session.id.0)));
+    pinned.extend(active);
+    pinned
 }
 
 /// The sessions `projects`' agents run in, one per pane session, as the

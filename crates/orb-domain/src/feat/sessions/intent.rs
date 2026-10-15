@@ -36,34 +36,29 @@ pub(crate) fn new_incognito(state: &mut AppState) -> Vec<Command> {
     }
 }
 
-/// Opens the Settled shelf or the card under the cursor.
+/// Opens the Settled shelf, the card or the colonists row under the cursor.
 pub(crate) fn unfold(state: &mut AppState) -> Vec<Command> {
     match validate_unfold(state) {
-        Ok(FoldTarget::Shelf) => {
-            state.sessions.open_shelf();
-            vec![]
-        }
-        Ok(FoldTarget::Card(id)) => {
-            state.sessions.unfold(id);
-            vec![]
-        }
-        Err(_) => vec![],
+        Ok(FoldTarget::Shelf) => state.sessions.open_shelf(),
+        Ok(FoldTarget::Card(id)) => state.sessions.unfold(id),
+        Ok(FoldTarget::Colonists(id)) => state.sessions.unfold_colonists(id),
+        Ok(FoldTarget::Move(item)) => state.sessions.cursor = Some(item),
+        Err(_) => {}
     }
+    vec![]
 }
 
-/// Closes the Settled shelf or the card under the cursor.
+/// Closes the Settled shelf, the card or the colonists row under the
+/// cursor, or moves the cursor up a level where there's nothing to fold.
 pub(crate) fn fold(state: &mut AppState) -> Vec<Command> {
     match validate_fold(state) {
-        Ok(FoldTarget::Shelf) => {
-            state.sessions.close_shelf();
-            vec![]
-        }
-        Ok(FoldTarget::Card(id)) => {
-            state.sessions.fold(id);
-            vec![]
-        }
-        Err(_) => vec![],
+        Ok(FoldTarget::Shelf) => state.sessions.close_shelf(),
+        Ok(FoldTarget::Card(id)) => state.sessions.fold(id),
+        Ok(FoldTarget::Colonists(id)) => state.sessions.fold_colonists(id),
+        Ok(FoldTarget::Move(item)) => state.sessions.cursor = Some(item),
+        Err(_) => {}
     }
+    vec![]
 }
 
 /// Pins the selected session to the top, or unpins it.
@@ -951,6 +946,116 @@ mod tests {
         assert!(
             !state.sessions.shelf_open,
             "h on the header should close the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn l_on_a_colonists_row_opens_it() {
+        // Given the cursor on colony 1's folded colonists row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+        // When handling Unfold (`l`).
+        IntentHandler::handle(&Intent::Unfold, &mut state);
+
+        // Then the colonists row is open.
+        assert!(
+            state.sessions.colonists_open.contains(&SessionId(1)),
+            "l on a colonists row should open it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_an_open_colonists_row_folds_it() {
+        // Given the cursor on colony 1's open colonists row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.colonists_open.insert(SessionId(1));
+        state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the colonists row is folded.
+        assert!(
+            !state.sessions.colonists_open.contains(&SessionId(1)),
+            "h on an open colonists row should fold it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_folded_colonists_row_moves_to_its_card() {
+        // Given the cursor on colony 1's folded colonists row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.cursor = Some(SidebarItem::Colonists(SessionId(1)));
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the cursor is on colony 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(1))),
+            "h on a folded colonists row should move to its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_colonist_with_open_agent_rows_folds_them() {
+        // Given colony 1's colonists row open and the cursor on colonist 2,
+        // whose agent row shows.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.colonists_open.insert(SessionId(1));
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(2)));
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then colonist 2's card is folded.
+        assert!(
+            state.sessions.folded.contains(&SessionId(2)),
+            "h on a colonist with open agent rows should fold them"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_colonist_without_open_agent_rows_moves_to_its_colonists_row() {
+        // Given every colonists row open and the cursor on colonist 3, whose
+        // one agent shows no row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state
+            .sessions
+            .colonists_open
+            .extend([SessionId(1), SessionId(2)]);
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(3)));
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the cursor is on colonist 2's colonists row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Colonists(SessionId(2))),
+            "h on a colonist without agent rows should move up to its colonists row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_colonist_of_a_settled_colony_stays_put() {
+        // Given colony 1 settled in the open shelf, and the cursor on its
+        // colonist 2, lifted to the top level with its card folded.
+        let mut state = settle(colony_with_colonists([AgentStatus::Idle; 3]), &[1]);
+        state.sessions.shelf_open = true;
+        state.sessions.folded.insert(SessionId(2));
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(2)));
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the cursor stays on colonist 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(2))),
+            "h on a top-level colonist shouldn't move to its settled colony"
         );
     }
 }

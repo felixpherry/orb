@@ -341,6 +341,55 @@ fn count_reads_listed_out_of_every_agent() {
     assert!(prompt.trim_end().ends_with("1/3│"), "line was '{prompt}'");
 }
 
+/// Session 1 with colonist 2, whose colonist 3 waits for an approval: 1's
+/// colonists row is folded, so 2 shows as a path line on the way to 3.
+fn stuck_tree() -> Sessions {
+    let mut sessions = sessions(vec![
+        agent(1, AgentStatus::Idle),
+        agent(2, AgentStatus::Idle),
+        agent(3, AgentStatus::NeedsApproval),
+    ]);
+    for session in &mut sessions.sessions {
+        session.parent = match session.id.0 {
+            2 => Some(SessionId(1)),
+            3 => Some(SessionId(2)),
+            _ => None,
+        };
+    }
+    sessions
+}
+
+#[rstest::rstest]
+fn count_leaves_out_colonists_rows_and_path_lines() {
+    // Given card 1, its colonists row, path line 2 and card 3.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let prompt = line(&draw(&sessions, at(1000), 20), 1);
+
+    // Then only the two cards count, out of three sessions.
+    assert!(prompt.trim_end().ends_with("2/3│"), "line was '{prompt}'");
+}
+
+#[rstest::rstest]
+fn colonists_row_and_path_line_take_one_line_each() {
+    // Given card 1 (lines 3 to 5) and its agent row (line 6), then the
+    // colonists row, path line 2 and card 3.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let buf = draw(&sessions, at(1000), 20);
+
+    // Then the colonists row is line 7, the path line 8 and card 3 starts on 9.
+    let shown = [7, 8, 9].map(|y| line(&buf, y));
+    assert!(
+        shown[0].contains("colonists")
+            && shown[1].contains("› Agent 2")
+            && shown[2].contains("Agent 3"),
+        "lines 7 to 9 were {shown:?}"
+    );
+}
+
 #[rstest::rstest]
 fn filtered_prompt_shows_the_project() {
     // Given the sidebar filtered to orb.

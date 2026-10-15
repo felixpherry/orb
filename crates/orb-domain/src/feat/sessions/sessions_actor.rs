@@ -894,7 +894,7 @@ fn show_session(row: &SessionRow) -> Session {
 fn exists(sessions: &HashMap<SessionId, SessionRow>, item: SidebarItem) -> bool {
     match item {
         SidebarItem::Session(id) => sessions.contains_key(&id),
-        SidebarItem::SettledShelf | SidebarItem::Agent { .. } => false,
+        SidebarItem::SettledShelf | SidebarItem::Agent { .. } | SidebarItem::Colonists(_) => false,
     }
 }
 

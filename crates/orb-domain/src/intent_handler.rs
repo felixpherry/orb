@@ -18,8 +18,9 @@ impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
     /// Every intent first clears the error, which the user has now seen;
     /// otherwise an intent that fails validation changes nothing. After every
-    /// intent, a cursor left on an agent row of a folded card unfolds it,
-    /// unless a search lists the row anyway.
+    /// intent, a cursor left on a row a fold hides opens the folds above it
+    /// (a hidden one-agent colonist's agent row moves it to the card),
+    /// unless a search has text.
     /// A focus key, tab switch, pane click or float toggle that moves the
     /// keys from one pane to another records the agent left and the agent
     /// entered, each only if its pane runs an agent.
@@ -152,11 +153,7 @@ impl IntentHandler {
             commands = record_focus_move(state, left, commands);
         }
         visit_entered_pane(state, left.flatten(), &mut commands);
-        if let Some(SidebarItem::Agent { session, .. }) = state.sessions.cursor
-            && !state.sessions.searching()
-        {
-            state.sessions.unfold(session);
-        }
+        state.sessions.reveal_cursor(&state.layouts);
         if was_pane
             && state.focus == Focus::Sidebar
             && !matches!(
@@ -197,14 +194,15 @@ impl IntentHandler {
 
     /// Opens session `id`, which a worker just made ready, as `⏎` on its
     /// row would, wherever the cursor is: it becomes active and attached,
-    /// and the cursor moves to its row. Nothing happens for a session that
-    /// is gone or being deleted.
+    /// and the cursor moves to its row, opening the folds that hide it.
+    /// Nothing happens for a session that is gone or being deleted.
     pub fn open_ready(state: &mut AppState, id: SessionId) -> Vec<Command> {
         if state.sessions.session(id).is_none() || state.sessions.deleting.contains(&id) {
             return vec![];
         }
         let commands = enter_session(state, id);
         state.sessions.cursor = state.active_row();
+        state.sessions.reveal_cursor(&state.layouts);
         commands
     }
 }
@@ -257,10 +255,10 @@ mod tests {
     use crate::feat::sessions::state::{AgentStatus, ProjectKind, SidebarItem};
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        ORPHAN, agent, agent_row, choosing_workspace, highlight, in_root, jumping,
-        left_pane_showing_1, managing, on_agent, picked_worktree, project_row, removing_alpha,
-        split_layout, state_with, two_agents, two_agents_from_sidebar, two_projects,
-        workspace_labels, worktree_picker_after,
+        ORPHAN, agent, agent_row, choosing_workspace, colony_with_colonists, highlight, in_root,
+        jumping, left_pane_showing_1, managing, on_agent, picked_worktree, project_row,
+        removing_alpha, split_layout, state_with, two_agents, two_agents_from_sidebar,
+        two_projects, workspace_labels, worktree_picker_after,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
     use std::path::PathBuf;
@@ -636,6 +634,82 @@ mod tests {
         assert!(
             commands.is_empty(),
             "a session being deleted shouldn't open, got {commands:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cursor_on_a_hidden_colonist_opens_the_colonists_rows_above_it() {
+        // Given every colonists row folded and the cursor on colonist 3,
+        // which they hide.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(3)));
+
+        // When handling an intent that leaves the cursor where it is.
+        IntentHandler::handle(&Intent::Quit, &mut state);
+
+        // Then the colonists rows of 1 and 2 are open.
+        assert_eq!(
+            state.sessions.colonists_open,
+            [SessionId(1), SessionId(2)].into(),
+            "a cursor on a hidden colonist should open every colonists row above it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cursor_on_a_one_agent_colonists_agent_row_moves_to_its_card() {
+        // Given the cursor on the agent row colonist 3 hides (one agent, no
+        // colonists).
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(3),
+            pane: PaneId(3),
+        });
+
+        // When handling an intent that leaves the cursor where it is.
+        IntentHandler::handle(&Intent::Quit, &mut state);
+
+        // Then the cursor is on colonist 3's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(3))),
+            "a hidden one-agent row should hand the cursor to its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cursor_on_a_stuck_colonist_opens_no_fold() {
+        // Given colonist 3 waiting for an answer, listed under the folded
+        // colonists rows, with the cursor on it.
+        let mut state = colony_with_colonists([
+            AgentStatus::Idle,
+            AgentStatus::Idle,
+            AgentStatus::NeedsInput,
+        ]);
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(3)));
+
+        // When handling an intent that leaves the cursor where it is.
+        IntentHandler::handle(&Intent::Quit, &mut state);
+
+        // Then every colonists row stays folded.
+        assert!(
+            state.sessions.colonists_open.is_empty(),
+            "a listed stuck colonist shouldn't open its colonists rows, got {:?}",
+            state.sessions.colonists_open
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_ready_on_a_hidden_colonist_opens_its_colonists_row() {
+        // Given colonist 2 hidden under colony 1's folded colonists row.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When the ready colonist 2 opens.
+        IntentHandler::open_ready(&mut state, SessionId(2));
+
+        // Then colony 1's colonists row is open.
+        assert!(
+            state.sessions.colonists_open.contains(&SessionId(1)),
+            "opening a hidden colonist should open its colonists row"
         );
     }
 }

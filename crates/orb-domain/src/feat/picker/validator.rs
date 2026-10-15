@@ -10,11 +10,11 @@ use crate::feat::picker::list::PickerItem;
 
 use wherror::Error;
 
-use crate::AppState;
 use crate::feat::picker::state::PickerKind;
-use crate::feat::sessions::state::{ProjectKind, SessionKind};
+use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem};
 use crate::feat::worktrees::state::{Verdict, users, verdict};
 use crate::ids::SessionId;
+use crate::{AppState, Focus};
 
 /// Why `<C-g> ,` can't open the Colonists picker.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -25,14 +25,19 @@ pub enum OpenColonistsError {
 }
 
 /// The colony `<C-g> ,` opens on: the shown session in a pane, else the
-/// sidebar's selected session (card or agent row).
+/// sidebar's selected session (card, agent row or colonists row).
 ///
 /// # Errors
 ///
 /// Returns [`OpenColonistsError::NotAColony`] when it isn't a colony.
 pub fn validate_open_colonists(state: &AppState) -> Result<SessionId, OpenColonistsError> {
-    state
-        .keyed_session()
+    let session = match (state.focus, state.sessions.cursor) {
+        (focus, Some(SidebarItem::Colonists(id))) if focus != Focus::Pane => {
+            state.sessions.session(id)
+        }
+        _ => state.keyed_session(),
+    };
+    session
         .filter(|session| session.kind == SessionKind::Colony)
         .map(|session| session.id)
         .ok_or(OpenColonistsError::NotAColony)

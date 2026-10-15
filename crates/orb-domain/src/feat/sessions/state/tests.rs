@@ -2156,3 +2156,482 @@ fn world_dirs_by_kind(#[case] kind: ProjectKind, #[case] expected: Option<WorldD
     // Then they're the folders its kind runs colonies in.
     assert_eq!(dirs, expected, "world folders for {kind:?}");
 }
+
+/// Colony 1 (agent 1) in shared world 1; its colonist 2 (agent 2) and
+/// colonist 3 of 2 (agent 3) in normal project 2. Agent `n` has
+/// `statuses[n - 1]`.
+fn colony_tree(statuses: [AgentStatus; 3]) -> Sessions {
+    let [one, two, three] = statuses;
+    let world = Project {
+        kind: ProjectKind::SharedWorld,
+        ..project(
+            1,
+            vec![Agent {
+                status: one,
+                ..agent(1, 1, 0)
+            }],
+        )
+    };
+    let repo = project(
+        2,
+        vec![
+            Agent {
+                status: two,
+                ..agent(2, 2, 0)
+            },
+            Agent {
+                status: three,
+                ..agent(3, 3, 0)
+            },
+        ],
+    );
+    let mut sessions = fill(Sessions {
+        projects: vec![world, repo],
+        ..Sessions::default()
+    });
+    for (child, parent) in [(2, 1), (3, 2)] {
+        sessions
+            .sessions
+            .iter_mut()
+            .filter(|session| session.id == SessionId(child))
+            .for_each(|session| session.parent = Some(SessionId(parent)));
+    }
+    sessions
+}
+
+/// [`colony_tree`] with every agent idle.
+fn idle_colony_tree() -> Sessions {
+    colony_tree([AgentStatus::Idle; 3])
+}
+
+#[rstest::rstest]
+fn colonists_are_sorted_pinned_then_newest() {
+    // Given colony 1 with colonists 2 (oldest), 3 (pinned) and 4 (newest).
+    let mut sessions = fill(Sessions {
+        projects: vec![project(
+            1,
+            vec![active(1, 0), active(2, 10), active(3, 20), active(4, 30)],
+        )],
+        ..Sessions::default()
+    });
+    sessions
+        .sessions
+        .iter_mut()
+        .filter(|session| session.id != SessionId(1))
+        .for_each(|session| session.parent = Some(SessionId(1)));
+    let sessions = pinning(sessions, &[(3, 40)]);
+
+    // When listing its colonists.
+    let order: Vec<i64> = sessions
+        .colonists(SessionId(1))
+        .iter()
+        .map(|session| session.id.0)
+        .collect();
+
+    // Then the pinned one leads, then the newest.
+    assert_eq!(
+        order,
+        vec![3, 4, 2],
+        "colonists go pinned, then newest first"
+    );
+}
+
+#[rstest::rstest]
+fn colony_status_is_the_most_urgent_under_it() {
+    // Given an idle colony, a working colonist and its colonist waiting
+    // for input.
+    let sessions = colony_tree([
+        AgentStatus::Idle,
+        AgentStatus::Working,
+        AgentStatus::NeedsInput,
+    ]);
+
+    // When reading the colony's status.
+    let status = sessions.status(SessionId(1)).map(|agent| agent.id);
+
+    // Then it is the waiting agent two levels down.
+    assert_eq!(
+        status,
+        Some(AgentId(3)),
+        "a colony's status is the most urgent agent under it"
+    );
+}
+
+#[rstest::rstest]
+#[case(AgentStatus::NeedsApproval, true)]
+#[case(AgentStatus::NeedsInput, true)]
+#[case(AgentStatus::Working, false)]
+#[case(AgentStatus::Failed, false)]
+#[case(AgentStatus::Idle, false)]
+fn stuck_reads_approval_or_input(#[case] status: AgentStatus, #[case] expected: bool) {
+    // Given session 1 whose one agent has `status`.
+    let sessions = holding(vec![with_status(1, status, false)], vec![session(1)]);
+
+    // When asking whether it's stuck.
+    let stuck = sessions.stuck(SessionId(1));
+
+    // Then only an approval or a question makes it stuck.
+    assert_eq!(stuck, expected, "{status:?} stuck should be {expected}");
+}
+
+#[rstest::rstest]
+fn colonist_of_a_settled_colony_is_top_level() {
+    // Given colony 1 settled with only itself.
+    let sessions = settling(idle_colony_tree(), &[(1, 10)]);
+
+    // When asking whether its colonist 2 is at the top level.
+    let top = sessions.top(SessionId(2));
+
+    // Then it is.
+    assert!(
+        top,
+        "a settled colony's colonist is lifted to the top level"
+    );
+}
+
+#[rstest::rstest]
+fn colonist_of_an_unlisted_parent_is_top_level() {
+    // Given the sidebar filtered to project 2, which holds colonist 2 but
+    // not its colony.
+    let sessions = Sessions {
+        filter: Some(ProjectId(2)),
+        ..idle_colony_tree()
+    };
+
+    // When asking whether colonist 2 is at the top level.
+    let top = sessions.top(SessionId(2));
+
+    // Then it is.
+    assert!(top, "a colonist whose parent the filter hides is top level");
+}
+
+#[rstest::rstest]
+#[case::colonist_with_one_agent(3, false, true)]
+#[case::colonist_with_two_agents(3, true, false)]
+#[case::colonist_with_colonists(2, false, false)]
+#[case::top_level(1, false, false)]
+fn hides_one_agent_needs_a_colonist_with_one_agent_and_no_colonists(
+    #[case] id: i64,
+    #[case] second_agent: bool,
+    #[case] expected: bool,
+) {
+    // Given the colony tree, colonist 3 with a second agent or not.
+    let mut sessions = idle_colony_tree();
+    if second_agent {
+        sessions
+            .projects
+            .iter_mut()
+            .filter(|project| project.id == ProjectId(2))
+            .for_each(|project| project.agents.push(agent(4, 3, 10)));
+    }
+    let layouts = layouts_for(&sessions.projects);
+
+    // When asking whether session `id` hides its one agent row.
+    let hides = sessions.hides_one_agent(SessionId(id), &layouts);
+
+    // Then only a colonist with one agent and no colonists does.
+    assert_eq!(hides, expected, "session {id} hides one agent: {expected}");
+}
+
+#[rstest::rstest]
+fn filter_lists_the_sessions_under_a_listed_one() {
+    // Given the sidebar filtered to world 1, which holds colony 1 but not
+    // its colonists.
+    let sessions = Sessions {
+        filter: Some(ProjectId(1)),
+        ..idle_colony_tree()
+    };
+
+    // When asking whether colonist 3, two levels down, is listed.
+    let listed = sessions.listed(SessionId(3));
+
+    // Then it is.
+    assert!(listed, "a session under a listed one is listed too");
+}
+
+/// Every sidebar row's item, in display order, agent rows included.
+fn tree_items(sessions: &Sessions) -> Vec<SidebarItem> {
+    sessions
+        .sidebar(&layouts_for(&sessions.projects))
+        .iter()
+        .map(SidebarRow::item)
+        .collect()
+}
+
+/// [`idle_colony_tree`] with the colonists rows of `open` open.
+fn opened(open: &[i64]) -> Sessions {
+    Sessions {
+        colonists_open: open.iter().copied().map(SessionId).collect(),
+        ..idle_colony_tree()
+    }
+}
+
+/// [`idle_colony_tree`] with colonist 3's agent titled "deep fix", and a
+/// search for "deep".
+fn deep_search() -> Sessions {
+    let mut sessions = idle_colony_tree();
+    sessions
+        .projects
+        .iter_mut()
+        .flat_map(|project| project.agents.iter_mut())
+        .filter(|agent| agent.id == AgentId(3))
+        .for_each(|agent| agent.title = Some("deep fix".to_owned()));
+    searching(sessions, "deep")
+}
+
+fn colonists_row(id: i64) -> SidebarItem {
+    SidebarItem::Colonists(SessionId(id))
+}
+
+#[rstest::rstest]
+fn colony_lists_its_agent_rows_then_a_folded_colonists_row() {
+    // Given the idle colony tree, every fold as at start.
+    let sessions = idle_colony_tree();
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then the colony's card, its agent row and its colonists row show,
+    // and none of its colonists.
+    assert_eq!(
+        rows,
+        vec![on(1), agent_row(1, 1), colonists_row(1)],
+        "a colonists row starts folded and agent rows open"
+    );
+}
+
+#[rstest::rstest]
+fn open_colonists_row_lists_its_colonists_under_it() {
+    // Given colony 1's colonists row open.
+    let sessions = opened(&[1]);
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then colonist 2 follows the row, with its agent row and its own
+    // folded colonists row.
+    assert_eq!(
+        rows,
+        vec![
+            on(1),
+            agent_row(1, 1),
+            colonists_row(1),
+            on(2),
+            agent_row(2, 2),
+            colonists_row(2),
+        ],
+        "an open colonists row lists its colonists"
+    );
+}
+
+#[rstest::rstest]
+fn stuck_colonist_shows_under_a_folded_colonists_row_with_path_lines() {
+    // Given colonist 3, two levels down, waiting for input, every
+    // colonists row folded.
+    let sessions = colony_tree([
+        AgentStatus::Idle,
+        AgentStatus::Idle,
+        AgentStatus::NeedsInput,
+    ]);
+
+    // When listing the sidebar's rows with whether each card is a path line.
+    let rows: Vec<(SidebarItem, bool)> = sessions
+        .sidebar(&layouts_for(&sessions.projects))
+        .iter()
+        .map(|row| match row {
+            SidebarRow::Card { path, .. } => (row.item(), *path),
+            _ => (row.item(), false),
+        })
+        .collect();
+
+    // Then colonist 2 shows as a path line and colonist 3 as a card, with
+    // no agent or colonists rows of theirs.
+    assert_eq!(
+        rows,
+        vec![
+            (on(1), false),
+            (agent_row(1, 1), false),
+            (colonists_row(1), false),
+            (on(2), true),
+            (on(3), false),
+        ],
+        "a stuck colonist shows through the fold, its parents as path lines"
+    );
+}
+
+#[rstest::rstest]
+fn one_agent_colonist_lists_no_agent_row() {
+    // Given every colonists row open; colonist 3 runs one agent and has
+    // no colonists.
+    let sessions = opened(&[1, 2]);
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then colonist 3's card ends the list, without its agent row.
+    assert_eq!(
+        rows,
+        vec![
+            on(1),
+            agent_row(1, 1),
+            colonists_row(1),
+            on(2),
+            agent_row(2, 2),
+            colonists_row(2),
+            on(3),
+        ],
+        "a one-agent colonist lists no agent row"
+    );
+}
+
+#[rstest::rstest]
+fn search_lists_a_deep_colonist_under_its_open_path() {
+    // Given a search matching only colonist 3, with every colonists row
+    // folded.
+    let sessions = deep_search();
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then its ancestors and their colonists rows show as its path,
+    // without agent rows.
+    assert_eq!(
+        rows,
+        vec![on(1), colonists_row(1), on(2), colonists_row(2), on(3)],
+        "a search opens the path to a deep match"
+    );
+}
+
+#[rstest::rstest]
+fn search_steps_only_through_matching_rows() {
+    // Given a search matching only colonist 3, two levels down.
+    let mut sessions = deep_search();
+
+    // When selecting the first match.
+    sessions.select_first_match(&layouts_for(&sessions.projects));
+
+    // Then the cursor lands on the match, past its ancestors and
+    // colonists rows.
+    assert_eq!(
+        sessions.cursor,
+        Some(on(3)),
+        "search stops skip the path to a match"
+    );
+}
+
+#[rstest::rstest]
+fn filter_to_a_colonists_project_lists_it_at_the_top_level() {
+    // Given the sidebar filtered to project 2, which holds colonists 2 and
+    // 3 but not their colony.
+    let sessions = Sessions {
+        filter: Some(ProjectId(2)),
+        ..idle_colony_tree()
+    };
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then colonist 2 leads at the top level, with 3 under its folded row.
+    assert_eq!(
+        rows,
+        vec![on(2), agent_row(2, 2), colonists_row(2)],
+        "a filter to a colonist's project lifts it to the top level"
+    );
+}
+
+#[rstest::rstest]
+fn filter_to_a_world_lists_its_colonies_colonists() {
+    // Given the sidebar filtered to world 1, with every colonists row open.
+    let sessions = Sessions {
+        filter: Some(ProjectId(1)),
+        ..opened(&[1, 2])
+    };
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then the colony lists its colonists from project 2 under it.
+    assert_eq!(
+        rows,
+        vec![
+            on(1),
+            agent_row(1, 1),
+            colonists_row(1),
+            on(2),
+            agent_row(2, 2),
+            colonists_row(2),
+            on(3),
+        ],
+        "a filter to a world lists its colonies' colonists"
+    );
+}
+
+#[rstest::rstest]
+fn settled_colonys_live_colonists_show_at_the_top_level() {
+    // Given colony 1 settled, the shelf closed.
+    let sessions = settling(idle_colony_tree(), &[(1, 10)]);
+
+    // When listing the sidebar.
+    let rows = tree_items(&sessions);
+
+    // Then colonist 2 leads at the top level, before the shelf.
+    assert_eq!(
+        rows,
+        vec![
+            on(2),
+            agent_row(2, 2),
+            colonists_row(2),
+            SidebarItem::SettledShelf,
+        ],
+        "a settled colony's live colonists show at the top level"
+    );
+}
+
+#[rstest::rstest]
+fn agent_row_above_a_colonists_row_is_not_last() {
+    // Given colony 1 with one agent and a colonists row.
+    let sessions = idle_colony_tree();
+
+    // When reading whether its agent row is marked last.
+    let lasts: Vec<bool> = sessions
+        .sidebar(&layouts_for(&sessions.projects))
+        .iter()
+        .filter_map(|row| match row {
+            SidebarRow::Agent { last, .. } => Some(*last),
+            _ => None,
+        })
+        .collect();
+
+    // Then it isn't: the colonists row comes after it.
+    assert_eq!(
+        lasts,
+        vec![false],
+        "the colonists row, not the agent row, is the card's last child"
+    );
+}
+
+#[rstest::rstest]
+fn row_neighbour_skips_colonists_rows() {
+    // Given every colonists row open and colonist 2's card folded, so its
+    // colonists row follows its card.
+    let mut sessions = opened(&[1, 2]);
+    sessions.folded.insert(SessionId(2));
+
+    // When finding where the cursor goes after deleting colonist 2.
+    let next = sessions.row_neighbour(on(2), &layouts_for(&sessions.projects));
+
+    // Then it is colonist 3's card, past the colonists row.
+    assert_eq!(next, Some(on(3)), "a colonists row is no delete landing");
+}
+
+#[rstest::rstest]
+fn jumpable_skips_a_colonists_row() {
+    // Given the idle colony tree.
+    let sessions = idle_colony_tree();
+
+    // When asking whether colony 1's colonists row is jumpable.
+    let jumpable = sessions.jumpable(colonists_row(1), &layouts_for(&sessions.projects));
+
+    // Then it isn't.
+    assert!(!jumpable, "a colonists row is no jump stop");
+}

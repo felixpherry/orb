@@ -77,11 +77,12 @@ mod tests {
     use crate::command::SessionsCommand;
     use crate::feat::jumps::state::JumpList;
     use crate::feat::picker::intent::picked;
-    use crate::feat::sessions::state::{AgentStatus, sessions_for};
+    use crate::feat::sessions::state::{AgentStatus, SidebarItem, sessions_for};
     use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, agent_row, answer_yes, close_agent_1s_pane, jumping, on_agent, picking_agent_1,
-        shown_focus, state_with, two_agents, two_agents_from_sidebar, with_projects,
+        agent, agent_row, answer_yes, close_agent_1s_pane, colony_with_colonists, jumping,
+        on_agent, picking_agent_1, shown_focus, state_with, two_agents, two_agents_from_sidebar,
+        with_projects,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -539,6 +540,26 @@ mod tests {
             state.sessions.cursor,
             Some(on_agent(1)),
             "a jump should hover its target"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_to_a_one_agent_colonists_agent_lands_on_its_card() {
+        // Given the agent of colonist 3 (one agent, no colonists) listed
+        // before the cursor's colony 1.
+        let mut state = AppState {
+            jumps: JumpList::from_saved(vec![agent_row(3, 3)]),
+            ..colony_with_colonists([AgentStatus::Idle; 3])
+        };
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the cursor is on colonist 3's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(3))),
+            "a jump to a hidden one-agent row should land on its card"
         );
     }
 }

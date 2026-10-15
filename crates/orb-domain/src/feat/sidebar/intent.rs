@@ -301,7 +301,7 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
 #[cfg(test)]
 mod tests {
     use crate::command::SessionsCommand;
-    use crate::feat::sessions::state::{Agent, AgentStatus, SidebarItem};
+    use crate::feat::sessions::state::{Agent, AgentStatus, SessionKind, SidebarItem};
     use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{AgentId, PaneId, SessionId};
     use crate::intent_handler::test_support::{
@@ -787,6 +787,60 @@ mod tests {
             state.sessions.active(),
             Some(SessionId(1)),
             "a click on a row should only move the hover"
+        );
+    }
+
+    /// [`three_titles`]' sessions as colony 1, its colonist 2 and 2's
+    /// colonist 3 ("fix logout"), every colonists row folded, with a search
+    /// for "logout" typed from colony 1.
+    fn searching_a_deep_colonist() -> AppState {
+        let mut state = three_titles();
+        for session in &mut state.sessions.sessions {
+            match session.id.0 {
+                1 => session.kind = SessionKind::Colony,
+                id => session.parent = Some(SessionId(id - 1)),
+            }
+        }
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(1)));
+        IntentHandler::handle(&Intent::Search, &mut state);
+        for ch in "logout".chars() {
+            IntentHandler::handle(&Intent::PickerInput(ch), &mut state);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_deep_search_match_opens_its_colonists_rows() {
+        // Given a search whose match is colonist 3, under two folded
+        // colonists rows.
+        let mut state = searching_a_deep_colonist();
+
+        // When ending the search with `⏎`.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the colonists rows of 1 and 2 are open.
+        assert_eq!(
+            state.sessions.colonists_open,
+            [SessionId(1), SessionId(2)].into(),
+            "⏎ on a deep match should open the colonists rows above it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn esc_after_searching_a_deep_colonist_keeps_its_colonists_row_folded() {
+        // Given a search whose match is colonist 3, under two folded
+        // colonists rows.
+        let mut state = searching_a_deep_colonist();
+
+        // When ending the search with `Esc`.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then every colonists row stays folded.
+        assert!(
+            state.sessions.colonists_open.is_empty(),
+            "Esc should leave the colonists rows folded, got {:?}",
+            state.sessions.colonists_open
         );
     }
 }
