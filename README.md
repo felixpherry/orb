@@ -89,7 +89,8 @@ The recording comes from a scripted environment of dummy repos and stand-in agen
 - Agents you start in any pane, once `orb integration install` has run, show under their session's card with their status (working, needs approval, needs input, idle, done), their title and a mark: `✳` for Claude Code, `π` for pi.
 - Settling a session (`s`) kills every pane and moves the card to a collapsible Settled shelf. `⏎` brings the tabs and splits back and types `claude --resume` or `pi --session-id` into each agent's pane.
 - A new session can get its own worktree under `~/.orb/worktrees/`, made from a freshly fetched base branch. Its `orb/<hex>` branch is renamed after the agent's title once the first turn ends. Every hour, and at start, orb prunes worktrees that nothing uses, or whose sessions were all settled at least 3 days ago, keeping their branches and skipping any with uncommitted changes. Resuming a session whose worktree was pruned recreates it on its branch.
-- Research and Learn sessions (`<C-g> g r`, `<C-g> g l`) get a named folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/`. orb writes a default template there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, a learning kit with an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files and an epub ingest script. The kits' subagents work under Claude Code and pi. Under pi they need pi's example `subagent` extension, installed once at user level (orb doesn't install it; the commands are in `docs/research.md` §20). If you use pi-amplike, that install also changes its `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`, because amplike has its own `subagent` tool and pi won't start with both.
+- Worlds and colonies. `<C-g> c` picks a world and starts a colony, a session for an orchestrator agent. In a shared world every colony runs in the world's folder; in a fresh world each gets its own copy of the world's folder, without `.git`, under `~/.orb/worlds/<world>/`. `<C-g> C` lists the worlds, adds a folder as a shared or fresh world, and removes one. Research and Learn are built-in fresh worlds whose colonies get a named folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/`. orb writes a default template there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, a learning kit with an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files and an epub ingest script. The kits' subagents work under Claude Code and pi. Under pi they need pi's example `subagent` extension, installed once at user level (orb doesn't install it; the commands are in `docs/research.md` §20). If you use pi-amplike, that install also changes its `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`, because amplike has its own `subagent` tool and pi won't start with both.
+- A session an agent makes with `orb session create` from a colony's pane, or a colonist's, is its colonist: it hangs under that session in the sidebar behind a `colonists` row, folded at start, with one status dot per colonist and their count. A colonist waiting for approval or input shows through the fold. Settling or deleting a colony asks whether to take its colonists too. `<C-g> ,` on a colony lists its colonists' agents, and `c` in `<C-g> Space` shows or hides colonists' agents.
 - `<C-g> i` opens an Incognito session in `/tmp/orb-incognito/`, for a quick question outside any project. It settles, deletes, renames and resumes like any other session.
 - `/` searches session names and agent titles, settled ones included, `<C-g> f` narrows the sidebar to one project, and `<C-[>`/`<C-]>` move back and forward through a jump list. `<C-g> Space` opens a session picker, newest chat first, with a preview of each chat. `<C-g> /` searches what was said in every agent conversation, your prompts and the agents' replies, newest message first.
 - Each pane keeps 10 000 lines of history for the wheel, and dragging over text copies it to the clipboard.
@@ -119,10 +120,12 @@ The recording comes from a scripted environment of dummy repos and stand-in agen
 | `<C-g> Space` | Session picker (`<C-s>` shows or hides settled sessions) |
 | `<C-g> n` | New session |
 | `<C-g> a` | Add a project |
-| `<C-g> f` | In the sidebar, filter by project, with Research, Learn and Incognito right after All projects (`<C-x>` removes one) |
+| `<C-g> f` | In the sidebar, filter by project, with the worlds and Incognito right after All projects |
 | `<C-g> i` | Incognito session |
-| `<C-g> w` / `<C-g> b` | Workspace / branch picker (not on Incognito, Research or Learn sessions) |
-| `<C-g> g r` / `<C-g> g l` | New Research / Learn session |
+| `<C-g> w` / `<C-g> b` | Workspace / branch picker (not on Incognito sessions or colonies) |
+| `<C-g> c` | New colony: pick a world, then name it |
+| `<C-g> C` | Worlds: add a folder as a shared or fresh world, remove one, or start a colony |
+| `<C-g> ,` | On a colony, list its colonists' agents |
 | `<C-g> /` | Search every prompt and reply, with the exchange around the match (`⏎` jumps to its session) |
 | `<C-g> W` | Worktree picker: every worktree under `~/.orb/worktrees/`, with its size, changes, users and when the sweep will prune it (`<C-x>` deletes one, changes included, after a `No`/`Yes` confirm; the branch stays) |
 | `<C-g> <C-g>` | Send Ctrl g to the focused pane |
@@ -131,14 +134,14 @@ In the sidebar:
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move (session cards and their agent rows) |
-| `⏎` | Focus the session's panes, resuming it if it was settled. On an agent row: show its tab with the keys in its pane |
+| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move (session cards, their agent rows and colonists rows) |
+| `⏎` | Focus the session's panes, resuming it if it was settled. On an agent row: show its tab with the keys in its pane. On a colonists row: show or fold its colonists |
 | `p` | Pin or unpin (sessions only) |
-| `s` | Settle (after a `No`/`Yes` confirm) or un-settle (sessions only) |
-| `d` | Delete the session after a `No`/`Yes` confirm: its panes are killed, transcripts stay. On an agent row: close its pane after a `No`/`Yes` confirm |
+| `s` | Settle (after a `No`/`Yes` confirm, or `No` / `Colony only` / `With colonists` on a session with colonists) or un-settle (sessions only) |
+| `d` | Delete the session after the same confirm as `s`: its panes are killed, transcripts stay. On an agent row: close its pane after a `No`/`Yes` confirm |
 | `r` | Rename the session, or name the agent's pane on an agent row |
 | `/` or `i` | Search |
-| `l` / `h` | Show / fold a card's agent rows (`h` on an agent row folds its card), or open / close the Settled shelf |
+| `l` / `h` | Show / fold a card's agent rows or a colonists row's colonists (`h` on an agent row folds its card), or open / close the Settled shelf |
 
 `<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-g> l` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
