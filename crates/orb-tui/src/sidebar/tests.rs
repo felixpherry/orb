@@ -5,7 +5,6 @@ use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::{SessionFilter, session_items};
 use orb_domain::feat::zmx::zmx_service::ZmxSession;
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use orb_domain::TextInput;
@@ -22,17 +21,14 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, CHILD_GUIDE, COMMENT,
-    COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN,
-    GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_CHILD_GUIDE, LAST_GUIDE, MAGENTA,
-    ORANGE, PIN, PURPLE, RED, STOPPED_ICON, SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour,
-    monogram, render, working_label,
+    APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, COMMENT, COMPLETED_ICON, CYAN,
+    DARK3, FAILED_ICON, FG, FG_DARK, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN,
+    GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED,
+    STOPPED_ICON, SidebarScroll, USERS, VISUAL, YELLOW, ago_label, badge_colour, monogram, render,
+    working_label,
 };
 use crate::mouse::{Clicks, HitMap, MouseRoute};
 use crate::test_support::{layouts_for, sessions_for};
-
-/// The home directory the sidebar shortens folder paths against.
-const HOME: &str = "/Users/me";
 
 fn at(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -136,7 +132,6 @@ fn render_sized(
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         now,
         buf.area,
         &mut buf,
@@ -147,7 +142,7 @@ fn render_sized(
 }
 
 /// Draws a 32-column sidebar `height` lines tall at `now`. The list's
-/// first node takes lines 3 to 5, and its right edge is column 30.
+/// first card takes lines 3 and 4, and its right edge is column 30.
 fn draw(sessions: &Sessions, now: SystemTime, height: u16) -> Buffer {
     render_sized(sessions, now, 32, height).0
 }
@@ -166,7 +161,6 @@ fn draw_attached(sessions: &Sessions, attached: &[i64], now: SystemTime, height:
         &attached,
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         now,
         buf.area,
         &mut buf,
@@ -373,20 +367,208 @@ fn count_leaves_out_colonists_rows_and_path_lines() {
 
 #[rstest::rstest]
 fn colonists_row_and_path_line_take_one_line_each() {
-    // Given card 1 (lines 3 to 5) and its agent row (line 6), then the
+    // Given card 1 (lines 3 and 4) and its agent row (line 5), then the
     // colonists row, path line 2 and card 3.
     let sessions = stuck_tree();
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 20);
 
-    // Then the colonists row is line 7, the path line 8 and card 3 starts on 9.
-    let shown = [7, 8, 9].map(|y| line(&buf, y));
+    // Then the colonists row is line 6, the path line 7 and card 3 starts on 8.
+    let shown = [6, 7, 8].map(|y| line(&buf, y));
     assert!(
         shown[0].contains("colonists")
-            && shown[1].contains("› Agent 2")
+            && shown[1].contains(&format!("{FOLD_CLOSED} Agent 2"))
             && shown[2].contains("Agent 3"),
-        "lines 7 to 9 were {shown:?}"
+        "lines 6 to 8 were {shown:?}"
+    );
+}
+
+/// Session 1, a colony in a shared world, with `count` idle colonists from
+/// session 2 on, each running its own agent; its colonists row is folded.
+fn colony_of(count: i64) -> Sessions {
+    let mut sessions = sessions(
+        (1..=count + 1)
+            .map(|id| agent(id, AgentStatus::Idle))
+            .collect(),
+    );
+    for session in &mut sessions.sessions {
+        match session.id {
+            SessionId(1) => session.kind = SessionKind::Colony,
+            _ => session.parent = Some(SessionId(1)),
+        }
+    }
+    if let Some(project) = sessions.projects.first_mut() {
+        project.kind = ProjectKind::SharedWorld;
+    }
+    sessions
+}
+
+#[rstest::rstest]
+fn colony_status_icon_is_the_most_urgent_under_it() {
+    // Given idle card 1 whose colonist's colonist 3 waits for an approval.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let buf = draw(&sessions, at(1000), 20);
+
+    // Then card 1's status icon is the approval icon.
+    assert_eq!(
+        glyph(&buf, 1, 3),
+        Some((APPROVAL_ICON.to_owned(), YELLOW)),
+        "line was '{}'",
+        line(&buf, 3)
+    );
+}
+
+#[rstest::rstest]
+fn colonists_row_starts_with_the_users_icon() {
+    // Given card 1 with a folded colonists row on line 6.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let row = line(&draw(&sessions, at(1000), 20), 6);
+
+    // Then the row hangs off the card's second line with the users icon.
+    assert!(
+        row.starts_with(&format!("   └╴{USERS} colonists")),
+        "line was '{row}'"
+    );
+}
+
+#[rstest::rstest]
+fn colonists_row_shows_one_dot_per_colonist_then_the_count() {
+    // Given a colony with three idle colonists, its colonists row folded.
+    let sessions = colony_of(3);
+
+    // When rendering the sidebar.
+    let row = line(&draw(&sessions, at(1000), 20), 6);
+
+    // Then the row ends with three packed idle dots, the count and `›`.
+    assert!(
+        row.trim_end().ends_with(&format!(
+            "{IDLE_ICON}{IDLE_ICON}{IDLE_ICON} 3 {FOLD_CLOSED}"
+        )),
+        "line was '{row}'"
+    );
+}
+
+#[rstest::rstest]
+fn colonists_row_dot_counts_its_colonists_own_colonists() {
+    // Given card 1's idle colonist 2, whose colonist 3 waits for an approval.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let buf = draw(&sessions, at(1000), 20);
+
+    // Then colonist 2's dot, before ` 1 ›` on the right edge, is the
+    // approval icon.
+    assert_eq!(
+        glyph(&buf, 26, 6),
+        Some((APPROVAL_ICON.to_owned(), YELLOW)),
+        "line was '{}'",
+        line(&buf, 6)
+    );
+}
+
+#[rstest::rstest]
+fn colonists_row_counts_colonists_past_eight() {
+    // Given a colony with ten idle colonists.
+    let sessions = colony_of(10);
+
+    // When rendering the sidebar.
+    let row = line(&draw(&sessions, at(1000), 20), 6);
+
+    // Then eight dots are followed by the two past eight and the count.
+    assert!(
+        row.contains(&format!("{IDLE_ICON}+2 10 {FOLD_CLOSED}")),
+        "line was '{row}'"
+    );
+}
+
+#[rstest::rstest]
+fn open_colonists_row_ends_with_the_down_chevron() {
+    // Given a colony with one colonist, its colonists row open.
+    let mut sessions = colony_of(1);
+    sessions.colonists_open.insert(SessionId(1));
+
+    // When rendering the sidebar.
+    let row = line(&draw(&sessions, at(1000), 20), 6);
+
+    // Then the row ends with the down chevron.
+    assert!(row.trim_end().ends_with(FOLD_OPEN), "line was '{row}'");
+}
+
+#[rstest::rstest]
+fn path_line_is_a_dim_chevron_and_title() {
+    // Given path line 2 on line 7, on the way to stuck colonist 3.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let buf = draw(&sessions, at(1000), 20);
+
+    // Then its guides are followed by a dark `›` and a dim title.
+    assert_eq!(
+        (glyph(&buf, 9, 7), glyph(&buf, 11, 7)),
+        (
+            Some((FOLD_CLOSED.to_owned(), DARK3)),
+            Some(("A".to_owned(), COMMENT))
+        ),
+        "line was '{}'",
+        line(&buf, 7)
+    );
+}
+
+#[rstest::rstest]
+#[case::agent_row(5, 3, "├")]
+#[case::path_line(7, 7, "└")]
+#[case::colonists_card(8, 11, "└")]
+fn rows_sit_four_columns_in_per_level(#[case] y: u16, #[case] x: u16, #[case] connector: &str) {
+    // Given card 1's agent row (level 1), path line 2 (level 2) and card 3
+    // (level 3).
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let buf = draw(&sessions, at(1000), 20);
+
+    // Then the row's connector starts 4 columns further in per level.
+    assert_eq!(
+        buf.cell((x, y)).map(Cell::symbol),
+        Some(connector),
+        "line was '{}'",
+        line(&buf, y.into())
+    );
+}
+
+#[rstest::rstest]
+fn non_last_colonists_second_line_carries_the_guide_down() {
+    // Given a colony with two colonists, its colonists row open: the first
+    // colonist's card on lines 7 and 8.
+    let mut sessions = colony_of(2);
+    sessions.colonists_open.insert(SessionId(1));
+
+    // When rendering the sidebar.
+    let second = line(&draw(&sessions, at(1000), 20), 8);
+
+    // Then its second line carries `│` down to the next colonist.
+    assert!(second.starts_with("       │ └╴"), "line was '{second}'");
+}
+
+#[rstest::rstest]
+fn one_agent_colonist_shows_its_icon_without_a_chevron() {
+    // Given colonist 3 with one agent, waiting for an approval, its card on
+    // lines 8 and 9.
+    let sessions = stuck_tree();
+
+    // When rendering the sidebar.
+    let second = line(&draw(&sessions, at(1000), 20), 9);
+
+    // Then its second line ends with the agent's icon and no chevron.
+    assert!(
+        second.trim_end().ends_with(APPROVAL_ICON)
+            && !second.contains(FOLD_OPEN)
+            && !second.contains(FOLD_CLOSED),
+        "line was '{second}'"
     );
 }
 
@@ -468,7 +650,6 @@ fn search_cursor_is_after_the_typed_text() {
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -495,7 +676,6 @@ fn hit_map_maps_the_search_text_to_its_graphemes() {
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -562,7 +742,6 @@ fn long_search_cursor_is_after_the_texts_end() {
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -764,7 +943,7 @@ fn untitled_agent_row_is_a_new_agent() {
     }]);
 
     // When rendering the sidebar.
-    let row = line(&draw(&sessions, at(1000), 8), 6);
+    let row = line(&draw(&sessions, at(1000), 8), 5);
 
     // Then its agent row says "New agent".
     assert!(row.contains(" New agent"), "line was '{row}'");
@@ -796,57 +975,24 @@ fn node_second_line_shows_the_project() {
     // When rendering the sidebar.
     let place = line(&draw(&sessions, at(1000), 8), 4);
 
-    // Then its second line is a guide, orb's folder and name, and no
-    // status word.
-    assert_eq!(
-        place.trim_end(),
-        format!(" ├╴{FOLDER} orb"),
-        "the node's second line"
-    );
+    // Then its second line closes the card's tree on orb's name, with no
+    // folder.
+    assert!(place.starts_with(" └╴ orb "), "line was '{place}'");
 }
 
 #[rstest::rstest]
-fn project_folder_takes_the_badge_colour() {
-    // Given an agent in orb, whose badge is rose-400.
+fn project_name_is_fg_dark() {
+    // Given an agent in orb.
     let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
 
-    // Then the folder on its second line is rose.
+    // Then orb's name on its second line is in fg_dark.
     assert_eq!(
-        glyph(&buf, 3, 4),
-        Some((FOLDER.to_owned(), Color::Rgb(0xfb, 0x71, 0x85))),
-        "orb's folder"
-    );
-}
-
-#[rstest::rstest]
-#[case(AgentStatus::NeedsApproval, false, "approval")]
-#[case(AgentStatus::NeedsInput, false, "input")]
-#[case(AgentStatus::Working, false, "working")]
-#[case(AgentStatus::Failed, false, "failed")]
-#[case(AgentStatus::Gone, false, "gone")]
-#[case(AgentStatus::Idle, true, "done")]
-#[case(AgentStatus::Stopped, false, "stopped")]
-fn node_second_line_ends_with_the_status_word(
-    #[case] status: AgentStatus,
-    #[case] unseen: bool,
-    #[case] word: &str,
-) {
-    // Given an agent in `status`.
-    let sessions = sessions(vec![Agent {
-        unseen,
-        ..agent(1, status)
-    }]);
-
-    // When rendering the sidebar.
-    let place = line(&draw(&sessions, at(1000), 8), 4);
-
-    // Then its second line ends with the status's word.
-    assert!(
-        place.trim_end().ends_with(&format!(" {word}")),
-        "line was '{place}'"
+        glyph(&buf, 4, 4),
+        Some(("o".to_owned(), FG_DARK)),
+        "orb's name"
     );
 }
 
@@ -860,7 +1006,6 @@ fn draw_with(sessions: &Sessions, harnesses: &[HarnessInfo]) -> Buffer {
         &HashSet::new(),
         harnesses,
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -887,30 +1032,10 @@ fn untagged_harness_shows_no_tag() {
     // When rendering the sidebar.
     let place = line(&draw_with(&sessions, &[info(), pi_like()]), 4);
 
-    // Then its second line ends `working` with only spaces before it.
-    assert!(
-        place.trim_end().ends_with("   working"),
-        "line was '{place}'"
-    );
-}
-
-#[rstest::rstest]
-fn node_third_line_shows_the_branch() {
-    // Given an agent on `main`.
-    let sessions = sessions(vec![Agent {
-        branch: Some("main".to_owned()),
-        ..agent(1, AgentStatus::Idle)
-    }]);
-
-    // When rendering the sidebar.
-    let footer = line(&draw(&sessions, at(1000), 8), 5);
-
-    // Then its third line closes the card's tree on the branch, its agent
-    // row hanging below.
-    assert!(
-        footer.starts_with(&format!(" └╴{BRANCH} main ")),
-        "line was '{footer}'"
-    );
+    // Then its second line holds only the guide, the project, the agent's
+    // spinner and the chevron: no tag.
+    let words: Vec<&str> = place.split_whitespace().collect();
+    assert_eq!(words, ["└╴", "orb", "⠋", FOLD_OPEN], "line was '{place}'");
 }
 
 /// The line naming the Settled shelf.
@@ -1105,14 +1230,14 @@ fn selected_node_other_lines_keep_the_sidebar_background() {
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
 
-    // Then its second and third lines keep the dark background.
-    let backgrounds: Vec<_> = [4, 5]
+    // Then its second line keeps the dark background.
+    let backgrounds: Vec<_> = [4]
         .into_iter()
         .map(|y| buf.cell((0, y)).map(|cell| cell.bg))
         .collect();
     assert_eq!(
         backgrounds,
-        vec![Some(BG_DARK); 2],
+        vec![Some(BG_DARK); 1],
         "the node's other lines"
     );
 }
@@ -1150,7 +1275,7 @@ fn render_reports_the_list_height_and_each_rows_height() {
         layout,
         SidebarLayout {
             rows: 7,
-            heights: vec![3, 1, 3, 1, 1],
+            heights: vec![2, 1, 2, 1, 1],
         },
         "the layout should be the list height and one height per row"
     );
@@ -1172,8 +1297,8 @@ fn sidebar_scrolls_to_show_the_whole_selected_node() {
     // When rendering the sidebar.
     let (_, selected_y, _) = render_sized(&sessions, at(1000), 32, 8);
 
-    // Then its card's three lines fill the last three lines.
-    assert_eq!(selected_y, Some(5), "the selected node's first line");
+    // Then its card's two lines fill the last two lines.
+    assert_eq!(selected_y, Some(6), "the selected node's first line");
 }
 
 /// `active` idle agents, 1 to `active`, and the agents `settled_ids`
@@ -1211,10 +1336,10 @@ fn selected_node_stays_whole_above_the_held_shelf_header(#[case] selected: i64) 
     // When rendering the sidebar.
     let (buf, selected_y, _) = render_sized(&sessions, at(1000), 32, 10);
 
-    // Then the card fills lines 6 to 8, right above the header's line.
+    // Then the card fills lines 7 and 8, right above the header's line.
     assert_eq!(
         (selected_y, line(&buf, 9).contains(" Settled ")),
-        (Some(6), true),
+        (Some(7), true),
         "agent {selected}'s first line, and the header on the last"
     );
 }
@@ -1304,10 +1429,10 @@ fn session_card_lists_one_row_per_agent_pane() {
     // When drawing the sidebar.
     let lines = lines(&draw(&sessions, at(1000), 12));
 
-    // Then the card's fourth and fifth lines are the agents.
+    // Then the two lines under the card are the agents.
     assert!(
-        lines.get(6).is_some_and(|line| line.contains("Agent 1"))
-            && lines.get(7).is_some_and(|line| line.contains("Agent 2")),
+        lines.get(5).is_some_and(|line| line.contains("Agent 1"))
+            && lines.get(6).is_some_and(|line| line.contains("Agent 2")),
         "lines were {lines:#?}"
     );
 }
@@ -1329,9 +1454,9 @@ fn agent_row_ends_with_its_harness_mark() {
 
     // Then the agent row ends with π.
     assert!(
-        line(&buf, 6).trim_end().ends_with('π'),
+        line(&buf, 5).trim_end().ends_with('π'),
         "line was '{}'",
-        line(&buf, 6)
+        line(&buf, 5)
     );
 }
 
@@ -1346,10 +1471,10 @@ fn session_card_shows_its_most_urgent_agents_status() {
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then the card shows the approval icon and word.
-    assert!(
-        glyph(&buf, 1, 3) == Some((APPROVAL_ICON.to_owned(), YELLOW))
-            && line(&buf, 4).trim_end().ends_with("approval"),
+    // Then the card shows the approval icon.
+    assert_eq!(
+        glyph(&buf, 1, 3),
+        Some((APPROVAL_ICON.to_owned(), YELLOW)),
         "lines were {:#?}",
         lines(&buf)
     );
@@ -1400,9 +1525,15 @@ fn settled_session_is_one_line() {
 }
 
 #[rstest::rstest]
-#[case::research(ProjectKind::Research, BLUE2)]
-#[case::learn(ProjectKind::Learn, PURPLE)]
-fn own_folder_session_shows_its_kind_icon(#[case] kind: ProjectKind, #[case] colour: Color) {
+#[case::research(ProjectKind::Research, "\u{f0c3}", BLUE2)]
+#[case::learn(ProjectKind::Learn, "\u{f02d}", PURPLE)]
+#[case::shared(ProjectKind::SharedWorld, "\u{f0ac}", GREEN1)]
+#[case::fresh(ProjectKind::FreshWorld, "\u{f0c5}", CYAN)]
+fn colony_second_line_shows_its_worlds_icon_in_its_colour(
+    #[case] kind: ProjectKind,
+    #[case] icon: &str,
+    #[case] colour: Color,
+) {
     // Given a colony in a `kind` project.
     let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
     if let Some(session) = sessions.sessions.first_mut() {
@@ -1415,13 +1546,81 @@ fn own_folder_session_shows_its_kind_icon(#[case] kind: ProjectKind, #[case] col
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then the second line's icon, after its guide, is the kind's in its
+    // Then the second line's icon, after its guide, is the world's in its
     // colour.
-    let icon = glyph(&buf, 3, 4);
     assert_eq!(
-        icon.map(|(_, fg)| fg),
-        Some(colour),
-        "the {kind:?} icon's colour on '{}'",
+        glyph(&buf, 3, 4),
+        Some((icon.to_owned(), colour)),
+        "the {kind:?} icon on '{}'",
+        line(&buf, 4)
+    );
+}
+
+#[rstest::rstest]
+fn card_second_line_is_the_project_then_its_agent_icons() {
+    // Given top-level session 1 with one idle agent.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
+
+    // When drawing the sidebar.
+    let second = line(&draw(&sessions, at(1000), 12), 4);
+
+    // Then its second line names the project and ends with the agent's icon
+    // and the down chevron.
+    assert!(
+        second.starts_with(" └╴ orb")
+            && second
+                .trim_end()
+                .ends_with(&format!("{IDLE_ICON} {FOLD_OPEN}")),
+        "line was '{second}'"
+    );
+}
+
+#[rstest::rstest]
+#[case::shared(ProjectKind::SharedWorld, GREEN1)]
+#[case::research(ProjectKind::Research, BLUE2)]
+#[case::learn(ProjectKind::Learn, PURPLE)]
+#[case::fresh(ProjectKind::FreshWorld, CYAN)]
+fn colony_second_line_names_its_world_in_its_colour(
+    #[case] kind: ProjectKind,
+    #[case] colour: Color,
+) {
+    // Given a colony in a `kind` world named orb.
+    let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
+    if let Some(session) = sessions.sessions.first_mut() {
+        session.kind = SessionKind::Colony;
+    }
+    if let Some(project) = sessions.projects.first_mut() {
+        project.kind = kind;
+    }
+
+    // When drawing the sidebar.
+    let buf = draw(&sessions, at(1000), 12);
+
+    // Then the world's name, after its icon, is in the world's colour.
+    assert_eq!(
+        glyph(&buf, 5, 4),
+        Some(("o".to_owned(), colour)),
+        "the {kind:?} name on '{}'",
+        line(&buf, 4)
+    );
+}
+
+#[rstest::rstest]
+fn plain_session_in_a_world_shows_its_project_plainly() {
+    // Given a plain session in a shared world named orb.
+    let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
+    if let Some(project) = sessions.projects.first_mut() {
+        project.kind = ProjectKind::SharedWorld;
+    }
+
+    // When drawing the sidebar.
+    let buf = draw(&sessions, at(1000), 12);
+
+    // Then its second line names the project with no icon, in fg dark.
+    assert!(
+        line(&buf, 4).starts_with(" └╴ orb")
+            && glyph(&buf, 4, 4).is_some_and(|(_, colour)| colour == FG_DARK),
+        "line was '{}'",
         line(&buf, 4)
     );
 }
@@ -1453,13 +1652,13 @@ fn open_card_shows_a_status_icon_per_agent_then_the_down_chevron() {
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its third line ends with two stop icons and the down chevron.
+    // Then its second line ends with two stop icons and the down chevron.
     assert!(
-        line(&buf, 5)
+        line(&buf, 4)
             .trim_end()
             .ends_with(&format!("{STOPPED_ICON} {STOPPED_ICON} {FOLD_OPEN}")),
         "line was '{}'",
-        line(&buf, 5)
+        line(&buf, 4)
     );
 }
 
@@ -1471,13 +1670,13 @@ fn folded_card_shows_a_status_icon_per_agent_then_the_right_chevron() {
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its third line ends with two stop icons and the right chevron.
+    // Then its second line ends with two stop icons and the right chevron.
     assert!(
-        line(&buf, 5)
+        line(&buf, 4)
             .trim_end()
             .ends_with(&format!("{STOPPED_ICON} {STOPPED_ICON} {FOLD_CLOSED}")),
         "line was '{}'",
-        line(&buf, 5)
+        line(&buf, 4)
     );
 }
 
@@ -1489,42 +1688,43 @@ fn folded_card_counts_agents_past_eight() {
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its third line counts the two past eight.
+    // Then its second line counts the two past eight.
     assert!(
-        line(&buf, 5).contains(&format!("{STOPPED_ICON} +2 {FOLD_CLOSED}")),
+        line(&buf, 4).contains(&format!("{STOPPED_ICON} +2 {FOLD_CLOSED}")),
         "line was '{}'",
-        line(&buf, 5)
+        line(&buf, 4)
     );
 }
 
 #[rstest::rstest]
-fn card_third_line_closes_its_tree(#[values(false, true)] folded: bool) {
+fn card_second_line_closes_its_tree(#[values(false, true)] folded: bool) {
     // Given session 1's card over two agents, `folded` or not.
     let sessions = card_of(2, folded);
 
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its third line starts with the last guide.
+    // Then its second line starts with the last guide.
     assert!(
-        line(&buf, 5).starts_with(LAST_GUIDE),
+        line(&buf, 4).starts_with(LAST_GUIDE),
         "line was '{}'",
-        line(&buf, 5)
+        line(&buf, 4)
     );
 }
 
 #[rstest::rstest]
-fn agent_rows_hang_one_level_under_the_card() {
+fn agent_rows_hang_off_the_cards_second_line() {
     // Given session 1's open card over two agents.
     let sessions = card_of(2, false);
 
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its agent rows branch from under the card's last line, the last one ending.
-    let guides = [line(&buf, 6), line(&buf, 7)];
+    // Then its agent rows branch from under the second line's icon, the
+    // last one ending.
+    let guides = [line(&buf, 5), line(&buf, 6)];
     assert!(
-        guides[0].starts_with(CHILD_GUIDE) && guides[1].starts_with(LAST_CHILD_GUIDE),
+        guides[0].starts_with("   ├╴") && guides[1].starts_with("   └╴"),
         "lines were {guides:#?}"
     );
 }
@@ -1542,55 +1742,30 @@ fn card_without_agents_shows_no_chevron() {
     // When drawing the sidebar.
     let buf = draw(&sessions, at(1000), 12);
 
-    // Then its third line has no chevron.
-    let third = line(&buf, 5);
+    // Then its second line has no chevron.
+    let second = line(&buf, 4);
     assert!(
-        !third.contains(FOLD_OPEN) && !third.contains(FOLD_CLOSED),
-        "line was '{third}'"
+        !second.contains(FOLD_OPEN) && !second.contains(FOLD_CLOSED),
+        "line was '{second}'"
     );
 }
 
-/// `sessions` with session 1 a colony in Learn, in `~/.orb/learn/<slug>`.
-fn learning(mut sessions: Sessions, slug: &str) -> Sessions {
-    if let Some(session) = sessions.sessions.first_mut() {
-        session.kind = SessionKind::Colony;
-        session.dir = format!("{HOME}/.orb/learn/{slug}").into();
-    }
+#[rstest::rstest]
+fn narrow_card_cuts_its_project_before_the_chevron() {
+    // Given a session in a project with a long name, folded over one agent.
+    let mut sessions = card_of(1, true);
     if let Some(project) = sessions.projects.first_mut() {
-        project.kind = ProjectKind::Learn;
+        project.title = "a-long-project-name-here".to_owned();
     }
-    sessions
-}
-
-#[rstest::rstest]
-fn learn_card_shows_its_folder_as_a_tilde_path() {
-    // Given a Learn session in ~/.orb/learn/rust.
-    let sessions = learning(card_of(1, false), "rust");
-
-    // When drawing the sidebar.
-    let buf = draw(&sessions, at(1000), 12);
-
-    // Then its third line shows the path from home.
-    assert!(
-        line(&buf, 5).contains("~/.orb/learn/rust"),
-        "line was '{}'",
-        line(&buf, 5)
-    );
-}
-
-#[rstest::rstest]
-fn narrow_learn_card_cuts_its_path_before_the_chevron() {
-    // Given a Learn session with a long slug, folded over one agent.
-    let sessions = learning(card_of(1, true), "a-long-learning-folder");
 
     // When drawing a 24-column sidebar.
     let (buf, ..) = render_sized(&sessions, at(1000), 24, 12);
 
-    // Then its third line still ends with the right chevron.
+    // Then its second line still ends with the right chevron.
     assert!(
-        line(&buf, 5).trim_end().ends_with(FOLD_CLOSED),
+        line(&buf, 4).trim_end().ends_with(FOLD_CLOSED),
         "line was '{}'",
-        line(&buf, 5)
+        line(&buf, 4)
     );
 }
 
@@ -1609,7 +1784,6 @@ fn render_with(
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -1633,13 +1807,13 @@ fn three_agents(selected: i64) -> Sessions {
 
 #[rstest::rstest]
 fn hit_map_maps_a_scrolled_rows_last_line_to_it() {
-    // Given three sessions on an 8-line sidebar scrolled to the last one
+    // Given three sessions on a 7-line sidebar scrolled to the last one
     // (session 1), so session 2's last line tops the list.
     let y = 3;
     let sessions = three_agents(1);
 
     // When rendering the sidebar.
-    let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 8);
+    let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 7);
 
     // Then a click on that line lands on session 2.
     assert_eq!(
@@ -1796,7 +1970,7 @@ fn agent_one() -> SidebarItem {
 }
 
 /// Draws a 32-column sidebar 10 lines tall with pane names from
-/// `layouts`. Agent 1's card takes lines 3 to 5, its agent row line 6.
+/// `layouts`. Agent 1's card takes lines 3 and 4, its agent row line 5.
 fn draw_with_layouts(sessions: &Sessions, layouts: &Layouts) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
     render(
@@ -1805,7 +1979,6 @@ fn draw_with_layouts(sessions: &Sessions, layouts: &Layouts) -> Buffer {
         &HashSet::new(),
         &[info()],
         layouts,
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -1838,7 +2011,7 @@ fn agent_row_reads_its_panes_name() {
     };
 
     // When rendering the sidebar.
-    let agent = line(&draw_with_layouts(&sessions, &layouts), 6);
+    let agent = line(&draw_with_layouts(&sessions, &layouts), 5);
 
     // Then the agent row shows the pane's name.
     assert!(agent.contains("api"), "line was '{agent}'");
@@ -1852,7 +2025,7 @@ fn agent_row_falls_back_to_its_agents_title() {
     // When rendering the sidebar.
     let agent = line(
         &draw_with_layouts(&sessions, &layouts_for(&sessions.projects)),
-        6,
+        5,
     );
 
     // Then the agent row shows the agent's title.
@@ -1880,7 +2053,7 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
     // When reading the agent's name off the sidebar row, the session
     // picker row, and searching the sidebar for the expected name.
     let sidebar_label = {
-        let agent = line(&draw_with_layouts(&sessions, &layouts), 6);
+        let agent = line(&draw_with_layouts(&sessions, &layouts), 5);
         let words: Vec<&str> = agent.split_whitespace().collect();
         words
             .get(1..words.len().saturating_sub(1))
@@ -1932,7 +2105,7 @@ fn selected_agent_row_has_the_visual_background() {
 
     // Then the agent row's line has the selection background.
     assert_eq!(
-        buf.cell((1, 6)).map(|cell| cell.bg),
+        buf.cell((1, 5)).map(|cell| cell.bg),
         Some(VISUAL),
         "the agent row's line"
     );
@@ -1970,7 +2143,7 @@ fn agent_line_records_its_row_in_the_hit_map() {
 
     // Then a click on the agent's line lands on its agent row.
     assert_eq!(
-        hits.row_at(Position::new(1, 6)),
+        hits.row_at(Position::new(1, 5)),
         Some(agent_one()),
         "the row at the agent's line"
     );
@@ -1987,7 +2160,7 @@ fn click_on_an_agent_line_selects_its_row() {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 1,
-            row: 6,
+            row: 5,
             modifiers: KeyModifiers::NONE,
         },
         &hits,
@@ -2002,6 +2175,38 @@ fn click_on_an_agent_line_selects_its_row() {
         routed,
         MouseRoute::Intents(vec![Intent::SelectRow(agent_one())]),
         "a click on an agent line should select its row"
+    );
+}
+
+#[rstest::rstest]
+#[case::first_line(3)]
+#[case::second_line(4)]
+fn click_on_either_line_of_a_card_selects_it(#[case] row: u16) {
+    // Given session 1's card on lines 3 and 4 of a 10-line sidebar that has
+    // the keys.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
+    let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
+
+    // When clicking one of the card's lines.
+    let routed = crate::mouse::route(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        &hits,
+        Focus::Sidebar,
+        None,
+        &mut Clicks::default(),
+        Instant::now(),
+    );
+
+    // Then the card is selected.
+    assert_eq!(
+        routed,
+        MouseRoute::Intents(vec![Intent::SelectRow(SidebarItem::Session(SessionId(1)))]),
+        "a click on line {row} should select the card"
     );
 }
 
@@ -2021,7 +2226,7 @@ fn input_box_counts_sessions_not_agent_rows() {
 }
 
 /// Draws a 32-column sidebar 10 lines tall with `active` the active row.
-/// Agent 1's card takes lines 3 to 5, its agent row line 6.
+/// Agent 1's card takes lines 3 and 4, its agent row line 5.
 fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
     render(
@@ -2030,7 +2235,6 @@ fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
         &HashSet::new(),
         &[info()],
         &layouts_for(&sessions.projects),
-        Path::new(HOME),
         at(1000),
         buf.area,
         &mut buf,
@@ -2064,7 +2268,7 @@ fn active_agent_row_has_no_bar() {
 
     // Then the agent row's first cell is blank.
     assert_eq!(
-        buf.cell((0, 6)).map(Cell::symbol),
+        buf.cell((0, 5)).map(Cell::symbol),
         Some(" "),
         "active agent row's first cell"
     );
@@ -2096,9 +2300,9 @@ fn active_agent_rows_title_is_blue() {
 
     // Then the agent row's title is blue.
     assert!(
-        all_fg(&buf, 8..=14, 6, BLUE),
+        all_fg(&buf, 7..=13, 5, BLUE),
         "line was '{}'",
-        line(&buf, 6)
+        line(&buf, 5)
     );
 }
 
@@ -2111,7 +2315,7 @@ fn active_agent_rows_title_is_bold() {
     let buf = draw_active(&sessions, agent_one());
 
     // Then the agent row's title is bold.
-    assert!(all_bold(&buf, 8..=14, 6), "line was '{}'", line(&buf, 6));
+    assert!(all_bold(&buf, 7..=13, 5), "line was '{}'", line(&buf, 5));
 }
 
 #[rstest::rstest]
@@ -2150,8 +2354,8 @@ fn active_rows_status_icon_keeps_its_colour() {
 
     // Then its status icon keeps the colour and weight it has while resting.
     assert_eq!(
-        buf.cell((6, 6)).map(|cell| (cell.fg, cell.modifier)),
-        resting.cell((6, 6)).map(|cell| (cell.fg, cell.modifier)),
+        buf.cell((5, 5)).map(|cell| (cell.fg, cell.modifier)),
+        resting.cell((5, 5)).map(|cell| (cell.fg, cell.modifier)),
         "active row's status icon"
     );
 }
@@ -2166,9 +2370,9 @@ fn inactive_rows_title_is_fg() {
 
     // Then the agent row's title is in the plain colour and not bold.
     assert!(
-        all_fg(&buf, 8..=14, 6, FG) && !(8..=14).any(|x| all_bold(&buf, x..=x, 6)),
+        all_fg(&buf, 7..=13, 5, FG) && !(7..=13).any(|x| all_bold(&buf, x..=x, 5)),
         "line was '{}'",
-        line(&buf, 6)
+        line(&buf, 5)
     );
 }
 
@@ -2185,9 +2389,9 @@ fn search_match_in_the_active_title_stays_blue1() {
 
     // Then the matched characters of its title keep the search's blue.
     assert!(
-        all_fg(&buf, 9..=12, 6, BLUE1),
+        all_fg(&buf, 8..=11, 5, BLUE1),
         "line was '{}'",
-        line(&buf, 6)
+        line(&buf, 5)
     );
 }
 

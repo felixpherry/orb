@@ -1958,12 +1958,12 @@ fn select_last_selects_the_last_cards_last_agent_row() {
 
 #[rstest::rstest]
 fn half_page_down_counts_agent_rows_as_stops() {
-    // Given two sessions on a 10-line sidebar (3-line cards, 1-line
+    // Given two sessions on a 10-line sidebar (2-line cards, 1-line
     // agent rows) with the cursor on session 1's card.
     let mut sessions = two_sessions(on(1));
     let layout = SidebarLayout {
         rows: 10,
-        heights: vec![3, 1, 3, 1],
+        heights: vec![2, 1, 2, 1],
     };
 
     // When moving half a page (5 lines) down.

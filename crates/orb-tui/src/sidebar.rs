@@ -4,18 +4,18 @@
 //! An input box heads it: `Sessions`, with an `i` badge lit while the
 //! search has the keys, the filtered project after the `>` prompt, and how
 //! many sessions are listed out of all of them. Below it, pinned sessions
-//! come first, then active ones, each a card: its most urgent agent's
-//! status icon and its title, then the project (behind a Research or Learn
-//! session's kind icon) and status, then the branch (a Research or Learn
-//! session's folder as a `~/…` path) with one status icon per agent, then
-//! one row per agent pane hanging one level under that line, with its
-//! status, name or title and harness mark. A card with agent rows ends its
-//! last line with `⌄`, or with `›` while folded and its rows hidden. The
-//! hovered row's first line is highlighted, and the active row's (the one the
-//! right side shows) title is blue and bold.
-//! A session with colonists ends its rows with a one-line `colonists` row
-//! (their count and `⌄`/`›`), and a folded session shown only on the way to
-//! a stuck colonist is one dim `›` line.
+//! come first, then active ones, each a two-line card: the most urgent
+//! status of it and everything under it, its title, pin and time; then the
+//! project's name, or a colony's world icon and name in the world's colour,
+//! with one status icon per agent and `⌄`, or `›` while folded and its rows
+//! hidden. Agent rows (status, name or title, harness mark) and the
+//! colonists row hang off the card's second line, 4 columns a level with
+//! `├╴`/`└╴` and `│` carried down past later siblings. The colonists row
+//! packs one status dot per colonist, then their count and `⌄`/`›`; its
+//! colonists hang under it the same way. A folded session shown only on the
+//! way to a stuck colonist is one dim `›` line. The hovered row's first line
+//! is highlighted, and the active row's (the one the right side shows) title
+//! is blue and bold.
 //! Settled sessions fold into a shelf at the bottom, drawn as one-line rows
 //! while it's open. The sidebar scrolls to keep the whole selected row in
 //! view, unless the wheel scrolled it while the keys are elsewhere.
@@ -27,7 +27,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::harness::HarnessInfo;
@@ -38,7 +37,6 @@ use orb_domain::feat::sessions::state::{
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::ids::SessionId;
-use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -126,7 +124,6 @@ pub(crate) fn render(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
-    home: &Path,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -147,7 +144,7 @@ pub(crate) fn render(
         heights: rows.iter().map(height).collect(),
     };
     let selected_y = render_list(
-        sessions, active, attached, harnesses, layouts, home, rows, now, list, buf, scroll, hits,
+        sessions, active, attached, harnesses, layouts, rows, now, list, buf, scroll, hits,
     );
     (selected_y, layout, search_cursor)
 }
@@ -275,7 +272,6 @@ fn render_list(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
-    home: &Path,
     rows: Vec<SidebarRow<'_>>,
     now: SystemTime,
     area: Rect,
@@ -336,8 +332,8 @@ fn render_list(
                 .is_some_and(|(row, _)| matches!(row, SidebarRow::Settled { .. }));
             let is_active = Some(row.item()) == active;
             render_row(
-                sessions, attached, harnesses, layouts, home, row, ends_shelf, is_active, now,
-                row_area, &mut list,
+                sessions, attached, harnesses, layouts, row, ends_shelf, is_active, now, row_area,
+                &mut list,
             );
         }
         list
@@ -421,11 +417,11 @@ fn place(rows: Vec<SidebarRow<'_>>, lines: u16) -> (Vec<(SidebarRow<'_>, u16)>, 
     (placed, top)
 }
 
-/// How many lines a row takes: a session's card 3, any other row (a path
+/// How many lines a row takes: a session's card 2, any other row (a path
 /// line and a colonists row included) 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Card { path: false, .. } => 3,
+        SidebarRow::Card { path: false, .. } => 2,
         SidebarRow::Card { path: true, .. }
         | SidebarRow::ShelfHeader { .. }
         | SidebarRow::Settled { .. }
@@ -446,7 +442,6 @@ fn render_row(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
-    home: &Path,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     active: bool,
@@ -457,18 +452,35 @@ fn render_row(
     match row {
         SidebarRow::Card {
             session,
+            depth,
+            rails,
+            last,
             path: true,
             ..
-        } => render_path(sessions, session, area, buf),
+        } => render_path(
+            sessions,
+            session,
+            &deep_prefix(*depth, rails, *last),
+            area,
+            buf,
+        ),
         SidebarRow::Card {
-            project, session, ..
+            project,
+            session,
+            depth,
+            rails,
+            last,
+            path: false,
         } => render_card(
             sessions,
             project,
             session,
-            attached.contains(&session.id),
+            attached,
             layouts,
-            home,
+            [
+                deep_prefix(*depth, rails, *last),
+                deep_l2_prefix(*depth, rails, *last),
+            ],
             active,
             now,
             area,
@@ -482,8 +494,9 @@ fn render_row(
             session,
             agent,
             pane,
+            depth,
+            rails,
             last,
-            ..
         } => {
             let label = layouts.agent_name(*pane, Some(agent));
             render_agent(
@@ -491,7 +504,7 @@ fn render_row(
                 harnesses,
                 agent,
                 label,
-                *last,
+                &deep_prefix(*depth, rails, *last),
                 attached.contains(&session.id),
                 active,
                 now,
@@ -499,23 +512,70 @@ fn render_row(
                 buf,
             );
         }
-        SidebarRow::Colonists { session, open, .. } => {
-            render_colonists(sessions.colonists(session.id).len(), *open, area, buf);
-        }
+        SidebarRow::Colonists {
+            session,
+            depth,
+            rails,
+            last,
+            open,
+        } => render_colonists(
+            sessions,
+            session.id,
+            attached,
+            &deep_prefix(*depth, rails, *last),
+            *open,
+            now,
+            area,
+            buf,
+        ),
     }
 }
 
+/// The guides before a tree row: each level 4 columns in, its connector
+/// under the parent's second-line icon, so children hang off that line;
+/// `rails` says which levels above carry `│` down, and `last` closes the
+/// level with `└╴`.
+fn deep_prefix(depth: usize, rails: &[bool], last: bool) -> String {
+    if depth == 0 {
+        return " ".to_owned();
+    }
+    let mut prefix = String::from("   ");
+    for &rail in rails {
+        prefix.push_str(if rail { "│   " } else { "    " });
+    }
+    prefix.push_str(if last { "└╴" } else { "├╴" });
+    prefix
+}
+
+/// The guides before a card's second line, its `└╴` under the card's
+/// status icon, carrying `│` down while more siblings follow.
+fn deep_l2_prefix(depth: usize, rails: &[bool], last: bool) -> String {
+    let mut prefix = String::from(" ");
+    if depth > 0 {
+        prefix.push_str("  ");
+        for &rail in rails {
+            prefix.push_str(if rail { "│   " } else { "    " });
+        }
+        prefix.push_str(if last { "  " } else { "│ " });
+    }
+    prefix.push_str("└╴");
+    prefix
+}
+
 /// A folded session shown only on the way to a stuck colonist: one dim
-/// line, `›` and its title, with where the search matched it.
-fn render_path(sessions: &Sessions, session: &Session, area: Rect, buf: &mut Buffer) {
+/// line under `prefix`, `›` and its title, with where the search matched it.
+fn render_path(sessions: &Sessions, session: &Session, prefix: &str, area: Rect, buf: &mut Buffer) {
     let title = sessions.title(session);
     let matched = sessions.title_matches(&title).unwrap_or_default();
     render_split(
         Line::from(
-            [span(" › ", COMMENT)]
-                .into_iter()
-                .chain(highlight(&title, &matched, |_| COMMENT))
-                .collect::<Vec<_>>(),
+            [
+                span(prefix.to_owned(), GUTTER),
+                span(format!("{FOLD_CLOSED} "), DARK3),
+            ]
+            .into_iter()
+            .chain(highlight(&title, &matched, |_| COMMENT))
+            .collect::<Vec<_>>(),
         ),
         Line::default(),
         area,
@@ -523,28 +583,81 @@ fn render_path(sessions: &Sessions, session: &Session, area: Rect, buf: &mut Buf
     );
 }
 
-/// A session's colonists row: `colonists`, then how many on the right and
-/// `⌄` while `open` or `›` while folded.
-fn render_colonists(count: usize, open: bool, area: Rect, buf: &mut Buffer) {
+/// A session's colonists row under `prefix`: the users icon and
+/// `colonists`, then one packed status dot per direct colonist (its own
+/// colonists included), at most [`AGENT_ICONS`] then `+N`, how many there
+/// are, and `⌄` while `open` or `›` while folded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the row's parts plus the frame inputs every node takes"
+)]
+fn render_colonists(
+    sessions: &Sessions,
+    id: SessionId,
+    attached: &HashSet<SessionId>,
+    prefix: &str,
+    open: bool,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let colonists = sessions.colonists(id);
+    let count = colonists.len();
+    let rest = count.saturating_sub(AGENT_ICONS);
+    let gap = if rest > 0 { "" } else { " " };
     let chevron = if open { FOLD_OPEN } else { FOLD_CLOSED };
     render_split(
-        Line::from(span(" colonists", FG_DARK)),
         Line::from(vec![
-            span(format!("{count} "), COMMENT),
-            span(chevron, DARK3),
+            span(prefix.to_owned(), GUTTER),
+            span(format!("{USERS} "), FG_DARK),
+            span("colonists", FG_DARK),
         ]),
+        Line::from(
+            colonists
+                .iter()
+                .take(AGENT_ICONS)
+                .map(|colonist| {
+                    let (glyph, colour) = tree_status(sessions, colonist.id, attached, now);
+                    span(glyph, colour)
+                })
+                .chain((rest > 0).then(|| span(format!("+{rest} "), COMMENT)))
+                .chain([
+                    span(format!("{gap}{count} "), COMMENT),
+                    span(chevron, DARK3),
+                ])
+                .collect::<Vec<_>>(),
+        ),
         area,
         buf,
     );
 }
 
-/// A session's card: its most urgent agent's status icon (the idle circle
-/// without one, filled while `attached`), its title, pin and time; the
-/// project (behind a Research or Learn colony's world icon) and the status
-/// word; the branch, or a Research or Learn colony's folder as a `~/…`
-/// path. With agent rows, the last line ends with one status icon per agent
-/// (at most 8, then `+N`) and `⌄` while they show or `›` while folded. The
-/// title is blue and bold while the card is `active`.
+/// Session `id`'s status icon and colour: the most urgent agent of it and
+/// everything under it ([`Sessions::status`]), else the idle circle, filled
+/// while it's attached.
+fn tree_status(
+    sessions: &Sessions,
+    id: SessionId,
+    attached: &HashSet<SessionId>,
+    now: SystemTime,
+) -> (&'static str, Color) {
+    match sessions.status(id) {
+        Some(agent) => {
+            let (glyph, _, colour) = status(agent, is_attached(attached, agent), now);
+            (glyph, colour)
+        }
+        None if attached.contains(&id) => (ATTACHED_ICON, FG),
+        None => (IDLE_ICON, DARK3),
+    }
+}
+
+/// A session's two-line card under its `prefixes` (line 1, line 2). Line
+/// 1: the most urgent status of it and everything under it (the idle
+/// circle without one, filled while attached), its title, pin and time.
+/// Line 2: the project's name, or a colony's world icon and name in the
+/// world's colour, then one status icon per agent row (at most 8, then
+/// `+N`) and, when the card lists its agent rows, `⌄` while they show or
+/// `›` while folded. The title is blue and bold while the card is `active`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the card's parts plus the frame inputs every node takes"
@@ -553,21 +666,19 @@ fn render_card(
     sessions: &Sessions,
     project: &Project,
     session: &Session,
-    attached: bool,
+    attached: &HashSet<SessionId>,
     layouts: &Layouts,
-    home: &Path,
+    prefixes: [String; 2],
     active: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let agents = sessions.agents(session.id);
-    let lines = Layout::vertical(vec![Constraint::Length(1); 3]).split(area);
-    let line = |index: usize| lines.get(index).copied().unwrap_or_default();
-    let urgent = most_urgent(agents.iter().copied());
-    let (glyph, word, colour) = session_status(&agents, attached, now);
+    let [first, second] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    let [prefix, l2_prefix] = prefixes;
+    let (glyph, colour) = tree_status(sessions, session.id, attached, now);
     let pin = if session.pinned_at.is_some() { PIN } else { "" };
-    let time = match urgent {
+    let time = match most_urgent(sessions.agents(session.id)) {
         Some(agent) if agent.status == AgentStatus::Working => when(agent, now),
         _ => ago_label(since(now, session.last_activity_at)),
     };
@@ -575,67 +686,57 @@ fn render_card(
     let matched = sessions.title_matches(&title).unwrap_or_default();
     render_split(
         Line::from(
-            [span(format!(" {glyph} "), colour)]
+            [span(prefix, GUTTER), span(format!("{glyph} "), colour)]
                 .into_iter()
                 .chain(title_spans(&title, &matched, active))
                 .collect::<Vec<_>>(),
         ),
         Line::from(vec![span(format!("{pin} "), ORANGE), span(time, COMMENT)]),
-        line(0),
+        first,
         buf,
     );
-    let look = session_look(session.kind, project.kind);
-    render_split(
-        project_line(project, look),
-        word.map(|word| Line::from(span(word, colour)))
-            .unwrap_or_default(),
-        line(1),
-        buf,
-    );
+    let place = match (session.kind, world_look(project.kind)) {
+        (SessionKind::Colony, Some((icon, colour))) => vec![
+            span(l2_prefix, GUTTER),
+            span(format!("{icon} "), colour),
+            span(project.title.as_str(), colour),
+        ],
+        _ => vec![
+            span(format!("{l2_prefix} "), GUTTER),
+            span(project.title.as_str(), FG_DARK),
+        ],
+    };
     let rows = sessions.agent_rows(session.id, layouts);
-    let folded = sessions.hides_agents(session.id);
-    let place = match look {
-        Some(_) => format!("{FOLDER} {}", tilde(&session.dir, home)),
-        None => {
-            let branch = agents
-                .first()
-                .and_then(|agent| agent.branch.as_deref())
-                .or(session.branch.as_deref())
-                .unwrap_or("—");
-            format!("{BRANCH} {branch}")
+    let own_attached = attached.contains(&session.id);
+    let rest = rows.len().saturating_sub(AGENT_ICONS);
+    let chevron = (!rows.is_empty() && !sessions.hides_one_agent(session.id, layouts)).then(|| {
+        if sessions.hides_agents(session.id) {
+            FOLD_CLOSED
+        } else {
+            FOLD_OPEN
         }
-    };
-    let icons: Vec<_> = rows
-        .iter()
-        .map(|(agent, _)| status(agent, attached, now))
-        .collect();
-    let rest = icons.len().saturating_sub(AGENT_ICONS);
-    let chevron = match (rows.is_empty(), folded) {
-        (true, _) => None,
-        (false, true) => Some(FOLD_CLOSED),
-        (false, false) => Some(FOLD_OPEN),
-    };
+    });
     render_split(
-        Line::from(vec![span(LAST_GUIDE, GUTTER), span(place, COMMENT)]),
+        Line::from(place),
         Line::from(
-            icons
-                .into_iter()
+            rows.iter()
                 .take(AGENT_ICONS)
-                .map(|(glyph, _, colour)| span(format!("{glyph} "), colour))
+                .map(|(agent, _)| {
+                    let (glyph, _, colour) = status(agent, own_attached, now);
+                    span(format!("{glyph} "), colour)
+                })
                 .chain((rest > 0).then(|| span(format!("+{rest} "), COMMENT)))
                 .chain(chevron.map(|chevron| span(chevron, DARK3)))
                 .collect::<Vec<_>>(),
         ),
-        line(2),
+        second,
         buf,
     );
 }
 
-/// An agent pane's row, hanging under its card's last line: the tree guide
-/// (`└╴` on the last),
-/// its status icon (the idle circle filled while `attached`), `label` with
-/// where the search matched it (blue and bold while `active`), and its
-/// harness mark on the right.
+/// An agent pane's row under its tree `guide`: its status icon (the idle
+/// circle filled while `attached`), `label` with where the search matched
+/// it (blue and bold while `active`), and its harness mark on the right.
 #[expect(
     clippy::too_many_arguments,
     reason = "the row's parts plus the frame inputs every node takes"
@@ -645,14 +746,13 @@ fn render_agent(
     harnesses: &[HarnessInfo],
     agent: &Agent,
     label: &str,
-    last: bool,
+    guide: &str,
     attached: bool,
     active: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let guide = if last { LAST_CHILD_GUIDE } else { CHILD_GUIDE };
     let (glyph, _, colour) = status(agent, attached, now);
     let matched = sessions.title_matches(label).unwrap_or_default();
     let mark = harnesses
@@ -661,10 +761,13 @@ fn render_agent(
         .and_then(|info| info.icon.clone());
     render_split(
         Line::from(
-            [span(guide, GUTTER), span(format!("{glyph} "), colour)]
-                .into_iter()
-                .chain(title_spans(label, &matched, active))
-                .collect::<Vec<_>>(),
+            [
+                span(guide.to_owned(), GUTTER),
+                span(format!("{glyph} "), colour),
+            ]
+            .into_iter()
+            .chain(title_spans(label, &matched, active))
+            .collect::<Vec<_>>(),
         ),
         Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
         area,
@@ -692,27 +795,6 @@ pub(crate) fn world_look(kind: ProjectKind) -> Option<(&'static str, Color)> {
         ProjectKind::FreshWorld => Some(("\u{f0c5}", CYAN)),
         ProjectKind::Normal | ProjectKind::Incognito => None,
     }
-}
-
-/// A colony's world icon and colour, for Research and Learn: Research
-/// `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
-fn session_look(kind: SessionKind, project: ProjectKind) -> Option<(&'static str, Color)> {
-    match (kind, project) {
-        (SessionKind::Colony, ProjectKind::Research) => Some(kind_look(FolderKind::Research)),
-        (SessionKind::Colony, ProjectKind::Learn) => Some(kind_look(FolderKind::Learn)),
-        _ => None,
-    }
-}
-
-/// A node's middle line: the project's folder in its badge colour, or the
-/// kind's `look` (icon and colour), and the project's name.
-fn project_line<'a>(project: &'a Project, look: Option<(&'static str, Color)>) -> Line<'a> {
-    let (icon, colour) = look.unwrap_or_else(|| (FOLDER, project_colour(&project.title)));
-    Line::from(vec![
-        span(GUIDE, GUTTER),
-        span(format!("{icon} "), colour),
-        span(project.title.as_str(), FG_DARK),
-    ])
 }
 
 /// The Settled shelf's folder, open or closed, and how many sessions it
@@ -998,7 +1080,7 @@ pub(crate) const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
 pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
 /// Project names, and the keys in the picker's hints (`fg_dark`).
 pub(crate) const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
-/// Times, branches, the count, settled titles and the stopped icon; the
+/// Times, the count, settled and path-line titles and the stopped icon; the
 /// picker's hint labels, headings and empty-list text (`comment`).
 pub(crate) const COMMENT: Color = Color::Rgb(0x63, 0x6d, 0xa6);
 /// The idle icon, the unlit shelf badge and settled marks; the
@@ -1008,16 +1090,18 @@ pub(crate) const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
 /// folders (`blue`).
 pub(crate) const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
 /// The `>` prompt, here and in the picker, and the picker's `default`
-/// branch badge, and the message box's Messages (`cyan`).
+/// branch badge, the message box's Messages, and a fresh world's icon
+/// (`cyan`).
 pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn; the picker's current branch and new worktree; the mode
 /// line's INSERT (`green`).
 pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// The mode line's PANE (`green1`, lualine's terminal mode).
+/// The mode line's PANE (`green1`, lualine's terminal mode), and a shared
+/// world's icon.
 pub(crate) const GREEN1: Color = Color::Rgb(0x4f, 0xd6, 0xbe);
-/// A Research session's kind icon (`blue2`).
+/// A Research world's icon (`blue2`).
 pub(crate) const BLUE2: Color = Color::Rgb(0x0d, 0xb9, 0xd7);
-/// A Learn session's kind icon (`purple`).
+/// A Learn world's icon (`purple`).
 pub(crate) const PURPLE: Color = Color::Rgb(0xfc, 0xa7, 0xea);
 /// Needing approval; the picker's `worktree` branch badge; the rename box
 /// (`yellow`).
@@ -1077,21 +1161,21 @@ pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
 /// A model, before a harness's models when it has no mark
 /// (`nf-fa-microchip`).
 pub(crate) const CHIP: &str = "\u{f2db}";
-/// The most status icons a folded card shows before counting the rest.
+/// The most status icons a card shows before counting the rest, here and in
+/// a colonists row's dots.
 const AGENT_ICONS: usize = 8;
-/// A card whose agent rows show (`nf-oct-chevron_down`).
+/// The colonists row (`nf-fa-users`).
+const USERS: &str = "\u{f0c0}";
+/// A card whose agent rows show, or an open colonists row
+/// (`nf-oct-chevron_down`).
 const FOLD_OPEN: &str = "\u{f47c}";
-/// A folded card (`nf-oct-chevron_right`).
+/// A folded card or colonists row, and a path line's mark
+/// (`nf-oct-chevron_right`).
 const FOLD_CLOSED: &str = "\u{f460}";
-/// The tree guide before a node's middle line and a settled row.
+/// The tree guide before a settled row.
 const GUIDE: &str = " ├╴";
-/// The tree guide before a node's last line and the last settled row.
+/// The tree guide before the last settled row.
 const LAST_GUIDE: &str = " └╴";
-/// The guide before a card's agent row, one level under the card's last
-/// line.
-const CHILD_GUIDE: &str = "    ├╴";
-/// The guide before a card's last agent row.
-const LAST_CHILD_GUIDE: &str = "    └╴";
 
 #[cfg(test)]
 mod tests;

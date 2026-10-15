@@ -328,7 +328,8 @@ pub enum SidebarItem {
 /// parent's last child.
 #[derive(Debug, Clone)]
 pub enum SidebarRow<'a> {
-    /// A pinned or active session's three-line card.
+    /// A pinned or active session's two-line card, or (path) a one-line dim
+    /// row.
     Card {
         project: &'a Project,
         session: &'a Session,

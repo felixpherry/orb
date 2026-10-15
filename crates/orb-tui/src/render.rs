@@ -108,7 +108,6 @@ pub(crate) fn render(
             &state.attached,
             &state.harnesses,
             &state.layouts,
-            &state.home,
             now,
             sidebar_area,
             frame.buffer_mut(),

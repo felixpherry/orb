@@ -763,7 +763,7 @@ mod tests {
     const AGENT_1: SidebarItem = SidebarItem::Session(SessionId(1));
 
     /// A 30-column sidebar and a 50-column right side, 20 lines tall over the
-    /// mode line: the input box on lines 0 to 2 and agent 1 on lines 3 to 5;
+    /// mode line: the input box on lines 0 to 2 and agent 1 on lines 3 and 4;
     /// on the right a tab bar on line 0, then agent 1's pane in columns 30
     /// to 54 and pane -1 in columns 56 to 79, both running programs that
     /// read the mouse.
@@ -780,7 +780,7 @@ mod tests {
     fn hits_reading(reads_mouse: bool) -> HitMap {
         let mut hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
         hits.record_sidebar_input(Rect::new(0, 0, 29, 3));
-        hits.record_row(Rect::new(0, 3, 29, 3), AGENT_1);
+        hits.record_row(Rect::new(0, 3, 29, 2), AGENT_1);
         hits.record_pane(Rect::new(30, 1, 25, 19), PaneId(1), reads_mouse);
         hits.record_pane(Rect::new(56, 1, 24, 19), PaneId(-1), reads_mouse);
         hits

@@ -939,7 +939,7 @@ fn sidebar_focus_puts_the_cursor_on_the_selected_rows_first_cell() {
 #[rstest::rstest]
 fn sidebar_cursor_follows_the_selection_to_a_later_row() {
     // Given agent 1 and a settled agent, with the sidebar focused on
-    // the Settled header below agent 1's three-line node.
+    // the Settled header below agent 1's two-line card.
     let mut state = AppState {
         focus: Focus::Sidebar,
         sessions: Sessions {
