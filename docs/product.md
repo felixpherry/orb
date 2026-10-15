@@ -215,7 +215,7 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 - **Nothing deletes a session or worktree, removes a project or quits orb.** Closing panes and tabs and settling sessions are the only destructive commands.
 - **Agent answers come from the transcript,** not the screen. `pane read` is for plain commands.
 - **`agent start` types `claude` or `pi` into a shell pane** and waits up to 30 s for orb's hook or extension to report it, so it needs `orb integration install`. A Claude "trust this folder?" prompt comes before the hook, so in a folder Claude doesn't trust yet the start times out.
-- **`orb integration install` also installs an `orb` skill** for Claude Code and pi, which teaches agents these commands.
+- **`orb integration install` also installs an `orb` skill** for Claude Code and pi, which teaches agents these commands, and that colonists are sessions made with `orb session create` from a colony's pane, never pane splits.
 
 | Command | What it does |
 | --- | --- |

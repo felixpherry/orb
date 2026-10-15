@@ -1,6 +1,6 @@
 ---
 name: orb
-description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply. Use when the user mentions orb, asks to split a pane or run something in another pane, or asks you to start, prompt, wait on or collect work from another agent. Works only inside an orb pane (ORB_PANE_ID set).
+description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply; start a new session, or colonists from a colony. Use when the user mentions orb, asks to split a pane or run something in another pane, asks you to start, prompt, wait on or collect work from another agent, or asks you to spawn colonists. Works only inside an orb pane (ORB_PANE_ID set).
 ---
 
 # orb
@@ -90,11 +90,31 @@ orb agent reply 12                                                           # {
 
 ```sh
 orb session create --worktree --name "fix login"   # {"session": 7, "pane": 30}
+orb agent start --kind claude --pane 30             # its pane is a shell; start the agent there
+orb agent prompt 30 "Fix the login bug."
 ```
 
-- **It defaults to your project and its checkout.** `--worktree` makes a new worktree from the default branch (can take ~15 s); `--project <id>` picks another project.
+- **It defaults to your session's project and its checkout.** `--worktree` makes a new worktree from the default branch (can take ~15 s). `--project <id>` picks another project.
+- **Find a project ID in `orb session list`:** the `project` of a session whose `dir` is in that repo. There is no project list; if no session ever ran there, ask the user.
 - **It shows in the sidebar but doesn't open,** so the user's view stays put.
-- **`starting`** means another session is being made. Try again in a few seconds.
+- **One start at a time.** `starting` means another session is being made. Try again in a few seconds.
+
+## Worlds, colonies and colonists
+
+- **A world is a folder colonies run in.** In a shared world every colony works in the world's one folder. In a fresh world each colony gets its own copy of the world's folder. Research and Learn are orb's built-in fresh worlds (`~/.orb/research/<name>/`, `~/.orb/learn/<name>/`); the user's fresh worlds put theirs in `~/.orb/worlds/<world>/<name>/`.
+- **A colony is a session in a world; its agent is the chief.** Only the user makes colonies, with `<C-g> c`. You can't.
+- **A colonist is a session the chief, or a colonist, makes with `orb session create`.** orb links it under the session of the pane that ran the command (from `ORB_PANE_ID`), folded behind a `colonists` row in the sidebar, at any depth. From a normal session the new session is top-level.
+- **"Spawn colonists" means sessions, never panes.** Run `orb session create` once per colonist from your own pane, then `orb agent start --kind claude --pane <pane>` and `orb agent prompt` on each returned pane. Splits, stacks and tabs stay in your session and never show as colonists; they're for helpers working beside you.
+
+```sh
+orb session create --name "scout 1"                              # fresh world: in your own folder
+orb session create --project 4 --worktree --name "fix payout"    # a worktree of project 4's repo
+```
+
+- **Without `--project` it takes your session's project.** In a fresh world it runs in your own folder, with no worktree; in a shared world, in the world's folder; in a repo, in its checkout (add `--worktree` for its own).
+- **For a repo, name it:** `--project <id> --worktree` gives the colonist its own worktree there.
+- **Two refusals (`bad_request`):** `--worktree` without `--project` from a fresh world (its folders aren't git repositories), and `--project` naming a fresh world, from anywhere (its colonies come from `<C-g> c`).
+- **Settling a colony doesn't settle its colonists.** `orb session settle` acts on one session only.
 
 ## When orb says no
 
