@@ -406,3 +406,5 @@ Entries are added or amended **only with human approval**.
 - (settle) Settling or deleting a session with unsettled colonists asks `No` · `Colony only` · `With colonists`, and `With colonists` covers every session under it.
 - (settle) Settling with colonists is refused with `Can't settle while a colonist is working` while any of them has a turn underway.
 - (store) Schema v15 records which session made each colonist and turns Research and Learn sessions into colonies; deleting a session clears its colonists' link.
+- (start) `orb --version` and `orb -V` print `orb <version>` and exit 0 before orb reads its environment, opens its log or store, or touches the terminal.
+- (repo) orb is licensed Apache-2.0 (LICENSE holds the full text), every package's manifest carries the license, description, repository `https://github.com/zqccer/orb` and author `zqccer`, and NOTICE credits herdr.

@@ -1396,6 +1396,7 @@ dependencies = [
  "jiff",
  "orb-domain",
  "orb-tui",
+ "rstest",
  "tokio",
  "wherror",
 ]

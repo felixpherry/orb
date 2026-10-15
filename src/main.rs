@@ -58,11 +58,23 @@ const QUIT_CAP: Duration = Duration::from_secs(2);
 const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
 fn main() -> Result<ExitCode, Report<OrbError>> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        writeln!(
+            std::io::stdout().lock(),
+            "orb {}",
+            env!("CARGO_PKG_VERSION")
+        )
+        .change_context(OrbError)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
     let orb_root = home.join(".orb");
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args
         .first()
         .is_some_and(|arg| client::NOUNS.iter().any(|noun| arg == noun))
