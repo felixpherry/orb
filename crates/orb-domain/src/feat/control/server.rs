@@ -3,7 +3,7 @@
 //! loop for what it changes and for what a pane shows, and writes the reply.
 
 use std::fs::{self, Permissions};
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,12 @@ use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace, ApiStart, Sessions
 use crate::feat::sessions::state::{Agent, SessionKind};
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
+
+/// How long a connection may take to send its request line.
+const REQUEST_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long one check for a caller that hung up waits for a byte.
+const GONE_PROBE: Duration = Duration::from_millis(1);
 
 /// The control socket couldn't be opened.
 #[derive(Debug, Error)]
@@ -63,16 +69,17 @@ pub struct ControlDeps {
 /// Returns an error if the socket can't be bound, made private, or its
 /// thread can't start.
 pub fn listen(path: &Path, deps: ControlDeps) -> Result<(), Report<ControlServerError>> {
-    open(path, deps.log.clone(), move |line| {
-        reply_line(line, |request| answer(&deps, request))
+    open(path, deps.log.clone(), move |line, gone| {
+        reply_line(line, |request| answer(&deps, request, gone))
     })
 }
 
 /// Opens a socket at `path` as [`listen`] does, answering each request line
-/// with the reply line `answer` gives.
+/// with the reply line `answer` gives; `answer`'s second argument says
+/// whether the caller has hung up meanwhile.
 pub(super) fn open<F>(path: &Path, log: Log, answer: F) -> Result<(), Report<ControlServerError>>
 where
-    F: Fn(&str) -> String + Send + Sync + 'static,
+    F: Fn(&str, &dyn Fn() -> bool) -> String + Send + Sync + 'static,
 {
     remove_socket(path, &log);
     let listener = UnixListener::bind(path)
@@ -104,7 +111,7 @@ pub fn remove_socket(path: &Path, log: &Log) {
 /// Hands each connection to its own thread, for as long as orb runs.
 fn accept<F>(listener: &UnixListener, log: &Log, answer: &Arc<F>)
 where
-    F: Fn(&str) -> String + Send + Sync + 'static,
+    F: Fn(&str, &dyn Fn() -> bool) -> String + Send + Sync + 'static,
 {
     for stream in listener.incoming() {
         match stream {
@@ -112,7 +119,7 @@ where
                 let answer = Arc::clone(answer);
                 let spawned = thread::Builder::new()
                     .name("orb-control-request".into())
-                    .spawn(move || serve(stream, &*answer));
+                    .spawn(move || serve(stream, REQUEST_LIMIT, &*answer));
                 if let Err(error) = spawned {
                     log.error_on_change("control-spawn", "couldn't answer a request", &error);
                 }
@@ -125,17 +132,37 @@ where
 }
 
 /// Reads one request line, answers it, and writes one reply line. A client
-/// that hangs up early gets nothing.
-fn serve<F>(stream: UnixStream, answer: &F)
+/// that hangs up early, or sends no line within `read_limit`, gets nothing.
+fn serve<F>(stream: UnixStream, read_limit: Duration, answer: &F)
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str, &dyn Fn() -> bool) -> String,
 {
     let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line).is_err() {
+    let read = stream
+        .set_read_timeout(Some(read_limit))
+        .and_then(|()| BufReader::new(&stream).read_line(&mut line));
+    if read.is_err() {
         return;
     }
+    let probing = stream.set_read_timeout(Some(GONE_PROBE)).is_ok();
+    let gone = || probing && hung_up(&stream);
+    let reply = answer(&line, &gone);
     let mut stream = stream;
-    let _ = writeln!(stream, "{}", answer(&line));
+    let _ = writeln!(stream, "{reply}");
+}
+
+/// Whether the caller on `stream` hung up. It never sends more than its one
+/// line, so a later read either times out (still there) or finds the end of
+/// the stream (gone).
+fn hung_up(mut stream: &UnixStream) -> bool {
+    match stream.read(&mut [0; 1]) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(error) => !matches!(
+            error.kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+        ),
+    }
 }
 
 /// The control socket's reply line to `line`: `answer`'s reply to the
@@ -191,8 +218,8 @@ enum Action {
 /// The reply to `request`: worked out from the state (with no lock held
 /// after), then carried out. Each change, and any request refused before it
 /// runs, writes one `api` log line; lists, reads, waits, gets and replies that
-/// are answered write none.
-pub(super) fn answer(deps: &ControlDeps, request: &Request) -> Reply {
+/// are answered write none. A wait stops once `gone` says the caller hung up.
+pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> bool) -> Reply {
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
@@ -207,7 +234,7 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request) -> Reply {
         Ok(Action::Wait { pane, timeout }) => {
             let deadline = timeout.map(|limit| Instant::now() + limit);
             let poke = || poke(deps);
-            return match agent::wait_done(&deps.state, pane, &poke, Timing::REAL, deadline) {
+            return match agent::wait_done(&deps.state, pane, &poke, gone, Timing::REAL, deadline) {
                 Ok(done) => Reply::ok(&done),
                 Err(error) => Reply::err(error),
             };
@@ -228,7 +255,7 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request) -> Reply {
             text,
             wait,
             timeout,
-        }) => prompt_agent(deps, pane, text, wait, timeout),
+        }) => prompt_agent(deps, pane, text, wait, timeout, gone),
         Err(error) => Reply::err(error),
     };
     deps.log.line("api", &log_text(request, &reply));
@@ -410,13 +437,14 @@ fn poke(deps: &ControlDeps) {
 
 /// Has the screen loop paste `text` into `pane`'s agent and press Enter;
 /// with `wait`, waits for the turn to end or the agent to be blocked, with
-/// `timeout` over the whole call.
+/// `timeout` over the whole call, until `gone` says the caller hung up.
 fn prompt_agent(
     deps: &ControlDeps,
     pane: PaneId,
     text: String,
     wait: bool,
     timeout: Option<Duration>,
+    gone: &dyn Fn() -> bool,
 ) -> Reply {
     let deadline = timeout.map(|limit| Instant::now() + limit);
     let pasted = SystemTime::now();
@@ -427,7 +455,15 @@ fn prompt_agent(
         return Reply::ok(&PromptResult { submitted: true });
     }
     let poke = || poke(deps);
-    match agent::wait_prompted(&deps.state, pane, &poke, Timing::REAL, deadline, pasted) {
+    match agent::wait_prompted(
+        &deps.state,
+        pane,
+        &poke,
+        gone,
+        Timing::REAL,
+        deadline,
+        pasted,
+    ) {
         Ok(done) => Reply::ok(&done),
         Err(error) => Reply::err(error),
     }
@@ -821,13 +857,17 @@ fn agent_row(app: &AppState, session: SessionId, agent: &Agent, pane: PaneId) ->
 )]
 mod tests {
     use std::ffi::OsString;
+    use std::io::{self, Read, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration;
 
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{Action, ControlServerError, log_text, open, plan, reply_line, route};
+    use super::{Action, ControlServerError, log_text, open, plan, reply_line, route, serve};
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
@@ -843,7 +883,7 @@ mod tests {
         let dir = tempfile::tempdir().change_context(ControlServerError)?;
         let socket = dir.path().join("orb.sock");
         let state = State::new(app);
-        open(&socket, Log::default(), move |line| {
+        open(&socket, Log::default(), move |line, _gone| {
             reply_line(line, |request| route(&state.read(), request))
         })?;
         Ok((dir, socket))
@@ -1284,5 +1324,52 @@ mod tests {
             !has_dir,
             "a normal project's session starts in its checkout"
         );
+    }
+
+    #[rstest::rstest]
+    fn silent_connection_is_closed_after_the_read_limit() -> io::Result<()> {
+        // Given a connection served with a 50 ms read limit.
+        let (mut client, server) = UnixStream::pair()?;
+        thread::spawn(move || {
+            serve(
+                server,
+                Duration::from_millis(50),
+                &|_: &str, _: &dyn Fn() -> bool| String::new(),
+            );
+        });
+
+        // When the client sends nothing.
+        let read = client.read(&mut [0; 1])?;
+
+        // Then orb closes the connection without a reply.
+        assert_eq!(read, 0, "a silent connection should be closed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn answer_sees_a_caller_that_hung_up() -> io::Result<()> {
+        // Given a connection whose answer runs until its caller hangs up.
+        let (mut client, server) = UnixStream::pair()?;
+        let served = thread::spawn(move || {
+            serve(server, Duration::from_secs(5), &|_: &str,
+                                                    gone: &dyn Fn()
+                -> bool| {
+                while !gone() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                String::new()
+            });
+        });
+
+        // When the client sends a line and hangs up.
+        writeln!(client, "{{}}")?;
+        drop(client);
+
+        // Then the answer stops and serve returns.
+        assert!(
+            served.join().is_ok(),
+            "serve should return once the caller left"
+        );
+        Ok(())
     }
 }

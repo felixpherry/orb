@@ -365,6 +365,7 @@ Entries are added or amended **only with human approval**.
 - (api) `orb agent prompt` is refused while the agent waits for approval or input.
 - (api) `orb agent reply` returns the agent's last reply from its transcript.
 - (api) orb session create waits up to 3 minutes for orb's answer; other requests without a limit of their own wait 60 s.
+- (api) orb closes an API connection that sends no request within 5 s, and stops waiting on an agent once the caller hangs up.
 - (integration) `orb integration install` also installs an `orb` skill for Claude Code and pi that teaches agents the API, including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits.
 - (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.

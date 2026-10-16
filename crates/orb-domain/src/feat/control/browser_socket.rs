@@ -97,9 +97,9 @@ fn pane_in(env: &str) -> Option<PaneId> {
 /// thread can't start.
 pub fn listen(path: &Path, deps: ControlDeps) -> Result<(), Report<ControlServerError>> {
     let state = deps.state.clone();
-    server::open(path, deps.log.clone(), move |line| {
+    server::open(path, deps.log.clone(), move |line, _gone| {
         reply(line, &state, &LaunchEnv, &|request: &Request| {
-            server::answer(&deps, request)
+            server::answer(&deps, request, &|| false)
         })
     })
 }
@@ -614,7 +614,7 @@ mod tests {
         let dir = tempfile::tempdir().change_context(ControlServerError)?;
         let socket = dir.path().join(SOCKET_FILE);
         let state = State::new(one_pane());
-        open(&socket, Log::default(), move |line| {
+        open(&socket, Log::default(), move |line, _gone| {
             reply(line, &state, &Fixed(None), &obliging)
         })?;
 

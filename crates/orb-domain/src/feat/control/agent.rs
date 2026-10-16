@@ -77,10 +77,12 @@ pub(crate) fn quoted(word: &str) -> String {
 
 /// Reads `state` every tick until `check` gives an answer, poking the poll
 /// after the first read and then every `poke_every`; `None` once `deadline`
-/// passes. No lock is held across the sleep or the poke.
+/// passes, `timeout` once `gone` says the caller hung up. No lock is held
+/// across the sleep or the poke.
 fn poll_until<T, F>(
     state: &State,
     poke: &dyn Fn(),
+    gone: &dyn Fn() -> bool,
     timing: Timing,
     deadline: Option<Instant>,
     mut check: F,
@@ -93,6 +95,9 @@ where
         let outcome = check(&state.read());
         if outcome.is_some() {
             return outcome;
+        }
+        if gone() {
+            return Some(Err(caller_left()));
         }
         let now = Instant::now();
         if deadline.is_some_and(|deadline| now >= deadline) {
@@ -128,6 +133,11 @@ pub(crate) fn no_agent(pane: PaneId) -> ApiError {
     )
 }
 
+/// Why a wait ended without an answer: nobody is listening any more.
+fn caller_left() -> ApiError {
+    ApiError::new(ErrorCode::Timeout, "the caller hung up")
+}
+
 /// Why a wait on `pane`'s agent gave up.
 fn ran_out(pane: PaneId) -> ApiError {
     ApiError::new(
@@ -160,15 +170,16 @@ fn wrote_since(state: &State, pane: PaneId, pasted: SystemTime) -> bool {
 /// Waits until `pane`'s agent is idle or blocked, through work and an
 /// unknown status. An agent that stops or leaves is `no_agent`, a closed
 /// pane `not_found`, a settled session `settled`; `timeout` once `deadline`
-/// passes.
+/// passes or `gone` says the caller hung up.
 pub(crate) fn wait_done(
     state: &State,
     pane: PaneId,
     poke: &dyn Fn(),
+    gone: &dyn Fn() -> bool,
     timing: Timing,
     deadline: Option<Instant>,
 ) -> Result<WaitResult, ApiError> {
-    let done = poll_until(state, poke, timing, deadline, |app| {
+    let done = poll_until(state, poke, gone, timing, deadline, |app| {
         let agent = match live_agent(app, pane) {
             Ok(agent) => agent,
             Err(error) => return Some(Err(error)),
@@ -191,23 +202,29 @@ pub(crate) fn wait_done(
 /// underway, then [`wait_done`]. Seeing none is `prompt_stalled`, unless the
 /// agent wrote its transcript since the paste (a turn too short to see).
 /// `deadline` covers both halves; when it comes before the gate, running
-/// out is `timeout`.
+/// out is `timeout`, as is `gone` saying the caller hung up.
 pub(crate) fn wait_prompted(
     state: &State,
     pane: PaneId,
     poke: &dyn Fn(),
+    gone: &dyn Fn() -> bool,
     timing: Timing,
     deadline: Option<Instant>,
     pasted: SystemTime,
 ) -> Result<WaitResult, ApiError> {
     let gate = Instant::now() + timing.stall_gate;
     let first = deadline.map_or(gate, |deadline| deadline.min(gate));
-    let seen = poll_until(state, poke, timing, Some(first), |app| {
-        match live_agent(app, pane) {
+    let seen = poll_until(
+        state,
+        poke,
+        gone,
+        timing,
+        Some(first),
+        |app| match live_agent(app, pane) {
             Ok(agent) => agent.status.in_progress().then_some(Ok(())),
             Err(error) => Some(Err(error)),
-        }
-    });
+        },
+    );
     match seen {
         Some(Err(error)) => return Err(error),
         None if first < gate => return Err(ran_out(pane)),
@@ -223,7 +240,7 @@ pub(crate) fn wait_prompted(
         }
         Some(Ok(())) | None => {}
     }
-    wait_done(state, pane, poke, timing, deadline)
+    wait_done(state, pane, poke, gone, timing, deadline)
 }
 
 /// Waits for the agent started in `pane`: replies once it reads idle or
@@ -236,7 +253,7 @@ pub(crate) fn wait_started(
     timing: Timing,
 ) -> Result<StartedResult, ApiError> {
     let deadline = Instant::now() + timing.start_limit;
-    let started = poll_until(state, poke, timing, Some(deadline), |app| {
+    let started = poll_until(state, poke, &|| false, timing, Some(deadline), |app| {
         if let Err(error) = pane_open(app, pane) {
             return Some(Err(error));
         }
@@ -434,7 +451,15 @@ mod tests {
         let state = State::new(state_with(vec![agent(1, AgentStatus::Idle)], 1));
 
         // When waiting on a prompt with no deadline.
-        let waited = wait_prompted(&state, PaneId(1), &|| {}, FAST, None, SystemTime::now());
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &|| {},
+            &|| false,
+            FAST,
+            None,
+            SystemTime::now(),
+        );
 
         // Then the prompt is stalled.
         assert_eq!(
@@ -457,7 +482,15 @@ mod tests {
         };
 
         // When waiting on a prompt with no deadline.
-        let waited = wait_prompted(&state, PaneId(1), &poke, FAST, None, SystemTime::now());
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &poke,
+            &|| false,
+            FAST,
+            None,
+            SystemTime::now(),
+        );
 
         // Then the turn ends idle.
         assert_eq!(
@@ -475,7 +508,7 @@ mod tests {
         let state = State::new(state_with(vec![agent(1, AgentStatus::NeedsInput)], 1));
 
         // When waiting on pane 1.
-        let waited = wait_done(&state, PaneId(1), &|| {}, FAST, None);
+        let waited = wait_done(&state, PaneId(1), &|| {}, &|| false, FAST, None);
 
         // Then the wait ends blocked.
         assert_eq!(
@@ -488,13 +521,29 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn wait_ends_once_its_caller_hangs_up() {
+        // Given working agent 1 in pane 1 and no deadline.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Working)], 1));
+
+        // When waiting on pane 1 for a caller that already hung up.
+        let waited = wait_done(&state, PaneId(1), &|| {}, &|| true, FAST, None);
+
+        // Then the wait gives up.
+        assert_eq!(
+            waited.map_err(|error| error.code),
+            Err(ErrorCode::Timeout),
+            "nobody is left to answer, so the wait should stop"
+        );
+    }
+
+    #[rstest::rstest]
     fn wait_ends_with_no_agent_when_the_agent_stops() {
         // Given working agent 1 in pane 1, which the poll sees stop.
         let state = State::new(state_with(vec![agent(1, AgentStatus::Working)], 1));
         let poke = || set_status(&state, 1, AgentStatus::Stopped);
 
         // When waiting on pane 1.
-        let waited = wait_done(&state, PaneId(1), &poke, FAST, None);
+        let waited = wait_done(&state, PaneId(1), &poke, &|| false, FAST, None);
 
         // Then there is no agent to wait on.
         assert_eq!(
@@ -580,6 +629,7 @@ mod tests {
             &state,
             PaneId(1),
             &|| {},
+            &|| false,
             FAST,
             None,
             SystemTime::UNIX_EPOCH,
