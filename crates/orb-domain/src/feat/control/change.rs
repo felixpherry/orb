@@ -1,7 +1,8 @@
 //! Changes an agent asks for to what the screen owns: closing, renaming,
 //! settling and focusing a named pane, tab or session. Each acts on what it
 //! names, never on what the user has selected, and leaves the keys and the
-//! shown session alone, except `Focus`, and settling the shown session.
+//! shown session alone, except `Focus`, settling the shown session, and
+//! closing the last pane of the shown session, whose new shell takes the keys.
 
 use crate::feat::control::protocol::{ApiError, ErrorCode};
 use crate::feat::picker::intent::pick;

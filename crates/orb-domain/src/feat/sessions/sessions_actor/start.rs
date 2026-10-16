@@ -1,6 +1,7 @@
 //! Starting, moving and restoring sessions, worktrees and branches.
 
 use super::*;
+use crate::feat::sessions::validator::validate_new_session;
 
 impl SessionsActor {
     /// Runs `git init` in project `id`'s root, then shows the project as a
@@ -69,15 +70,33 @@ impl SessionsActor {
 
     /// Makes a session for an agent, as [`Self::new_session`] does, in
     /// `msg.dir` when set, else project `msg.project`'s checkout or, with
-    /// `msg.worktree`, a new worktree from the project's default branch. The session isn't
-    /// selected or opened; `reply` gets the session and its first pane once
-    /// it's made, or why it wasn't.
+    /// `msg.worktree`, a new worktree from the project's default branch (read
+    /// in the worktree job). The session isn't selected or opened; `reply`
+    /// gets the session and its first pane once it's made, or why it wasn't.
+    /// While another session starts it is refused with
+    /// [`ApiStartError::Starting`]; otherwise it marks a session as starting
+    /// until it ends.
     #[must_use]
     pub(super) fn api_start(
         &mut self,
         msg: ApiStart,
         reply: Option<ReplySender<ApiStarted>>,
     ) -> Option<WorktreeJob> {
+        let claimed = {
+            let mut app = self.state.write();
+            let free = validate_new_session(&app).is_ok();
+            if free {
+                app.sessions.starting = true;
+            }
+            free
+        };
+        if !claimed {
+            if let Some(reply) = reply {
+                reply.send(Err(ApiStartError::Starting));
+            }
+            return None;
+        }
+        self.report.changed();
         let ApiStart {
             project,
             worktree,
@@ -89,23 +108,22 @@ impl SessionsActor {
         let workspace = match (dir, worktree) {
             (Some(dir), _) => Workspace::Existing(dir),
             (None, true) => {
-                let base = match self.project_of(project) {
-                    None => Err("the project is gone".to_owned()),
-                    Some((root, _)) => self.services.git.default_branch(&root).map_err(|report| {
-                        git_failed(
-                            &self.services.log,
-                            "default branch for a new session",
-                            &report,
-                        )
-                    }),
+                let Some((root, kind)) = self.project_of(project) else {
+                    self.end_new(Err("the project is gone".to_owned()), asker);
+                    return None;
                 };
-                match base {
-                    Ok(base) => Workspace::NewWorktree { base },
-                    Err(error) => {
-                        self.end_new(Err(error), asker);
-                        return None;
-                    }
-                }
+                let make = Make::New {
+                    base: None,
+                    name: name.clone(),
+                };
+                let start = Start::New {
+                    project,
+                    kind,
+                    name,
+                    parent,
+                    asker,
+                };
+                return Some(self.job(root, make, start));
             }
             (None, false) => Workspace::Checkout,
         };
@@ -139,7 +157,7 @@ impl SessionsActor {
         match workspace {
             Workspace::NewWorktree { base } => {
                 let make = Make::New {
-                    base,
+                    base: Some(base),
                     name: name.clone(),
                 };
                 let start = Start::New {
@@ -187,6 +205,7 @@ impl SessionsActor {
                         .map(|pane| (session, pane))
                         .ok_or_else(|| "the new session has no pane".to_owned())
                 });
+                let started = started.map_err(ApiStartError::Failed);
                 if let Some(reply) = reply {
                     reply.send(started);
                 }
@@ -399,7 +418,7 @@ impl SessionsActor {
         match (self.moving(id), to) {
             (Ok(moving), Workspace::NewWorktree { base }) => {
                 let make = Make::New {
-                    base,
+                    base: Some(base),
                     name: moving.name.clone(),
                 };
                 let repo = moving.root.clone();
@@ -879,12 +898,22 @@ impl Work {
         let log = &self.services.log;
         match &self.make {
             Make::New { base, name } => {
+                let base = match base {
+                    Some(base) => base.clone(),
+                    None => self
+                        .services
+                        .git
+                        .default_branch(&self.repo)
+                        .map_err(|report| {
+                            git_failed(log, "default branch for a new session", &report)
+                        })?,
+                };
                 let branch = name
                     .as_deref()
                     .and_then(slug)
                     .map(|slug| format!("orb/{slug}"))
                     .filter(|branch| !self.services.git.branch_exists(&self.repo, branch));
-                self.add_worktree(base, branch.as_deref())
+                self.add_worktree(&base, branch.as_deref())
                     .map_err(|report| git_failed(log, WORKTREE_UNMADE, &report))
             }
             Make::Again { cwd, branches } => self

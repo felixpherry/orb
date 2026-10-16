@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::actor::ActorRef;
+use kameo::error::SendError;
 use wherror::Error;
 
 use crate::command::SessionsCommand;
@@ -27,7 +28,9 @@ use crate::feat::control::protocol::{
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
 use crate::feat::harness::{HarnessId, Harnesses};
-use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace, ApiStart, SessionsActor};
+use crate::feat::sessions::sessions_actor::{
+    ApiAdd, ApiPlace, ApiStart, ApiStartError, SessionsActor,
+};
 use crate::feat::sessions::state::{Agent, SessionKind};
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
@@ -685,17 +688,10 @@ fn add_pane(deps: &ControlDeps, add: ApiAdd) -> Reply {
     }
 }
 
-/// Marks a session as starting (refused with `starting` while one already
-/// is), then asks the sessions actor to start `start` and replies with the new
-/// session and its first pane. The actor clears the mark however it ends.
+/// Asks the sessions actor to start `start` and replies with the new session
+/// and its first pane, or `starting` when the actor says another session is
+/// starting.
 fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
-    let claimed = {
-        let mut app = deps.state.write();
-        validator::not_starting(&app).map(|()| app.sessions.starting = true)
-    };
-    if let Err(error) = claimed {
-        return Reply::err(error);
-    }
     match deps
         .runtime
         .block_on(async { deps.sessions.ask(start).await })
@@ -709,6 +705,10 @@ fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
             }
             Reply::ok(&StartResult { session, pane })
         }
+        Err(SendError::HandlerError(ApiStartError::Starting)) => Reply::err(ApiError::new(
+            ErrorCode::Starting,
+            ApiStartError::Starting.to_string(),
+        )),
         Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
     }
 }

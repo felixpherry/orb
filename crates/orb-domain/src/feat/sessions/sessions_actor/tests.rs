@@ -11,9 +11,9 @@ use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
-    ApiAdd, ApiPlace, ApiStart, ColonyFolderReady, ColonyJob, FAST_POLL, Placement, RemoveFolder,
-    SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob, WorktreeReady,
-    current_branch, now_ms, spawn_sessions_actor,
+    ApiAdd, ApiPlace, ApiStart, ApiStartError, ColonyFolderReady, ColonyJob, FAST_POLL, Placement,
+    RemoveFolder, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob,
+    WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -42,6 +42,7 @@ use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::zmx::zmx_service::fake::FakeZmx;
 use crate::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxService, ZmxSession};
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
+use kameo::error::SendError;
 use kameo::prelude::{ActorRef, Message};
 use std::ffi::OsString;
 
@@ -9188,6 +9189,27 @@ async fn api_start(
         .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
 }
 
+/// Asks `actor` for an agent's new top-level session of `project` (in a new
+/// worktree when `worktree`) and waits, at most [`LIMIT`], for its answer,
+/// a refusal included.
+async fn api_start_answer(
+    actor: &ActorRef<SessionsActor>,
+    project: ProjectId,
+    worktree: bool,
+) -> Result<Result<(SessionId, PaneId), SendError<ApiStart, ApiStartError>>, Report<StoreError>> {
+    let start = ApiStart {
+        project,
+        worktree,
+        name: None,
+        parent: None,
+        dir: None,
+    };
+    tokio::time::timeout(LIMIT, actor.ask(start))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't answer in time")
+}
+
 #[rstest::rstest]
 #[tokio::test]
 async fn api_add_split_replies_with_the_saved_pane() -> Result<(), Report<StoreError>> {
@@ -9291,6 +9313,116 @@ async fn api_start_in_a_new_worktree_replies_with_its_session() -> Result<(), Re
         dir,
         git.added().map(|(path, _)| path),
         "the replied session runs in the new worktree"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_while_a_session_starts_is_refused_with_starting()
+-> Result<(), Report<StoreError>> {
+    // Given the orb project, the actor started through its mailbox, and a
+    // session already starting.
+    let (store, project) = store_with_project()?;
+    let zmx = zmx_running(&store);
+    let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
+    state.write().sessions.starting = true;
+
+    // When an agent asks for a session in its checkout.
+    let started = api_start_answer(&actor, project, false).await?;
+
+    // Then it is refused because another session is starting.
+    assert!(
+        matches!(
+            started,
+            Err(SendError::HandlerError(ApiStartError::Starting))
+        ),
+        "only one session starts at a time, got {started:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn api_start_claims_starting_while_its_worktree_is_made() -> Result<(), Report<StoreError>> {
+    // Given the orb project and no session starting.
+    let (store, project) = store_with_project()?;
+    let (mut actor, state) = start_with(
+        store,
+        &listing(Vec::new()),
+        &FakeGit::local(),
+        Path::new(NO_CLAUDE_DIR),
+    );
+
+    // When an agent asks for a session in a new worktree, before the job
+    // making it has run.
+    let start = ApiStart {
+        project,
+        worktree: true,
+        name: None,
+        parent: None,
+        dir: None,
+    };
+    let _job = actor.api_start(start, None);
+
+    // Then a session shows as starting.
+    assert!(
+        state.read().sessions.starting,
+        "the agent's start holds the one starting slot while its worktree is made"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn api_start_in_a_new_worktree_leaves_the_default_branch_to_its_job()
+-> Result<(), Report<StoreError>> {
+    // Given a project whose default branch git can't read.
+    let (store, project) = store_with_project()?;
+    let (mut actor, _state) = start_with(
+        store,
+        &listing(Vec::new()),
+        &FakeGit::plain(Ok(())),
+        Path::new(NO_CLAUDE_DIR),
+    );
+
+    // When an agent asks for a session in a new worktree.
+    let start = ApiStart {
+        project,
+        worktree: true,
+        name: None,
+        parent: None,
+        dir: None,
+    };
+    let job = actor.api_start(start, None);
+
+    // Then the start goes on to a worktree job, which reads the branch.
+    assert!(
+        job.is_some(),
+        "the default branch is read in the job, not on the sessions queue"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_start_in_a_new_worktree_of_a_non_repo_fails_with_gits_reason()
+-> Result<(), Report<StoreError>> {
+    // Given a project that isn't a git repository, and the actor started
+    // through its mailbox.
+    let (store, project) = store_with_project()?;
+    let zmx = zmx_running(&store);
+    let git = FakeGit::plain(Ok(()));
+    let (actor, _state) = spawned_with(store, &listing(Vec::new()), git, zmx).await?;
+
+    // When an agent asks for a session in a new worktree.
+    let started = api_start_answer(&actor, project, true).await?;
+
+    // Then it fails with git's reason.
+    assert!(
+        matches!(
+            &started,
+            Err(SendError::HandlerError(ApiStartError::Failed(why))) if why == NOT_A_REPO
+        ),
+        "the agent hears why git refused, got {started:?}"
     );
     Ok(())
 }

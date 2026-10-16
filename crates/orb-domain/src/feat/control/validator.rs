@@ -4,7 +4,6 @@ use crate::AppState;
 use crate::feat::control::agent;
 use crate::feat::control::protocol::{ApiError, ErrorCode};
 use crate::feat::sessions::state::{Agent, AgentStatus};
-use crate::feat::sessions::validator::{NewSessionError, validate_new_session};
 use crate::ids::{PaneId, SessionId};
 
 /// Refuses a change to settled session `session` with `settled`.
@@ -14,17 +13,6 @@ pub(crate) fn not_settled(app: &AppState, session: SessionId) -> Result<(), ApiE
             Err(ApiError::new(ErrorCode::Settled, "session is settled"))
         }
         _ => Ok(()),
-    }
-}
-
-/// Refuses a new session while one is starting, with `starting`.
-pub(crate) fn not_starting(app: &AppState) -> Result<(), ApiError> {
-    match validate_new_session(app) {
-        Ok(()) => Ok(()),
-        Err(NewSessionError::Starting) => Err(ApiError::new(
-            ErrorCode::Starting,
-            "a session is already starting",
-        )),
     }
 }
 
@@ -58,7 +46,7 @@ pub(crate) fn agent_ready(app: &AppState, pane: PaneId) -> Result<&Agent, ApiErr
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_ready, not_settled, not_starting, pane_free};
+    use super::{agent_ready, not_settled, pane_free};
     use crate::feat::control::protocol::ErrorCode;
     use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, SessionId};
@@ -77,23 +65,6 @@ mod tests {
             checked.map_err(|error| error.code),
             Err(ErrorCode::Settled),
             "a settled session can't be changed"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_session_is_refused_while_one_starts() {
-        // Given a session already starting.
-        let mut app = state_with(vec![stopped(1)], 1);
-        app.sessions.starting = true;
-
-        // When checking a new session.
-        let checked = not_starting(&app);
-
-        // Then it is refused with starting.
-        assert_eq!(
-            checked.map_err(|error| error.code),
-            Err(ErrorCode::Starting),
-            "only one session starts at a time"
         );
     }
 

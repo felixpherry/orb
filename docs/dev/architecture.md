@@ -40,8 +40,8 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 ## Actors
 
 - **orb has three actors.** `SessionsActor`, `WorktreesActor` and `SearchActor`, all kameo actors, are spawned in src/main.rs:175-193. Each one gets a `State` handle on the shared `AppState` and its own `Reporter`.
-- **Each actor matches its command enum in one place.** One `impl Message` holds one match over the enum (worktrees_actor.rs:80-94, sessions_actor.rs:439).
-- **Messages an actor sends to itself stay separate.** The hourly `Sweep` (worktrees_actor.rs:48), the two halves of the poll (`PollPlan`, `PollSeen`), a finished worktree (`WorktreeReady`), a fresh colony's copied folder (`ColonyFolderReady`), the start-up `KillSettled`, and search's `IndexNext` each have their own handler.
+- **Each actor matches its command enum in one place.** One `impl Message` holds one match over the enum (worktrees_actor.rs:80-94, sessions_actor.rs:487).
+- **Messages an actor sends to itself stay separate.** The hourly `Sweep` (worktrees_actor.rs:48), the two halves of the poll (`PollPlan`, `PollSeen`), a finished worktree (`WorktreeReady`), a fresh colony's copied folder (`ColonyFolderReady`), the start-up `KillSettled`, and search's `IndexNext` each have their own handler. So do the control socket's asks to the sessions actor, `ApiAdd` and `ApiStart` (sessions_actor.rs:584, :596).
 - **Slow outside calls never block the queue.** The poll is two asks with the harness and zmx listing done between them, a new worktree is made in a blocking task beside the actor, and a fresh colony's folder is copied, and a deleted one's removed, beside it the same way. Commands queued behind any of them keep moving.
 
 ## Who writes what
@@ -72,7 +72,8 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 
 ## The control socket
 
-- **`orb session`, `orb tab`, `orb pane` and `orb agent` are served on their own thread** (crates/orb-domain/src/feat/control/server.rs:1-3). It answers reads from the state, asks the sessions actor for anything it adds, and hands pane changes to the loop as a control event.
+- **orb listens on two sockets.** `orb session`, `orb tab`, `orb pane` and `orb agent` are served on orb.sock (crates/orb-domain/src/feat/control/server.rs:1-3); terminal-browser's split socket (control/browser_socket.rs:1-10) passes its splits and focus moves through the same requests.
+- **Each request gets its own thread, and it writes no state.** It answers reads from the state, asks the sessions actor for anything it adds or starts (the actor checks and claims the one starting slot), and hands pane changes to the loop as a control event.
 
 ## Adding a feature
 

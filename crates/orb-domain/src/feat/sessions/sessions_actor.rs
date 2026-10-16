@@ -295,7 +295,25 @@ pub struct ApiStart {
 
 /// What an [`ApiStart`] answers: the new session and its first pane, or why
 /// there is none.
-pub type ApiStarted = Result<(SessionId, PaneId), String>;
+pub type ApiStarted = Result<(SessionId, PaneId), ApiStartError>;
+
+/// Why an agent's new session wasn't made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiStartError {
+    /// Another session is starting.
+    Starting,
+    /// The start failed; the message box text.
+    Failed(String),
+}
+
+impl std::fmt::Display for ApiStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Starting => f.write_str("a session is already starting"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
 
 /// Who asked for a new session, which decides how its start ends.
 #[derive(Debug)]
@@ -417,9 +435,12 @@ struct Work {
 
 /// What a [`Work`] makes.
 enum Make {
-    /// A new worktree from `base`, on `orb/<slug of name>` when that branch
-    /// is free.
-    New { base: String, name: Option<String> },
+    /// A new worktree from `base` (the project's default branch, read in the
+    /// job, when `None`), on `orb/<slug of name>` when that branch is free.
+    New {
+        base: Option<String>,
+        name: Option<String>,
+    },
     /// A missing worktree at `cwd` again, on the first of `branches` that
     /// exists, else on the first made anew from the default branch.
     Again { cwd: PathBuf, branches: Vec<String> },
