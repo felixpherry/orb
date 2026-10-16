@@ -45,7 +45,7 @@ pub enum Intent {
     /// was changed by hand, the new shell taking the focus; while a float has
     /// the keys, open a float instead.
     AddPane,
-    /// Close the focused pane; on the agent's own pane, detach the agent.
+    /// Close the focused pane; a pane running an agent asks `No`/`Yes` first.
     ClosePane,
     /// Show only the focused pane over its tab, or every pane again.
     ToggleZoom,

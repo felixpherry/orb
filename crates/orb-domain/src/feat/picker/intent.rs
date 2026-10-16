@@ -8,6 +8,8 @@ use crate::command::{SearchCommand, SessionsCommand, Workspace, WorktreesCommand
 use crate::feat::git::intent::{
     change_workspace, pick_branch, pick_move_workspace, pick_new_workspace,
 };
+use crate::feat::layout::intent::close_focused_pane;
+use crate::feat::layout::state::SessionLayout;
 use crate::feat::pane::intent::{leave_pane, show_pane};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{
@@ -526,9 +528,16 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
             leave_close_listed_agent(state, session, pane)
         }
         Some(&PickerKind::ClosePane { pane, session }) => {
+            let from_pane = returns_to_pane(state);
             match close_picker(state).as_ref().and_then(PickerState::selected) {
                 Some(PickerItem::Confirm(true))
-                    if state.sessions.selected_agent(&state.layouts) == Some((session, pane)) =>
+                    if from_pane && still_focused(state, session, pane) =>
+                {
+                    close_focused_pane(state)
+                }
+                Some(PickerItem::Confirm(true))
+                    if !from_pane
+                        && state.sessions.selected_agent(&state.layouts) == Some((session, pane)) =>
                 {
                     close_agent_pane(state, session, pane)
                 }
@@ -723,6 +732,12 @@ fn preview_command(state: &mut AppState) -> Vec<Command> {
 /// Whether the open picker gives the keys back to a pane when it closes.
 fn returns_to_pane(state: &AppState) -> bool {
     state.picker.as_ref().map(PickerState::return_to) == Some(Focus::Pane)
+}
+
+/// Whether `pane` is still the focused pane of the shown session, `session`.
+fn still_focused(state: &AppState, session: SessionId, pane: PaneId) -> bool {
+    state.shown_session() == Some(session)
+        && state.shown_layout().and_then(SessionLayout::focused) == Some(pane)
 }
 
 /// Closes the picker and gives the keys back to where it was opened from.

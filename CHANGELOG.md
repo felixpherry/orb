@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 
 ## [0.1.0] - 2026-10-16

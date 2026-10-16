@@ -78,7 +78,7 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | --- | --- |
 | `Alt h/j/k/l`, Alt arrows | Move between panes. At a tab's left or right edge, go to the previous or next tab (wrapping). With a float focused, move between floats. Nothing in the sidebar |
 | `Alt n` | Add a pane (with a float focused, add a float) |
-| `Alt x` | Close the pane |
+| `Alt x` | Close the pane (a pane running an agent asks first) |
 | `Alt f` | Show / hide the session's floats; with none, open a shell float |
 | `Alt +` / `Alt =`, `Alt -` | Grow / shrink the focused pane, float or the sidebar |
 | `Alt 1` to `Alt 9` | Go to tab N |

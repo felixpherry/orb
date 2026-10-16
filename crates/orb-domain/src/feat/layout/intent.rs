@@ -9,6 +9,9 @@ use crate::feat::layout::validator::{
     validate_tiled_action,
 };
 use crate::feat::pane::intent::enter_session;
+use crate::feat::picker::intent::open_picker;
+use crate::feat::picker::state::PickerState;
+use crate::feat::sessions::state::SidebarItem;
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::validate_resize;
 use crate::ids::{PaneId, SessionId};
@@ -283,8 +286,20 @@ pub(crate) fn toggle_floats(state: &mut AppState) -> Vec<Command> {
     }
 }
 
-/// Closes the focused pane and saves the layout.
+/// Closes the focused pane and saves the layout; a pane running an agent
+/// asks `Close <name>?` first, with `No` selected.
 pub(crate) fn close_pane(state: &mut AppState) -> Vec<Command> {
+    if validate_pane_action(state).is_ok()
+        && let Some(SidebarItem::Agent { session, pane }) = state.focused_agent()
+    {
+        open_picker(state, PickerState::close_pane(pane, session, state.focus));
+        return vec![];
+    }
+    close_focused_pane(state)
+}
+
+/// Closes the focused pane and saves the layout.
+pub(crate) fn close_focused_pane(state: &mut AppState) -> Vec<Command> {
     let focused = state.shown_layout().and_then(SessionLayout::focused);
     let (Ok(()), Some(owner), Some(focused)) =
         (validate_pane_action(state), state.shown_session(), focused)
@@ -401,6 +416,8 @@ mod tests {
     use crate::feat::layout::floats::FloatLayout;
     use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
+    use crate::feat::picker::list::PickerItem;
+    use crate::feat::picker::state::PickerKind;
 
     use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{PaneId, SessionId};
@@ -834,22 +851,172 @@ mod tests {
         );
     }
 
+    /// The open picker's kind and selected row.
+    fn open_confirm(state: &AppState) -> Option<(&PickerKind, Option<&PickerItem>)> {
+        state
+            .picker
+            .as_ref()
+            .map(|picker| (picker.kind(), picker.selected()))
+    }
+
+    /// `state` after `Alt x`, with `answer` highlighted in its close confirm.
+    fn answering_close(mut state: AppState, answer: bool) -> AppState {
+        IntentHandler::handle(&Intent::ClosePane, &mut state);
+        if let Some(picker) = &mut state.picker {
+            picker.select(&PickerItem::Confirm(answer));
+        }
+        state
+    }
+
     #[rstest::rstest]
-    fn close_pane_on_an_agents_pane_closes_it() {
+    fn close_pane_on_an_agents_pane_opens_its_confirm() {
         // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
-        // When closing it.
+        // When closing it (`Alt x`).
+        IntentHandler::handle(&Intent::ClosePane, &mut state);
+
+        // Then its close confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::ClosePane {
+                    pane: PaneId(1),
+                    session: SessionId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "Alt x on an agent's pane should ask first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_on_an_agents_pane_closes_nothing_yet() {
+        // Given agent 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When closing it (`Alt x`).
         let commands = IntentHandler::handle(&Intent::ClosePane, &mut state);
 
-        // Then its layout is gone and saved as such.
+        // Then the pane is still there and nothing is saved.
         assert_eq!(
-            (state.layouts.get(SessionId(1)).is_some(), commands),
+            (pane_count(&state), commands),
+            (1, vec![]),
+            "the pane waits for the confirm"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_on_a_floating_agent_opens_its_confirm() {
+        // Given agent 2's pane floated off agent 1's tab, with the keys.
+        let mut state = two_agents();
+        IntentHandler::handle(&Intent::ToggleFloatEmbed, &mut state);
+
+        // When closing it (`Alt x`).
+        IntentHandler::handle(&Intent::ClosePane, &mut state);
+
+        // Then the float's close confirm is open.
+        assert_eq!(
             (
-                false,
-                vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))]
+                state
+                    .shown_layout()
+                    .is_some_and(SessionLayout::float_focused),
+                matches!(
+                    open_confirm(&state),
+                    Some((PickerKind::ClosePane { pane: PaneId(2), .. }, _))
+                )
             ),
-            "an agent's pane closes like any other"
+            (true, true),
+            "Alt x on a floating agent's pane should ask first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn no_on_the_close_confirm_keeps_the_agents_pane() {
+        // Given No highlighted in the confirm `Alt x` opened on agent 1's
+        // lone pane.
+        let mut state = answering_close(with_layout(Focus::Pane), false);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the pane is still there, with the keys.
+        assert_eq!(
+            (pane_count(&state), state.focus),
+            (1, Focus::Pane),
+            "No keeps the pane and gives the keys back to it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_close_confirm_closes_the_agents_pane() {
+        // Given Yes highlighted in the confirm `Alt x` opened on agent 2's
+        // pane, beside agent 1's.
+        let mut state = answering_close(two_agents(), true);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then only agent 1's pane is left.
+        assert_eq!(
+            (pane_count(&state), shown_focus(&state)),
+            (1, Some(PaneId(1))),
+            "Yes closes the agent's pane as Alt x on a shell does"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_close_confirm_after_a_focus_change_closes_nothing() {
+        // Given Yes highlighted in the confirm `Alt x` opened on agent 2's
+        // pane, and the focus moved to agent 1's pane meanwhile.
+        let mut state = answering_close(two_agents(), true);
+        state.layouts.focus_pane(SessionId(1), PaneId(1));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then both panes are still there and no layout is saved.
+        assert_eq!(
+            (
+                pane_count(&state),
+                commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(1))))
+            ),
+            (2, false),
+            "Yes closes only the pane that was focused when it asked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_close_confirm_of_the_last_pane_empties_the_layout() {
+        // Given Yes highlighted in the confirm `Alt x` opened on agent 1's
+        // lone pane.
+        let mut state = answering_close(with_layout(Focus::Pane), true);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then session 1 has no layout left.
+        assert!(
+            state.layouts.get(SessionId(1)).is_none(),
+            "closing the last pane empties the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_close_confirm_of_the_last_pane_saves_the_layout() {
+        // Given Yes highlighted in the confirm `Alt x` opened on agent 1's
+        // lone pane.
+        let mut state = answering_close(with_layout(Focus::Pane), true);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the emptied layout is saved, which gives the session a new
+        // shell tab.
+        assert_eq!(
+            commands,
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
+            "the last pane's close should be saved"
         );
     }
 
