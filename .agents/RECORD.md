@@ -52,7 +52,7 @@ Entries are added or amended **only with human approval**.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
 - (arch) The ids of agents, sessions, panes and projects live in one shared module, `orb_domain::ids`.
-- (arch) Each arm of the `IntentHandler`'s match is a one-line call into the owning feature's `intent.rs`; only quitting stays a small function beside the match.
+- (arch) Each arm of the `IntentHandler`'s match is a one-line call into the owning feature's `intent.rs`; after the match, `handle` records a focus move as a jump, marks an entered agent pane seen, reveals the cursor, and puts it on the active row when the keys leave a pane.
 - (arch) The `SessionsActor`'s methods are split by concern across files under `feat/sessions/sessions_actor/`.
 - (arch) The frontend loop's report handling and its pane lifecycle live in their own files under `crates/orb-tui/src/run/`.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.

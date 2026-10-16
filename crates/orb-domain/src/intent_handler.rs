@@ -152,7 +152,7 @@ impl IntentHandler {
         {
             commands = record_focus_move(state, left, commands);
         }
-        visit_entered_pane(state, left.flatten(), &mut commands);
+        commands.extend(sessions::intent::visit_entered_pane(state, left.flatten()));
         state.sessions.reveal_cursor(&state.layouts);
         if was_pane
             && state.focus == Focus::Sidebar
@@ -211,19 +211,6 @@ impl IntentHandler {
 fn quit(state: &mut AppState) -> Vec<Command> {
     state.should_quit = true;
     vec![]
-}
-
-/// Visits the focused agent's pane when the keys are in it and it isn't
-/// `left`, the agent whose pane had them before the intent.
-fn visit_entered_pane(state: &AppState, left: Option<SidebarItem>, commands: &mut Vec<Command>) {
-    let entered = (state.focus == Focus::Pane)
-        .then(|| state.focused_agent())
-        .flatten();
-    if let Some(SidebarItem::Agent { pane, .. }) = entered
-        && entered != left
-    {
-        commands.push(Command::Sessions(SessionsCommand::Visit(pane)));
-    }
 }
 
 /// Records leaving agent row `left` for the focused agent, each only if it

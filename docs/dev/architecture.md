@@ -31,7 +31,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 
 - **An intent is user input and nothing else.** Keys and clicks become an `Intent`; no actor or timer makes one.
 - **The handler is synchronous and stays inside orb.** `IntentHandler` checks the intent, changes `AppState`, and hands back a list of `Command`. It never calls git, zmx or any other service.
-- **`handle` is a single match.** Each arm is one call into that feature's `intent.rs`. The only helper that lives beside the match is the one for quitting (intent_handler.rs:211).
+- **`handle` is a single match, then four steps every intent shares.** Each arm is one call into that feature's `intent.rs`; only quitting keeps a small function beside the match (intent_handler.rs:210). After the match, `handle` records a focus move as a jump (intent_handler.rs:153), marks an agent pane the keys entered as seen through the sessions feature (:155), reveals the cursor (:156), and puts the cursor on the active row when the keys leave a pane (:157-171).
 - **Shared ids sit in one module.** Agent, session, pane and project ids are in crates/orb-domain/src/ids.rs.
 - **Real work always leaves as a command.** Starting, settling or searching never happens inside the handler.
 - **The loop runs a few commands itself.** Attaching and detaching panes, passing Ctrl-g to the attached pane, and quick reads such as a branch or folder list for a picker or the session picker's preview.

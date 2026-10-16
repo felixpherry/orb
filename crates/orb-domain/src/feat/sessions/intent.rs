@@ -417,6 +417,20 @@ pub(crate) fn new_session(
     ]
 }
 
+/// The visit for the agent pane the keys landed in, when it isn't `left`,
+/// the agent whose pane had them before the intent.
+pub(crate) fn visit_entered_pane(state: &AppState, left: Option<SidebarItem>) -> Option<Command> {
+    let entered = (state.focus == Focus::Pane)
+        .then(|| state.focused_agent())
+        .flatten();
+    match entered {
+        Some(SidebarItem::Agent { pane, .. }) if entered != left => {
+            Some(Command::Sessions(SessionsCommand::Visit(pane)))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::command::{SessionsCommand, Workspace};
