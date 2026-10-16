@@ -7,8 +7,9 @@
 //! out of those listed, over an orange rule. Each row is one agent running in
 //! a session's pane: the agent's status icon, its dim `<project>/` and bright
 //! `<session>/<agent>`, and how long the agent has worked or since its last
-//! chat; status and time are drawn live. Settled rows are dimmed behind a check. Nothing matched
-//! leaves the list empty.
+//! chat; status and time are drawn live. Settled rows are dimmed behind a check. When
+//! nothing matched but agents of settled sessions would, the list says how
+//! many (`2 settled matches · s to show`); otherwise it stays empty.
 //!
 //! The popup's bottom row, under both boxes, holds the picker's keys, dim.
 //!
@@ -45,6 +46,7 @@ use crate::sidebar::{
 
 /// Draws the session picker over `area`: the list of `picker`'s rows with
 /// live status from `sessions` (`attached` sessions fill the idle circle),
+/// or with none shown, how many `settled` agents the typed text matches,
 /// and the selected row's agent preview with its harness's mark and name from
 /// `harnesses`. Returns how many rows the list fits, and where the terminal
 /// cursor goes in the input. Records the popup, the list box as the wheel's
@@ -60,6 +62,7 @@ pub(crate) fn render(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     now: SystemTime,
+    settled: usize,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
@@ -72,7 +75,9 @@ pub(crate) fn render(
     let frame = with_hints(picker, popup, buf);
     let [list_box, preview_box] = boxes(frame, area.width >= 120);
     hits.record_selector(list_box);
-    let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll, hits);
+    let drawn = render_list(
+        picker, sessions, attached, now, settled, list_box, buf, scroll, hits,
+    );
     render_preview(picker, sessions, attached, harnesses, now, preview_box, buf);
     drawn
 }
@@ -159,8 +164,9 @@ fn title(kind: &PickerKind) -> Line<'static> {
     Line::from(span(text, BLUE))
 }
 
-/// The list box: title, input row with the count, orange rule, rows.
-/// Records each row in `hits`. Returns the rows' height and the cursor.
+/// The list box: title, input row with the count, orange rule, rows, or
+/// with none shown and `settled` above 0, the settled-matches hint. Records
+/// each row in `hits`. Returns the rows' height and the cursor.
 #[expect(
     clippy::too_many_arguments,
     reason = "the list's inputs plus the scroll and hit map it updates"
@@ -170,6 +176,7 @@ fn render_list(
     sessions: &Sessions,
     attached: &HashSet<SessionId>,
     now: SystemTime,
+    settled: usize,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
@@ -189,6 +196,9 @@ fn render_list(
     let cursor = render_input(picker, &count, input, buf, hits);
     Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
     let page = usize::from(rows.height).max(1);
+    if shown.is_empty() && settled > 0 {
+        Line::from(span(format!("  {}", settled_hint(settled)), COMMENT)).render(rows, buf);
+    }
     let offset = scroll.follow(picker.selection(), shown.len(), page);
     for ((index, (item, matches)), y) in shown
         .into_iter()
@@ -204,6 +214,15 @@ fn render_list(
         render_row(item, matches, sessions, attached, now, row, buf);
     }
     (page, cursor)
+}
+
+/// What the empty list says when the typed text matches `count` agents of
+/// settled sessions.
+fn settled_hint(count: usize) -> String {
+    match count {
+        1 => "1 settled match · s to show".to_owned(),
+        count => format!("{count} settled matches · s to show"),
+    }
 }
 
 /// The prompt and the typed text (its end while too long, as in the
@@ -806,6 +825,18 @@ mod tests {
     /// Draws `picker` over a `width`×`height` screen with live data from
     /// `sessions`, nothing attached. Returns the screen and the page size.
     fn draw(picker: &PickerState, sessions: &Sessions, width: u16, height: u16) -> (Buffer, usize) {
+        draw_counting(picker, sessions, 0, width, height)
+    }
+
+    /// [`draw`] with `settled` agents of settled sessions matching the
+    /// typed text.
+    fn draw_counting(
+        picker: &PickerState,
+        sessions: &Sessions,
+        settled: usize,
+        width: u16,
+        height: u16,
+    ) -> (Buffer, usize) {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         let (page, _) = render(
             picker,
@@ -813,6 +844,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             now(),
+            settled,
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -838,6 +870,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             now(),
+            0,
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -1491,6 +1524,46 @@ mod tests {
             hits.text_at(Position::new(cursor.x - 1, cursor.y)),
             Some(1),
             "the column before the cursor should be the last typed grapheme"
+        );
+    }
+
+    /// Three idle agents with `zz` typed, which matches none of them.
+    fn matching_nothing() -> (PickerState, Sessions) {
+        let sessions = three_agents();
+        let mut picker = picker(&sessions);
+        typed(&mut picker, &['z', 'z']);
+        (picker, sessions)
+    }
+
+    #[rstest::rstest]
+    #[case::two(2, "2 settled matches · s to show")]
+    #[case::one(1, "1 settled match · s to show")]
+    fn empty_list_says_how_many_settled_agents_match(#[case] count: usize, #[case] hint: &str) {
+        // Given typed text that matches no listed agent.
+        let (picker, sessions) = matching_nothing();
+
+        // When drawing it with `count` settled agents matching.
+        let (buf, _) = draw_counting(&picker, &sessions, count, 120, 30);
+
+        // Then the empty list says so.
+        assert!(
+            lines(&buf).iter().any(|line| line.contains(hint)),
+            "the empty list should read {hint:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn empty_list_without_settled_matches_says_nothing() {
+        // Given typed text that matches no listed agent.
+        let (picker, sessions) = matching_nothing();
+
+        // When drawing it with no settled agent matching.
+        let (buf, _) = draw_counting(&picker, &sessions, 0, 120, 30);
+
+        // Then no hint is drawn.
+        assert!(
+            !lines(&buf).iter().any(|line| line.contains("settled match")),
+            "with nothing settled to show, the list stays empty"
         );
     }
 }

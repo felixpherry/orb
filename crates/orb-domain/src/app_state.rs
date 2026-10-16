@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
-use crate::feat::picker::state::PickerState;
+use crate::feat::picker::state::{PickerMemory, PickerState};
 use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -68,6 +68,9 @@ pub struct AppState {
     pub layouts: Layouts,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
+    /// What the session, Colonists and search pickers had when they last
+    /// closed, until orb quits. Written by the intent handler.
+    pub picker_memory: PickerMemory,
     /// The open rename box, if any. Written by the intent handler, and
     /// cleared by the frontend when it gives the keys to a pane.
     pub rename: Option<Rename>,

@@ -80,33 +80,37 @@ pub(crate) fn open_worlds(state: &mut AppState) -> Vec<Command> {
     vec![]
 }
 
-/// Opens the session picker, loading the selected row's preview.
+/// Opens the session picker on what it had when it last closed, loading the
+/// selected row's preview.
 pub(crate) fn open_session_picker(state: &mut AppState) -> Vec<Command> {
+    let memory = state.picker_memory.sessions.clone();
     let items = session_items(
         &state.sessions,
         &state.layouts,
-        SessionFilter::All,
-        false,
+        memory.filter,
+        memory.colonists,
         None,
     );
-    open_picker(state, PickerState::sessions(items, state.focus));
+    open_picker(state, PickerState::sessions(items, state.focus).recall(&memory));
     preview_command(state)
 }
 
-/// Opens the Colonists picker on the keyed colony, loading the selected
-/// row's preview.
+/// Opens the Colonists picker on the keyed colony, on what the Colonists
+/// picker had when it last closed, loading the selected row's preview.
 pub(crate) fn open_colonists(state: &mut AppState) -> Vec<Command> {
     let Ok(colony) = validate_open_colonists(state) else {
         return vec![];
     };
+    let memory = state.picker_memory.colonists.clone();
     let items = session_items(
         &state.sessions,
         &state.layouts,
-        SessionFilter::All,
-        false,
+        memory.filter,
+        memory.colonists,
         Some(colony),
     );
-    open_picker(state, PickerState::colonists(items, colony, state.focus));
+    let picker = PickerState::colonists(items, colony, state.focus).recall(&memory);
+    open_picker(state, picker);
     preview_command(state)
 }
 
@@ -117,12 +121,12 @@ pub(crate) fn open_worktree_picker(state: &mut AppState) -> Vec<Command> {
     vec![Command::Worktrees(WorktreesCommand::RefreshWorktrees)]
 }
 
-/// Opens the search picker and asks for a search of every transcript.
+/// Opens the search picker with the text it had when it last closed, and
+/// asks for a search of every transcript for it.
 pub(crate) fn open_search(state: &mut AppState) -> Vec<Command> {
-    open_picker(state, PickerState::search(state.focus));
-    vec![Command::Search(SearchCommand::SearchTranscripts {
-        query: String::new(),
-    })]
+    let query = state.picker_memory.search.clone();
+    open_picker(state, PickerState::search(state.focus).with_input(&query));
+    vec![Command::Search(SearchCommand::SearchTranscripts { query })]
 }
 
 /// Opens the project filter: all projects, the worlds in worlds order,
@@ -740,20 +744,24 @@ fn still_focused(state: &AppState, session: SessionId, pane: PaneId) -> bool {
         && state.shown_layout().and_then(SessionLayout::focused) == Some(pane)
 }
 
-/// Closes the picker and gives the keys back to where it was opened from.
+/// Closes the picker, keeping what it had in the picker memory, and gives
+/// the keys back to where it was opened from.
 fn close_picker(state: &mut AppState) -> Option<PickerState> {
     let picker = state.picker.take()?;
+    state.picker_memory.remember(&picker);
     state.focus = picker.return_to();
     Some(picker)
 }
 
 /// Swaps the open picker for the list it was opened over, dropping the
 /// selected row when `drop_row`; the keys stay in the picker. With no list
-/// under it, closes it and gives the keys back.
+/// under it, closes it, keeping what it had in the picker memory, and gives
+/// the keys back.
 fn back_to_list(state: &mut AppState, drop_row: bool) {
     let Some(confirm) = state.picker.take() else {
         return;
     };
+    state.picker_memory.remember(&confirm);
     let return_to = confirm.return_to();
     match confirm.back() {
         Some(mut list) => {

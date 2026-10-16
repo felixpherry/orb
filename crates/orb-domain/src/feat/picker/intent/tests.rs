@@ -2774,7 +2774,7 @@ fn pressing_the_active_filter_again_lists_all() {
 }
 
 #[rstest::rstest]
-fn reopening_the_session_picker_starts_on_all() {
+fn reopening_the_session_picker_keeps_its_filter() {
     // Given the session picker filtered to settled agents, then closed.
     let mut state = open_sessions(state_at(
         vec![agent(1, AgentStatus::Idle)],
@@ -2782,20 +2782,130 @@ fn reopening_the_session_picker_starts_on_all() {
     ));
     IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
     IntentHandler::handle(&Intent::PickerCancel, &mut state);
-    IntentHandler::handle(&Intent::PickerCancel, &mut state);
 
     // When opening the session picker again.
     let state = open_sessions(state);
 
-    // Then it starts on all.
+    // Then it opens on settled agents.
     assert_eq!(
         picker_kind(&state),
         Some(PickerKind::Sessions {
-            filter: SessionFilter::All,
+            filter: SessionFilter::Settled,
             colonists: false,
             scope: None
         }),
-        "every opening should start on all"
+        "the picker should keep its filter until orb quits"
+    );
+}
+
+/// `state` with the open picker closed by `Esc`.
+fn escaped(mut state: AppState) -> AppState {
+    IntentHandler::handle(&Intent::PickerCancel, &mut state);
+    state
+}
+
+/// The open picker's typed text.
+fn picker_text(state: &AppState) -> Option<&str> {
+    state.picker.as_ref().map(PickerState::input)
+}
+
+#[rstest::rstest]
+fn session_picker_reopens_with_its_typed_text() {
+    // Given the session picker with `zz` typed, then closed.
+    let state = escaped(typed(
+        open_sessions(jumping(Focus::Sidebar, &[], &[])),
+        &['z', 'z'],
+    ));
+
+    // When opening the session picker again.
+    let state = open_sessions(state);
+
+    // Then `zz` is still typed.
+    assert_eq!(
+        picker_text(&state),
+        Some("zz"),
+        "the picker should keep its typed text until orb quits"
+    );
+}
+
+#[rstest::rstest]
+fn reopened_session_picker_filters_its_rows_by_the_kept_text() {
+    // Given agents 1 and 2, and the session picker with `zz` typed, which
+    // matches neither, then closed.
+    let state = escaped(typed(
+        open_sessions(jumping(Focus::Sidebar, &[], &[])),
+        &['z', 'z'],
+    ));
+
+    // When opening the session picker again.
+    let state = open_sessions(state);
+
+    // Then no row is shown.
+    assert_eq!(
+        session_ids(&state),
+        [],
+        "the kept text should filter the rows as typing did"
+    );
+}
+
+#[rstest::rstest]
+fn reopened_session_picker_with_kept_text_opens_in_list_mode() {
+    // Given the session picker with `zz` typed, then closed.
+    let state = escaped(typed(
+        open_sessions(jumping(Focus::Sidebar, &[], &[])),
+        &['z', 'z'],
+    ));
+
+    // When opening the session picker again.
+    let state = open_sessions(state);
+
+    // Then letters are list keys again.
+    assert!(
+        state.picker.as_ref().is_some_and(PickerState::listing),
+        "the session picker should still open in list mode"
+    );
+}
+
+#[rstest::rstest]
+fn session_picker_keeps_its_text_when_a_pick_closes_it() {
+    // Given the session picker with `zz` typed, closed by `⏎`.
+    let mut state = typed(
+        open_sessions(jumping(Focus::Sidebar, &[], &[])),
+        &['z', 'z'],
+    );
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // When opening the session picker again.
+    let state = open_sessions(state);
+
+    // Then `zz` is still typed.
+    assert_eq!(
+        picker_text(&state),
+        Some("zz"),
+        "a pick should keep the text as Esc does"
+    );
+}
+
+#[rstest::rstest]
+fn a_fresh_app_state_opens_the_session_picker_on_all_agents() {
+    // Given agents 1 and 2 in a newly started orb.
+    let state = jumping(Focus::Sidebar, &[], &[]);
+
+    // When opening the session picker.
+    let state = open_sessions(state);
+
+    // Then it opens on all agents, colonists hidden, nothing typed.
+    assert_eq!(
+        (picker_kind(&state), picker_text(&state)),
+        (
+            Some(PickerKind::Sessions {
+                filter: SessionFilter::All,
+                colonists: false,
+                scope: None
+            }),
+            Some("")
+        ),
+        "nothing about pickers outlives orb"
     );
 }
 
@@ -4243,6 +4353,44 @@ fn open_search_returns_an_empty_search() {
 }
 
 #[rstest::rstest]
+fn search_picker_reopens_with_its_text() {
+    // Given the search picker with `fix` typed, then closed.
+    let mut state = jumping(Focus::Sidebar, &[], &[]);
+    IntentHandler::handle(&Intent::OpenSearch, &mut state);
+    let mut state = escaped(typed(state, &['f', 'i', 'x']));
+
+    // When opening the search picker again.
+    IntentHandler::handle(&Intent::OpenSearch, &mut state);
+
+    // Then `fix` is still typed.
+    assert_eq!(
+        picker_text(&state),
+        Some("fix"),
+        "the search picker should keep its text until orb quits"
+    );
+}
+
+#[rstest::rstest]
+fn search_picker_reopens_asking_for_its_text() {
+    // Given the search picker with `fix` typed, then closed.
+    let mut state = jumping(Focus::Sidebar, &[], &[]);
+    IntentHandler::handle(&Intent::OpenSearch, &mut state);
+    let mut state = escaped(typed(state, &['f', 'i', 'x']));
+
+    // When opening the search picker again.
+    let commands = IntentHandler::handle(&Intent::OpenSearch, &mut state);
+
+    // Then a search for `fix` is asked for.
+    assert_eq!(
+        commands,
+        [Command::Search(SearchCommand::SearchTranscripts {
+            query: "fix".to_owned()
+        })],
+        "reopening should search for the kept text"
+    );
+}
+
+#[rstest::rstest]
 #[case::input(Intent::PickerInput('x'), "fix")]
 #[case::backspace(Intent::PickerBackspace, "f")]
 #[case::delete_word(Intent::PickerDeleteWord, "")]
@@ -5254,25 +5402,83 @@ fn toggle_colonists_again_hides_them() {
 }
 
 #[rstest::rstest]
-fn session_picker_hides_colonists_at_each_open() {
+fn session_picker_keeps_colonists_shown_at_the_next_open() {
     // Given the session picker showing colonists, then closed.
     let mut state = open_sessions(colony_with_colonists([AgentStatus::Idle; 3]));
     IntentHandler::handle(&Intent::ToggleColonists, &mut state);
-    IntentHandler::handle(&Intent::PickerCancel, &mut state);
     IntentHandler::handle(&Intent::PickerCancel, &mut state);
 
     // When opening the session picker again.
     let state = open_sessions(state);
 
-    // Then it starts with colonists hidden.
+    // Then colonists' agents still show.
     assert_eq!(
         picker_kind(&state),
         Some(PickerKind::Sessions {
             filter: SessionFilter::All,
-            colonists: false,
+            colonists: true,
             scope: None
         }),
-        "every opening should hide colonists"
+        "c should be kept until orb quits"
+    );
+}
+
+#[rstest::rstest]
+fn colonists_picker_does_not_take_the_session_pickers_text() {
+    // Given colony 1 selected, and the session picker with `zz` typed,
+    // then closed.
+    let state = escaped(typed(
+        open_sessions(colony_with_colonists([AgentStatus::Idle; 3])),
+        &['z', 'z'],
+    ));
+
+    // When opening the Colonists picker.
+    let mut state = state;
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+
+    // Then nothing is typed in it.
+    assert_eq!(
+        picker_text(&state),
+        Some(""),
+        "the Colonists picker keeps its own memory"
+    );
+}
+
+#[rstest::rstest]
+fn colonists_picker_reopens_with_its_own_text() {
+    // Given colony 1 selected, and the Colonists picker with `zz` typed,
+    // then closed.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+    let mut state = escaped(typed(state, &['z', 'z']));
+
+    // When opening the Colonists picker again.
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+
+    // Then `zz` is still typed.
+    assert_eq!(
+        picker_text(&state),
+        Some("zz"),
+        "the Colonists picker should keep its text until orb quits"
+    );
+}
+
+#[rstest::rstest]
+fn session_picker_does_not_take_the_colonists_pickers_text() {
+    // Given colony 1 selected, and the Colonists picker with `zz` typed,
+    // then closed.
+    let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+    IntentHandler::handle(&Intent::OpenColonists, &mut state);
+    let state = escaped(typed(state, &['z', 'z']));
+
+    // When opening the session picker.
+    let state = open_sessions(state);
+
+    // Then nothing is typed in it.
+    assert_eq!(
+        picker_text(&state),
+        Some(""),
+        "the session picker keeps its own memory"
     );
 }
 

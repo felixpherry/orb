@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::{
-    PickTarget, PickerKind, PickerState, SessionFilter, expand, hit_label, session_items,
-    split_path,
+    ListMemory, PickTarget, PickerKind, PickerState, SessionFilter, expand, hit_label,
+    session_items, split_path,
 };
 use crate::Focus;
 use crate::feat::git::git_service::GitRef;
@@ -1429,4 +1429,108 @@ fn other_pickers_ignore_start_search(#[case] which: &str) {
 
     // Then it is not in a list-mode picker's search mode.
     assert!(!picker.searching(), "the {which} picker should not search");
+}
+
+#[rstest::rstest]
+fn recall_sets_the_filter_toggle_and_text() {
+    // Given a session picker on all agents with nothing typed.
+    let picker = PickerState::sessions(Vec::new(), Focus::Sidebar);
+
+    // When recalling the settled filter, colonists shown and `ui` typed.
+    let picker = picker.recall(&ListMemory {
+        filter: SessionFilter::Settled,
+        colonists: true,
+        text: "ui".to_owned(),
+    });
+
+    // Then the picker is on them.
+    assert_eq!(
+        (picker.kind(), picker.input()),
+        (
+            &PickerKind::Sessions {
+                filter: SessionFilter::Settled,
+                colonists: true,
+                scope: None
+            },
+            "ui"
+        ),
+        "recall should restore what the picker had"
+    );
+}
+
+/// Agent 1 (`api`) in session 1, and agent 2 (`ui`) in session 2, settled.
+fn api_and_settled_ui() -> Sessions {
+    let mut sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
+    for session in &mut sessions.sessions {
+        if session.id == SessionId(2) {
+            session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(30));
+        }
+    }
+    sessions
+}
+
+/// The session picker over `sessions` on `filter`, with `text` typed.
+fn sessions_picker(sessions: &Sessions, filter: SessionFilter, text: &str) -> PickerState {
+    let layouts = layouts_for(&sessions.projects);
+    let items = session_items(sessions, &layouts, filter, false, None);
+    PickerState::sessions(items, Focus::Sidebar).recall(&ListMemory {
+        filter,
+        colonists: false,
+        text: text.to_owned(),
+    })
+}
+
+#[rstest::rstest]
+fn settled_matches_counts_the_settled_agents_the_text_matches() {
+    // Given `ui` typed, which matches only settled agent 2.
+    let sessions = api_and_settled_ui();
+    let picker = sessions_picker(&sessions, SessionFilter::All, "ui");
+
+    // When counting settled matches.
+    let count = picker.settled_matches(&sessions, &layouts_for(&sessions.projects));
+
+    // Then there is one.
+    assert_eq!(count, 1, "agent 2 is the one settled match");
+}
+
+#[rstest::rstest]
+fn settled_matches_is_zero_under_the_settled_filter() {
+    // Given `zz` typed under the settled filter, which matches nothing.
+    let sessions = api_and_settled_ui();
+    let picker = sessions_picker(&sessions, SessionFilter::Settled, "zz");
+
+    // When counting settled matches.
+    let count = picker.settled_matches(&sessions, &layouts_for(&sessions.projects));
+
+    // Then there are none to point at.
+    assert_eq!(count, 0, "the settled filter already shows settled agents");
+}
+
+#[rstest::rstest]
+fn settled_matches_is_zero_with_nothing_typed() {
+    // Given nothing typed in a picker with no unsettled agent.
+    let mut sessions = api_and_settled_ui();
+    for session in &mut sessions.sessions {
+        session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(30));
+    }
+    let picker = sessions_picker(&sessions, SessionFilter::All, "");
+
+    // When counting settled matches.
+    let count = picker.settled_matches(&sessions, &layouts_for(&sessions.projects));
+
+    // Then there are none.
+    assert_eq!(count, 0, "the hint only shows while text is typed");
+}
+
+#[rstest::rstest]
+fn settled_matches_is_zero_while_a_listed_agent_matches() {
+    // Given `a` typed, which matches listed agent 1.
+    let sessions = api_and_settled_ui();
+    let picker = sessions_picker(&sessions, SessionFilter::All, "a");
+
+    // When counting settled matches.
+    let count = picker.settled_matches(&sessions, &layouts_for(&sessions.projects));
+
+    // Then there are none, since the list isn't empty.
+    assert_eq!(count, 0, "the hint only shows over an empty list");
 }

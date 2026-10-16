@@ -19,9 +19,10 @@ use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
 /// Which agents the session picker lists (`a`/`b`/`w`/`i`/`s`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionFilter {
     /// Every unsettled agent.
+    #[default]
     All,
     /// Unsettled agents waiting for an approval or an answer.
     Blocked,
@@ -53,6 +54,53 @@ impl SessionFilter {
             Self::Idle => {
                 !settled && matches!(agent.status, AgentStatus::Idle | AgentStatus::Unknown)
             }
+        }
+    }
+}
+
+/// What a session or Colonists picker had when it last closed: its filter,
+/// whether colonists' agents showed, and the typed text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListMemory {
+    pub filter: SessionFilter,
+    pub colonists: bool,
+    pub text: String,
+}
+
+/// What the session, Colonists and search pickers had when they last
+/// closed, kept until orb quits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PickerMemory {
+    /// The session picker's (`<C-g> Space`).
+    pub sessions: ListMemory,
+    /// The Colonists picker's (`<C-g> ,`), one for every colony.
+    pub colonists: ListMemory,
+    /// The search picker's typed text (`<C-g> /`).
+    pub search: String,
+}
+
+impl PickerMemory {
+    /// Keeps what `picker`, closing now, had. Other pickers are ignored.
+    pub fn remember(&mut self, picker: &PickerState) {
+        match picker.kind() {
+            PickerKind::Sessions {
+                filter,
+                colonists,
+                scope,
+            } => {
+                let kept = ListMemory {
+                    filter: *filter,
+                    colonists: *colonists,
+                    text: picker.input().to_owned(),
+                };
+                if scope.is_some() {
+                    self.colonists = kept;
+                } else {
+                    self.sessions = kept;
+                }
+            }
+            PickerKind::Search { .. } => picker.input().clone_into(&mut self.search),
+            _ => {}
         }
     }
 }
@@ -297,6 +345,29 @@ impl PickerState {
             kind: PickerKind::Search { overflow: false },
             ..Self::projects(Vec::new(), return_to)
         }
+    }
+
+    /// This picker with `text` typed, its rows filtered by it.
+    #[must_use]
+    pub fn with_input(mut self, text: &str) -> Self {
+        self.list.replace_input(text);
+        self.list.refilter(text);
+        self
+    }
+
+    /// This session or Colonists picker on `memory`'s filter and colonists
+    /// toggle, with its text typed. Its rows must already be the ones that
+    /// filter and toggle list. Other pickers only take the text.
+    #[must_use]
+    pub fn recall(mut self, memory: &ListMemory) -> Self {
+        if let PickerKind::Sessions {
+            filter, colonists, ..
+        } = &mut self.kind
+        {
+            *filter = memory.filter;
+            *colonists = memory.colonists;
+        }
+        self.with_input(&memory.text)
     }
 
     /// A project filter picker over `items`, in the order given, with
@@ -704,6 +775,32 @@ impl PickerState {
         let items = session_items(sessions, layouts, *filter, *colonists, *scope);
         let pattern = self.list.input().to_owned();
         self.list.set_items(items, &pattern);
+    }
+
+    /// How many agents of settled sessions the typed text matches, while the
+    /// session or Colonists picker shows no row; 0 otherwise. It counts with
+    /// the colonists toggle and colony that `s` would list with, so under the
+    /// settled filter, whose rows are those agents, it is always 0.
+    pub fn settled_matches(&self, sessions: &Sessions, layouts: &Layouts) -> usize {
+        let PickerKind::Sessions {
+            colonists, scope, ..
+        } = self.kind
+        else {
+            return 0;
+        };
+        let text = self.list.input();
+        if text.trim().is_empty() || !self.list.is_empty() {
+            return 0;
+        }
+        let mut settled = PickerList::new(session_items(
+            sessions,
+            layouts,
+            SessionFilter::Settled,
+            colonists,
+            scope,
+        ));
+        settled.refilter(text);
+        settled.len()
     }
 
     /// Shows or hides colonists' agents in the session picker, keeping the

@@ -250,6 +250,7 @@ fn render_picker(
             &state.attached,
             &state.harnesses,
             now,
+            picker.settled_matches(&state.sessions, &state.layouts),
             area,
             buf,
             scroll,
