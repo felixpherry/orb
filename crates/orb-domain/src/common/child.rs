@@ -99,11 +99,12 @@ where
 mod tests {
     use std::fs;
     use std::process::{Command, Stdio};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
-    use super::{Finished, run_within};
+    use super::{FAST_POLL, Finished, run_within};
 
     /// `program` with `args`.
     fn command(program: &str, args: &[&str]) -> Command {
@@ -140,12 +141,23 @@ mod tests {
             })
             .min();
 
-        // Then run_within added under 5 ms.
+        // Then run_within added under 5 ms, plus however much longer than
+        // asked this machine sleeps one check interval (a shared CI machine
+        // can sleep several times the 1 ms it was asked for).
+        let oversleep = std::iter::repeat_with(|| {
+            let started = Instant::now();
+            thread::sleep(FAST_POLL);
+            started.elapsed().saturating_sub(FAST_POLL)
+        })
+        .take(5)
+        .min()
+        .unwrap_or_default();
+        let allowed = Duration::from_millis(5) + oversleep;
         assert!(
             fastest
                 .zip(bare)
-                .is_some_and(|(took, bare)| took.saturating_sub(bare) < Duration::from_millis(5)),
-            "run_within should add under 5 ms to a command that exits at once, fastest took {fastest:?} against {bare:?} bare"
+                .is_some_and(|(took, bare)| took.saturating_sub(bare) < allowed),
+            "run_within should add under {allowed:?} to a command that exits at once, fastest took {fastest:?} against {bare:?} bare"
         );
     }
 
