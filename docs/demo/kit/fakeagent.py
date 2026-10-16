@@ -4,7 +4,8 @@
 Each session lives in ~/.fakeagent/sessions/<id>.json: its directory, what it
 has shown so far, and what it does next (a turn still running, an approval
 prompt, a question). Replies to new prompts come from ~/.fakeagent/replies.json,
-matched by a word in the prompt.
+matched by a word in the prompt. A script step can run a shell command, such
+as the real `orb` CLI against the demo's orb, and show what it printed.
 
 `claude` reports itself the way orb expects Claude Code to: the hook orb
 installed runs on start and end, `claude agents --json --all` lists the live
@@ -97,6 +98,7 @@ class Agent:
         if harness == "pi" and not os.path.exists(self.transcript):
             append(self.transcript, {"type": "session", "version": 3, "id": sid, "timestamp": now_iso(), "cwd": cwd})
         self.buf = ""
+        self.proc = None
         self.started = time.time()
         self.next_at = time.time() + 1.0
         self.verb = VERBS[len(self.s["log"]) % len(VERBS)]
@@ -168,6 +170,18 @@ class Agent:
     def step(self):
         if self.s["mode"] != "busy" or time.time() < self.next_at:
             return
+        if self.proc:
+            if self.proc.poll() is None:
+                return
+            out, err = self.proc.communicate()
+            text = (out or err).strip()
+            if self.proc_var:
+                self.s.setdefault("vars", {})[self.proc_var] = json.loads(out)["pane"]
+            self.proc = None
+            self.s["log"].append(["result", text])
+            self.next_at = time.time() + 0.5
+            save(self.path, self.s)
+            return
         if not self.s["queue"]:
             self.s["mode"] = "idle"
             self.report()
@@ -186,6 +200,15 @@ class Agent:
             delay = 0
         elif kind == "sleep":
             delay = rest[0]
+        elif kind == "run":
+            command = rest[0].format(**self.s.get("vars", {}))
+            self.s["log"].append(["tool", f"Bash({command})"])
+            self.record("assistant", [{"id": uuid.uuid4().hex[:12], "type": "tool_use", "name": "Bash",
+                                       "input": {"command": command}}])
+            self.proc = subprocess.Popen(["sh", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         stdin=subprocess.DEVNULL, text=True)
+            self.proc_var = rest[1] if len(rest) > 1 else None
+            delay = 0
         elif kind == "loop":
             self.s["queue"] = rest[0] + [["loop", rest[0]]]
             delay = 0
@@ -215,6 +238,13 @@ class Agent:
         save(self.path, self.s)
 
     def key(self, data):
+        if b"\r" in data and data != b"\r":
+            for i, part in enumerate(data.split(b"\r")):
+                if i:
+                    self.key(b"\r")
+                if part:
+                    self.key(part)
+            return
         mode = self.s["mode"]
         if mode == "ask":
             if data in (b"1", b"\r"):
@@ -256,7 +286,9 @@ class Agent:
             elif kind == "tool":
                 name, _, arg = text.partition("(")
                 if self.harness == "claude":
-                    out.append(f"{GREEN}⏺{R} {BOLD}{name}{R}({arg}")
+                    first, *more = textwrap.wrap(f"{name}({arg}", w - 2) or [""]
+                    out.append(f"{GREEN}⏺{R} {BOLD}{name}{R}{first[len(name):]}")
+                    out += [f"  {l}" for l in more]
                 else:
                     out.append(f"\x1b[48;2;40;50;40m {BOLD}{name.lower()}{R}\x1b[48;2;40;50;40m {arg.rstrip(')')} {R}")
             elif kind == "result":

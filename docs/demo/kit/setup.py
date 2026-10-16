@@ -58,7 +58,7 @@ w(".demorc", r"""
 export BASH_SILENCE_DEPRECATION_WARNING=1
 PS1='\[\e[38;2;130;170;255m\]\w\[\e[0m\] \[\e[38;2;195;232;141m\]❯\[\e[0m\] '
 """)
-w("bin/orb", f'#!/bin/sh\nexec python3 "{KIT}/keys.py" "{ORB}" "$@"\n')
+w("bin/orb", f'#!/bin/sh\n[ $# -gt 0 ] && exec "{ORB}" "$@"\nexec python3 "{KIT}/keys.py" "{ORB}"\n')
 os.chmod(f"{HOME}/bin/orb", 0o755)
 w("Library/Application Support/lazygit/config.yml",
   "disableStartupPopups: true\ngui:\n  showRandomTip: false\n  nerdFontsVersion: \"3\"\n")
@@ -122,6 +122,9 @@ w("dev/rfcs/roadmap.md", "# Roadmap\n\n- Beta in Q4\n")
 for d in ["Desktop", "Documents", "Downloads", "dotfiles"]:
     os.makedirs(f"{HOME}/{d}", exist_ok=True)
 w("notes/todo.md", "- renew TLS certs\n- review storefront PR\n")
+
+# --- orb's store: let orb create it now, as its start-up sweep would prune a worktree no session uses yet ---
+subprocess.run([ORB], env=ENV, stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
 
 # --- a worktree orb made earlier, and a Research folder ---
 WT = f"{HOME}/.orb/worktrees"
@@ -241,62 +244,43 @@ for key, (harness, title, cwd, mode, ago, log, extra) in AGENTS.items():
     with open(f"{HOME}/.fakeagent/sessions/{sid}.json", "w") as f:
         json.dump(state, f)
 
-COMPLETION = """package cmd
-
-import "fmt"
-
-// completion prints a shell completion script for zsh or fish.
-func completion(shell string) error {
-	switch shell {
-	case "zsh":
-		fmt.Print("#compdef shipit\\n_arguments '1: :(status deploy rollback completion)'\\n")
-	case "fish":
-		fmt.Print("complete -c shipit -f -a 'status deploy rollback completion'\\n")
-	default:
-		return fmt.Errorf("unsupported shell %q (want zsh or fish)", shell)
-	}
-	return nil
-}
-"""
+WEB = [["sleep", 1.5], ["result", "Fetched 46 kB"]]
 REPLIES = [
-    {"match": "review the token", "events": [
-        ["tool", "Read(src/auth/token.rs)"], ["result", "Read 19 lines"],
-        ["text", "The frozen clock fixes the flake. One nit: Clock could be a plain fn() -> u64 instead of a trait."]]},
-    {"match": "review the completions", "events": [
-        ["tool", "Read(cmd/completion.go)"],
-        ["text", "Looks good. One nit: the fish script should also complete service names after deploy and rollback."]]},
-    {"match": "completion", "events": [
-        ["title", "Shell completions for zsh and fish"],
-        ["tool", "Read(cmd/status.go)"], ["result", "Read 5 lines"],
-        ["tool", "Write(cmd/completion.go)"], ["file", "cmd/completion.go", COMPLETION],
-        ["result", "Wrote 17 lines to cmd/completion.go"],
-        ["tool", "Bash(go test ./...)"], ["result", "ok      shipit/cmd    0.412s"],
-        ["text", "Added `shipit completion zsh|fish`, which prints a completion script for each shell."]]},
-
-    {"match": "semver", "events": [
-        ["text", "Use ^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$ which rejects leading zeros and allows an optional pre-release and build part."]]},
-    {"match": "competitor", "events": [
-        ["tool", "Read(AGENTS.md)"], ["result", "Read 42 lines"],
-        ["tool", "Task(investigator: pricing pages)"], ["result", "Found 6 sources"],
-        ["text", "I'll plan the research in report.md, then send the investigator and falsifier subagents out."]]},
+    {"match": "colonist", "events": [
+        ["title", "Compare auth providers"],
+        ["text", "I'll start one colonist per provider and have each price it for 10k users."],
+        ["run", "orb session create --name okta", "okta"],
+        ["run", "orb agent start --kind claude --pane {okta} && orb agent prompt {okta} 'Price Okta for 10k users'"],
+        ["run", "orb session create --name auth0", "auth0"],
+        ["run", "orb agent start --kind claude --pane {auth0} && orb agent prompt {auth0} 'Price Auth0 for 10k users'"],
+        ["run", "orb session create --name clerk", "clerk"],
+        ["run", "orb agent start --kind claude --pane {clerk} && orb agent prompt {clerk} 'Price Clerk for 10k users'"],
+        ["text", "Three colonists are on it. I'll read each one's answer with orb agent reply when it finishes."]]},
+    {"match": "okta", "events": [
+        ["tool", "WebFetch(okta.com/pricing)"], *WEB, ["sleep", 6],
+        ["text", "Okta: about $2,300 a month at 10k users, SSO and MFA included."]]},
+    {"match": "auth0", "events": [
+        ["tool", "WebFetch(auth0.com/pricing)"], *WEB,
+        ["question", {"header": "Plan", "question": "Auth0's B2C plans stop at 20k users. Price the B2C or the B2B plan?",
+                      "options": ["B2C Professional", "B2B Essentials"],
+                      "then": [["text", "Auth0 B2B Essentials: about $1,500 a month at 10k users."]]}]]},
+    {"match": "clerk", "events": [
+        ["tool", "WebFetch(clerk.com/pricing)"], *WEB,
+        ["ask", {"kind": "Bash command", "command": "npm view @clerk/clerk-js version",
+                 "why": "Check Clerk's latest SDK release", "tool": "Bash(npm view @clerk/clerk-js version)",
+                 "then": [["result", "5.71.2"], ["text", "Clerk: $825 a month at 10k users; SDK 5.71.2."]]}]]},
 ]
 with open(f"{HOME}/.fakeagent/replies.json", "w") as f:
     json.dump(REPLIES, f, indent=1)
 
-# --- orb's store: let orb create the schema, then seed it ---
-subprocess.run([ORB], env=ENV, stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+# --- orb's store: seed the schema orb created above ---
 db = sqlite3.connect(f"{HOME}/.orb/userdata/state.sqlite")
-assert db.execute("PRAGMA user_version").fetchone()[0] >= 11, "orb didn't create its store"
+assert db.execute("PRAGMA user_version").fetchone()[0] >= 15, "orb didn't create its store"
 
-PROJECTS = {}
-for i, (name, root, kind) in enumerate([
-        ("payments-api", f"{HOME}/dev/payments-api", None),
-        ("storefront", f"{HOME}/dev/storefront", None),
-        ("shipit", f"{HOME}/dev/shipit", None),
-        ("Research", f"{HOME}/.orb/research", "research")]):
-    PROJECTS[name] = db.execute(
-        "INSERT INTO projects (root, title, created_at, kind) VALUES (?, ?, ?, ?)",
-        (root, name, NOW - 30 * DAY + i, kind)).lastrowid
+PROJECTS = dict(db.execute("SELECT title, id FROM projects").fetchall())
+for i, name in enumerate(["payments-api", "storefront", "shipit"]):
+    PROJECTS[name] = db.execute("INSERT INTO projects (root, title, created_at) VALUES (?, ?, ?)",
+                                (f"{HOME}/dev/{name}", name, NOW - 30 * DAY + i)).lastrowid
 
 pane_ids = iter(range(1, 100))
 
@@ -352,13 +336,13 @@ session("storefront", "plain", f"{HOME}/dev/storefront", None, "main",
         [(None, right, ["bundle", "dark"])], activity=12 * MIN, visited=30 * MIN)
 session("shipit", "plain", f"{HOME}/dev/shipit", None, "main",
         [(None, one, ["json"])], activity=40 * MIN, visited=HOUR)
-session("Research", "research", RESEARCH, "pricing-teardown", None,
+session("Research", "colony", RESEARCH, "pricing-teardown", None,
         [(None, one, ["pricing"])], activity=3 * HOUR, visited=3 * HOUR)
 session("shipit", "plain", f"{HOME}/dev/shipit", "v0.4-release-notes", "main",
         [(None, one, ["notes"])], activity=4 * DAY, visited=4 * DAY, settled_ago=4 * DAY - HOUR)
 session("payments-api", "plain", f"{HOME}/dev/payments-api", "axum-0.8", "main",
         [(None, one, ["axum"])], activity=6 * DAY, visited=6 * DAY, settled_ago=6 * DAY - HOUR)
 
-db.execute("INSERT OR REPLACE INTO ui (id, sidebar_width) VALUES (1, 44)")
+db.execute("INSERT OR REPLACE INTO ui (id, sidebar_width) VALUES (1, 40)")
 db.commit()
 print("demo home ready at", HOME)
