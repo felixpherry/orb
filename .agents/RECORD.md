@@ -408,3 +408,5 @@ Entries are added or amended **only with human approval**.
 - (store) Schema v15 records which session made each colonist and turns Research and Learn sessions into colonies; deleting a session clears its colonists' link.
 - (start) `orb --version` and `orb -V` print `orb <version>` and exit 0 before orb reads its environment, opens its log or store, or touches the terminal.
 - (repo) orb is licensed Apache-2.0 (LICENSE holds the full text), every package's manifest carries the license, description, repository `https://github.com/zqccer/orb` and author `zqccer`, and NOTICE credits herdr.
+- (store) orb links SQLite statically (rusqlite `bundled`, SQLite 3.53.2 with FTS5), so no system libsqlite3 is used in tests, CI, release builds or `cargo install`.
+- (repo) rust-toolchain.toml pins Rust 1.98.1 with clippy and rustfmt for rustup users and CI; Homebrew's cargo ignores it.

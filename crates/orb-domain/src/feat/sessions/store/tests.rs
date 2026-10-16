@@ -2672,7 +2672,8 @@ fn migrating_v10_gives_an_agent_of_a_missing_group_its_own_session()
     Connection::open(&path)
         .and_then(|conn| {
             conn.execute_batch(
-                "INSERT INTO threads (id, project_id, short_id, cwd, created_at, group_id)
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO threads (id, project_id, short_id, cwd, created_at, group_id)
                      VALUES (11, 1, 'ii99', '/work/orb', 1800, 42)",
             )
         })
