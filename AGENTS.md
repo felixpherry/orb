@@ -39,6 +39,7 @@ Commit only when `just test` passes. A branch is done only when `just lint` pass
 - **Tests check behaviour you can see.** One behaviour per test, Given/When/Then comments, `#[rstest::rstest]` on every test, a message on every assert.
 - **Bind only the keys the user asked for.** Direct keys use Alt. Never Super.
 - **Code comments describe the code.** No notes about plans, specs or divergences; plans aren't kept.
+- **Commit messages are conventional commits.** type(scope): subject, at most 72 characters, imperative, with the area as the scope (sidebar, panes, sessions…) and no plan or phase names.
 - **Keep files under 2,000 production lines.** Split one by concern before it passes that.
 
 ## Topic files
@@ -61,5 +62,6 @@ These live only in the private repo.
 - docs/research.md — outside facts that were checked: versions, CLI flags, file formats. Check a version-bound fact again before you rely on it.
 - .agents/RECORD.md — how the app works today. **When a feature or an overhaul step is done, add its new facts here**, each one checked first.
 - .plans/<task>/ — task plans, git-ignored. plan.md is the spec: annotate it, never rewrite it. tasks.md tracks progress. phase-N.md holds each phase's plan and review.
+- .agents/publish/ — builds the public repo (publish.py) and holds the rewritten messages of old commits; see its README.
 - On the user's Mac, Option belongs to paneru, so the user reaches orb's Alt keys with Cmd through kitty's `map cmd+X send_key alt+X`.
 <!-- /private -->
