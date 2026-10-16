@@ -1339,6 +1339,137 @@ mod tests {
         found
     }
 
+    /// Every key sequence bound for the sidebar and pane cases below: a
+    /// `## <case>` header, then one sorted line per key.
+    const GOLDEN: &str = include_str!("keymap/bindings.txt");
+
+    /// What `scope` binds, one sorted line per key: `<keys> -> <intent>:
+    /// <popup text>` for a binding and `<keys> +<popup text>` for a group,
+    /// keys as which-key names them.
+    fn golden_lines(scope: Scope) -> String {
+        let keymap = keymap();
+        let mut lines = vec![];
+        let mut paths: Vec<Vec<KeyEvent>> = vec![vec![]];
+        while let Some(path) = paths.pop() {
+            for (child, desc) in keymap
+                .get_children_at_path(&path, &scope)
+                .unwrap_or_default()
+            {
+                let full = [path.clone(), vec![child]].concat();
+                let keys = full.iter().map(Key::display).collect::<Vec<_>>().join(" ");
+                match keymap.navigate(&full, &scope) {
+                    Some(NodeResult::Leaf { action }) => {
+                        lines.push(format!("{keys} -> {action:?}: {desc}"));
+                    }
+                    Some(NodeResult::Branch { .. }) => {
+                        lines.push(format!("{keys} +{desc}"));
+                        paths.push(full);
+                    }
+                    None => {}
+                }
+            }
+        }
+        lines.sort();
+        lines.join("\n")
+    }
+
+    /// Session 1 of `lone` as `kind`, with the keys in the sidebar and its
+    /// cursor on `cursor`.
+    fn in_sidebar(kind: SessionKind, cursor: Option<SidebarItem>) -> (Focus, AppState) {
+        let project = match kind {
+            SessionKind::Plain => ProjectKind::Normal,
+            SessionKind::Incognito => ProjectKind::Incognito,
+            SessionKind::Colony => ProjectKind::SharedWorld,
+        };
+        let mut sessions = lone(project, SidebarItem::Session(SessionId(1)));
+        sessions.cursor = cursor;
+        for session in &mut sessions.sessions {
+            session.kind = kind;
+        }
+        let state = AppState {
+            layouts: layouts_for(&sessions.projects),
+            sessions,
+            ..AppState::default()
+        };
+        (Focus::Sidebar, state)
+    }
+
+    /// The keys in a pane of session 1 as `kind`, or with no session shown.
+    fn in_pane(kind: Option<SessionKind>) -> (Focus, AppState) {
+        let (_, mut state) = in_sidebar(
+            kind.unwrap_or(SessionKind::Plain),
+            Some(SidebarItem::Session(SessionId(1))),
+        );
+        state.focus = Focus::Pane;
+        if kind.is_some() {
+            state.sessions.active = Some(SessionId(1));
+            state.attached = [SessionId(1)].into();
+        }
+        (Focus::Pane, state)
+    }
+
+    const AGENT: SidebarItem = SidebarItem::Agent {
+        session: SessionId(1),
+        pane: PaneId(1),
+    };
+
+    #[rstest::rstest]
+    #[case(
+        "sidebar on a plain session",
+        in_sidebar(SessionKind::Plain, Some(SidebarItem::Session(SessionId(1))))
+    )]
+    #[case(
+        "sidebar on an Incognito session",
+        in_sidebar(SessionKind::Incognito, Some(SidebarItem::Session(SessionId(1))))
+    )]
+    #[case(
+        "sidebar on a colony",
+        in_sidebar(SessionKind::Colony, Some(SidebarItem::Session(SessionId(1))))
+    )]
+    #[case(
+        "sidebar on a plain session's agent row",
+        in_sidebar(SessionKind::Plain, Some(AGENT))
+    )]
+    #[case(
+        "sidebar on an Incognito session's agent row",
+        in_sidebar(SessionKind::Incognito, Some(AGENT))
+    )]
+    #[case(
+        "sidebar on a colony's agent row",
+        in_sidebar(SessionKind::Colony, Some(AGENT))
+    )]
+    #[case(
+        "sidebar on a colony's colonists row",
+        in_sidebar(SessionKind::Colony, Some(SidebarItem::Colonists(SessionId(1))))
+    )]
+    #[case(
+        "sidebar on a plain session's colonists row",
+        in_sidebar(SessionKind::Plain, Some(SidebarItem::Colonists(SessionId(1))))
+    )]
+    #[case("sidebar on nothing", in_sidebar(SessionKind::Plain, None))]
+    #[case(
+        "sidebar on the settled shelf header",
+        in_sidebar(SessionKind::Plain, Some(SidebarItem::SettledShelf))
+    )]
+    #[case("pane of a plain session", in_pane(Some(SessionKind::Plain)))]
+    #[case("pane of an Incognito session", in_pane(Some(SessionKind::Incognito)))]
+    #[case("pane of a colony", in_pane(Some(SessionKind::Colony)))]
+    #[case("pane with nothing shown", in_pane(None))]
+    fn every_scope_keeps_its_bindings(#[case] case: &str, #[case] keys: (Focus, AppState)) {
+        // Given the keys in a side, on a row, of a kind of session.
+        let (focus, state) = keys;
+        let expected = GOLDEN
+            .split("## ")
+            .find_map(|section| section.strip_prefix(case)?.strip_prefix('\n'))
+            .map(str::trim_end);
+
+        // When listing what the scope there binds.
+        let found = golden_lines(Scope::of(focus, &state));
+
+        // Then it is the case's section of bindings.txt, line for line.
+        assert_eq!(Some(found.as_str()), expected, "the bindings {case}");
+    }
+
     #[rstest::rstest]
     #[case(vec![key(KeyCode::Char('p'))])]
     #[case(vec![key(KeyCode::Char('s'))])]
