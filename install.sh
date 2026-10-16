@@ -214,7 +214,7 @@ kitty_keys() {
     return
   fi
   if ! ask "Add orb's Cmd keys to $conf (Cmd+h/j/k/l and others send Alt to orb)?"; then
-    todo_line "Cmd keys: add the block from README Setup to $conf, or set macos_option_as_alt yes"
+    todo_line "Cmd keys: add the block from https://github.com/zqccer/orb/blob/main/docs/keys.md to $conf, or set macos_option_as_alt yes"
     return
   fi
   mkdir -p "$(dirname "$conf")"

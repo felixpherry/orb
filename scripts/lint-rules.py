@@ -34,6 +34,9 @@ DOCS = [
     "docs/dev/testing.md",
     "docs/dev/keybindings.md",
     ".agents/RECORD.md",
+    "README.md",
+    "CHANGELOG.md",
+    "docs/keys.md",
 ]
 ARCHITECTURE = "docs/dev/architecture.md"
 CODE_DIRS = ["crates", "src"]

@@ -2,11 +2,11 @@
 
 Rules for adding or changing a key in orb.
 
-- **Bind only keys the maintainer asked for.** A key exists because it is listed in the [README's Keys section](../../README.md#keys) or in an approved plan. Don't add a "handy" extra, and don't take a key nobody asked for.
+- **Bind only keys the maintainer asked for.** A key exists because it is listed in [docs/keys.md](../keys.md#keys) or in an approved plan. Don't add a "handy" extra, and don't take a key nobody asked for.
 - **orb's direct keys use Alt.** They are matched in `alt_route` (crates/orb-tui/src/keymap.rs:548). Shift is ignored there, so `Alt +` works however the terminal reports it.
   - On Linux there is nothing to set up.
-  - On macOS, Option is often taken by the system or a window manager. The user either sets `macos_option_as_alt yes` in kitty.conf, or adds one kitty map line per key that turns Cmd into Alt, such as `map cmd+h send_key alt+h`. The README's Setup section lists every line.
-  - **When you add an Alt key, add its Cmd map line to that README list.**
+  - On macOS, Option is often taken by the system or a window manager. The user either sets `macos_option_as_alt yes` in kitty.conf, or adds one kitty map line per key that turns Cmd into Alt, such as `map cmd+h send_key alt+h`. docs/keys.md's Setup section lists every line, and install.sh writes the same lines.
+  - **When you add an Alt key, add its Cmd map line to docs/keys.md and its key to the loop in install.sh's kitty_keys.**
 - **Never bind Super.** orb reads no Super key, and the Mac setup above depends on Cmd reaching orb as Alt.
 - **Everything else goes behind the `<C-g>` leader.** The which-key popup labels each key with its intent's `Display` text (crates/orb-domain/src/intent.rs:239), so give a new intent a short label.
 - **orb expects kitty.** Some keys only work with the kitty keyboard protocol. `<C-[>` and `<C-]>` need its disambiguate flag, or Ctrl+[ arrives as a plain Esc (`jump_route`, keymap.rs:537).
