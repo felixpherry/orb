@@ -102,24 +102,28 @@ impl SessionsActor {
     }
 
     /// Deletes every unsettled session under session `id`, then `id` itself
-    /// (the list is read before the first delete clears their links).
-    pub(super) fn delete_with_colonists(&mut self, id: SessionId) {
+    /// (the list is read before the first delete clears their links), and
+    /// hands back the folder removals they leave.
+    #[must_use]
+    pub(super) fn delete_with_colonists(&mut self, id: SessionId) -> Vec<RemoveFolder> {
         let colonists = self.state.read().sessions.below(id, false);
-        for colonist in colonists {
-            self.delete_session(colonist);
-        }
-        self.delete_session(id);
+        colonists
+            .into_iter()
+            .chain(std::iter::once(id))
+            .filter_map(|session| self.delete_session(session))
+            .collect()
     }
 
-    /// Deletes session `id`: kills every pane, deletes a fresh-world
-    /// colony's folder that is orb's own, then its tabs, panes, agents
+    /// Deletes session `id`: kills every pane, then its tabs, panes, agents
     /// (ended ones included) and row, and forgets them. The sessions it made
-    /// become top-level.
+    /// become top-level. A fresh-world colony's folder that is orb's own is
+    /// handed back for removal beside the actor's queue.
     /// Claude transcripts, pi session files and worktrees stay. However it
     /// ends, the session is no longer hidden as being deleted.
-    pub(super) fn delete_session(&mut self, id: SessionId) {
+    #[must_use]
+    pub(super) fn delete_session(&mut self, id: SessionId) -> Option<RemoveFolder> {
         self.kill_panes(id, "session deleted");
-        let cleared = self.clear_folder(id);
+        let folder = self.colony_folder(id);
         let agents: Vec<AgentId> = self
             .session_rows(id)
             .chain(self.rows.iter().filter(|row| row.orb_session == Some(id)))
@@ -179,13 +183,22 @@ impl SessionsActor {
             }
             sessions.deleting.remove(&id);
         }
-        match (deleted, cleared) {
-            (Err(report), _) => {
+        match deleted {
+            Err(report) => {
                 let error = save_failed(&self.services.log, &report);
                 self.report.report(Outcome::Failed(error));
             }
-            (Ok(()), Err(error)) => self.report.report(Outcome::Failed(error)),
-            (Ok(()), Ok(())) => self.report.changed(),
+            Ok(()) => self.report.changed(),
+        }
+        folder.map(|dir| self.remove_folder(dir))
+    }
+
+    /// A job that removes `dir` beside the actor's queue.
+    pub(super) fn remove_folder(&self, dir: PathBuf) -> RemoveFolder {
+        RemoveFolder {
+            dir,
+            log: self.services.log.clone(),
+            report: self.report.clone(),
         }
     }
 
@@ -265,14 +278,11 @@ impl SessionsActor {
         }
     }
 
-    /// Removes session `id`'s folder when it is a colony in a fresh world
-    /// and the folder is in that world's colonies folder, even while another
-    /// session still runs in it (already gone counts as done). The error is
-    /// the message box text.
-    fn clear_folder(&self, id: SessionId) -> Result<(), String> {
-        let Some(row) = self.sessions.get(&id) else {
-            return Ok(());
-        };
+    /// Session `id`'s folder when it is a colony in a fresh world and the
+    /// folder is in that world's colonies folder: deleting the session
+    /// removes it, even while another session still runs in it.
+    fn colony_folder(&self, id: SessionId) -> Option<PathBuf> {
+        let row = self.sessions.get(&id)?;
         let colonies = self
             .state
             .read()
@@ -281,16 +291,34 @@ impl SessionsActor {
             .and_then(|project| world_dirs(&self.orb_root, project));
         let (SessionKind::Colony, Some(WorldDirs::Fresh { colonies, .. })) = (row.kind, colonies)
         else {
-            return Ok(());
+            return None;
         };
-        if row.dir.parent() != Some(colonies.as_path()) {
-            return Ok(());
+        (row.dir.parent() == Some(colonies.as_path())).then(|| row.dir.clone())
+    }
+}
+
+impl RemoveFolder {
+    /// Removes the folder (already gone is fine); a failure is logged and
+    /// shown as `couldn't remove the folder`.
+    pub(super) fn run(self) {
+        match fs::remove_dir_all(&self.dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let shown = failed(&self.log, FOLDER_UNREMOVED, &error);
+                self.report.report(Outcome::Failed(shown));
+            }
         }
-        match fs::remove_dir_all(&row.dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(failed(&self.services.log, FOLDER_UNREMOVED, &error)),
-        }
+    }
+
+    /// Runs the removal on a blocking thread; a job that dies is logged.
+    pub(super) fn spawn(self) {
+        let log = self.log.clone();
+        tokio::spawn(async move {
+            if let Err(error) = tokio::task::spawn_blocking(move || self.run()).await {
+                log.error("folder removal", &error);
+            }
+        });
     }
 }
 

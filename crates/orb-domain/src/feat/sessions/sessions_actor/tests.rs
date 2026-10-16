@@ -11,8 +11,9 @@ use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
-    ApiAdd, ApiPlace, ApiStart, FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor,
-    SessionsActorDeps, WorktreeJob, WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
+    ApiAdd, ApiPlace, ApiStart, ColonyFolderReady, ColonyJob, FAST_POLL, Placement, RemoveFolder,
+    SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob, WorktreeReady,
+    current_branch, now_ms, spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -1742,7 +1743,7 @@ async fn deleting_with_colonists_deletes_the_whole_subtree() -> Result<(), Repor
     let (mut actor, ids) = colony_of_three(AgentStatus::Idle).await?;
 
     // When deleting aa with its colonists.
-    actor.delete_with_colonists(ids[0]);
+    delete_all(&mut actor, ids[0]);
 
     // Then none of the three is left in the app state or the store.
     let left = ids.map(|id| {
@@ -1819,7 +1820,7 @@ async fn deleting_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreEr
     actor.services.zmx = service;
 
     // When deleting the session.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then the loose pane's program is killed along with the held one.
     assert_eq!(
@@ -2003,7 +2004,7 @@ async fn delete_session_kills_every_pane() -> Result<(), Report<StoreError>> {
     actor.services.zmx = service;
 
     // When deleting aa's session.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then both its panes are killed, and nothing of bb's.
     assert_eq!(
@@ -2029,7 +2030,7 @@ async fn deleting_a_partly_read_session_kills_its_unread_pane(
     actor.services.zmx = service;
 
     // When deleting the session.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then the unread pane is killed along with the read one.
     assert_eq!(
@@ -2050,7 +2051,7 @@ async fn delete_session_removes_its_agents_tabs_panes_and_row() -> Result<(), Re
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then the store keeps no session, tab, pane or agent of it.
     let layouts = actor.store.layouts()?;
@@ -2078,7 +2079,7 @@ async fn delete_agentless_session_removes_it() -> Result<(), Report<StoreError>>
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then it is neither shown nor saved.
     let kept = (
@@ -2103,7 +2104,7 @@ async fn delete_session_removes_its_ended_agents() -> Result<(), Report<StoreErr
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When deleting the session.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then aa is neither shown nor saved.
     let kept = (
@@ -2159,7 +2160,7 @@ async fn delete_research_session_removes_its_folder() -> Result<(), Report<Store
     let (mut actor, _state) = start_at(store, orb.path());
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then its folder is gone.
     assert!(!dir.exists(), "a Research session takes its folder");
@@ -2178,7 +2179,7 @@ async fn delete_research_session_leaves_a_folder_outside_orbs_own() -> Result<()
     let (mut actor, _state) = start_at(store, orb.path());
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then that folder is still there.
     assert!(
@@ -2200,7 +2201,7 @@ async fn delete_research_session_whose_folder_is_gone_shows_no_error()
     let (mut actor, _state) = start_at(store, orb.path());
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then no error shows.
     assert_eq!(
@@ -2258,7 +2259,7 @@ async fn deleting_a_colony_alone_removes_its_folder_while_a_colonist_runs_in_it(
     let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
 
     // When deleting the colony only.
-    actor.delete_session(colony);
+    delete(&mut actor, colony);
 
     // Then the folder is gone, though the helper stays.
     assert!(
@@ -2278,12 +2279,59 @@ async fn deleting_a_colony_with_its_colonists_removes_its_folder() -> Result<(),
     let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
 
     // When deleting the colony with its colonists.
-    actor.delete_with_colonists(colony);
+    delete_all(&mut actor, colony);
 
     // Then the folder is gone.
     assert!(
         !dir.exists(),
         "deleting a colony with its colonists takes its folder"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn deleting_a_fresh_colony_leaves_its_folder_to_a_removal_job()
+-> Result<(), Report<StoreError>> {
+    // Given a Research colony with its folder.
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let dir = orb.path().join("research").join("tokio-cancel");
+    let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
+
+    // When deleting the colony.
+    let removal = actor.delete_session(colony);
+
+    // Then the folder is still there, handed back for removal.
+    assert_eq!(
+        (dir.exists(), removal.map(|removal| removal.dir)),
+        (true, Some(dir.clone())),
+        "deleting a fresh colony should leave its folder to a removal job"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn folder_removal_that_fails_shows_why() -> Result<(), Report<StoreError>> {
+    // Given a deleted Research colony whose folder sits in a read-only
+    // folder.
+    use std::os::unix::fs::PermissionsExt;
+    let orb = tempfile::tempdir().change_context(StoreError)?;
+    let parent = orb.path().join("research");
+    let dir = parent.join("tokio-cancel");
+    let (mut actor, colony) = colony_with_helper(orb.path(), &dir)?;
+    let removal = actor.delete_session(colony);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).change_context(StoreError)?;
+
+    // When the removal runs.
+    removal.into_iter().for_each(RemoveFolder::run);
+
+    // Then the mode line says the folder couldn't be removed.
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).change_context(StoreError)?;
+    assert_eq!(
+        error_of(&actor).as_deref(),
+        Some("couldn't remove the folder"),
+        "a failed folder removal should say why"
     );
     Ok(())
 }
@@ -2321,7 +2369,7 @@ async fn delete_fresh_world_colony_removes_its_folder() -> Result<(), Report<Sto
     let (mut actor, _state) = start_at(store, orb.path());
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then its folder is gone.
     assert!(!dir.exists(), "a fresh-world colony takes its folder");
@@ -2338,7 +2386,7 @@ async fn delete_shared_world_colony_keeps_its_folder() -> Result<(), Report<Stor
     let (mut actor, _state) = start_at(store, orb.path());
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then the world's folder stays.
     assert!(
@@ -2357,7 +2405,7 @@ async fn delete_session_removes_its_pane_files() -> Result<(), Report<StoreError
     fx.actor.poll().await;
 
     // When deleting aa's session.
-    fx.actor.delete_session(fx.agent.session);
+    delete(&mut fx.actor, fx.agent.session);
 
     // Then the pane's file is gone.
     assert!(
@@ -2396,7 +2444,7 @@ async fn delete_session_unhides_it() -> Result<(), Report<StoreError>> {
     state.write().sessions.deleting.insert(inserted.session);
 
     // When deleting it.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then nothing is left hidden.
     assert!(
@@ -4190,6 +4238,52 @@ fn finish(actor: &mut SessionsActor, job: Option<WorktreeJob>) {
     }
 }
 
+/// Makes colony `name` in `world`, running a fresh colony's copy here and
+/// handing its folder to `actor` as if it had arrived through the mailbox.
+fn make_colony(actor: &mut SessionsActor, world: ProjectId, name: &str) {
+    let job = actor.new_colony(world, name, None);
+    finish_colony(actor, job);
+}
+
+/// Runs `job`, if any, here and hands its folder to `actor`, as if it had
+/// arrived through the mailbox; runs any removal it hands back.
+fn finish_colony(actor: &mut SessionsActor, job: Option<ColonyJob>) {
+    if let Some(ColonyJob {
+        world,
+        if_active,
+        copy,
+    }) = job
+    {
+        let made = copy.run();
+        let ready = ColonyFolderReady {
+            world,
+            if_active,
+            made,
+        };
+        actor
+            .colony_folder_ready(ready)
+            .into_iter()
+            .for_each(RemoveFolder::run);
+    }
+}
+
+/// Deletes session `id`, running the folder removal it hands back here.
+fn delete(actor: &mut SessionsActor, id: SessionId) {
+    actor
+        .delete_session(id)
+        .into_iter()
+        .for_each(RemoveFolder::run);
+}
+
+/// Deletes session `id` with its colonists, running the folder removals
+/// they hand back here.
+fn delete_all(actor: &mut SessionsActor, id: SessionId) {
+    actor
+        .delete_with_colonists(id)
+        .into_iter()
+        .for_each(RemoveFolder::run);
+}
+
 /// Whether git was asked to force-remove the worktree it added, and its
 /// branch.
 fn made_worktree_removed(git: &FakeGit) -> Result<bool, Report<StoreError>> {
@@ -5303,7 +5397,7 @@ async fn deleting_a_session_clears_its_colonists_parent_in_the_sidebar()
     let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
     // When deleting A.
-    actor.delete_session(parent);
+    delete(&mut actor, parent);
 
     // Then B shows with no parent.
     assert_eq!(
@@ -6019,7 +6113,7 @@ fn move_whose_session_was_deleted_meanwhile_removes_its_worktree() -> Result<(),
     let (mut actor, _state) =
         start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
     let job = actor.change_workspace(seeded.session, new_worktree(), None);
-    actor.delete_session(seeded.session);
+    delete(&mut actor, seeded.session);
 
     // When the worktree result is applied.
     finish(&mut actor, job);
@@ -6041,7 +6135,7 @@ fn move_whose_session_was_deleted_meanwhile_shows_the_session_is_gone()
     let (store, seeded, _) = movable()?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     let job = actor.change_workspace(seeded.session, new_worktree(), None);
-    actor.delete_session(seeded.session);
+    delete(&mut actor, seeded.session);
 
     // When the worktree result is applied.
     finish(&mut actor, job);
@@ -6798,10 +6892,10 @@ fn new_research_session_seeds_a_missing_template() -> Result<(), Report<StoreErr
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then the template is written.
@@ -6821,10 +6915,10 @@ fn new_research_session_copies_the_template_into_its_folder() -> Result<(), Repo
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then its folder has AGENTS.md and a CLAUDE.md link to it.
@@ -6844,10 +6938,10 @@ fn new_research_session_copies_the_kit() -> Result<(), Report<StoreError>> {
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then its folder has the kit's investigator subagent.
@@ -6867,7 +6961,11 @@ fn new_learn_session_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Learn session `rust-async`.
-    actor.new_colony(world_of(&state, ProjectKind::Learn), "rust-async", None);
+    make_colony(
+        &mut actor,
+        world_of(&state, ProjectKind::Learn),
+        "rust-async",
+    );
 
     // Then its folder is under orb's learn folder.
     assert!(
@@ -6883,10 +6981,10 @@ fn new_research_session_is_a_colony() -> Result<(), Report<StoreError>> {
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then a colony runs in its folder.
@@ -6908,7 +7006,11 @@ fn new_learn_session_has_one_tab_with_one_shell_pane() -> Result<(), Report<Stor
     let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
     // When making Learn session `rust-async`.
-    actor.new_colony(world_of(&state, ProjectKind::Learn), "rust-async", None);
+    make_colony(
+        &mut actor,
+        world_of(&state, ProjectKind::Learn),
+        "rust-async",
+    );
 
     // Then its layout holds one tab of one pane in its folder.
     let id = only_session(&state)?.id;
@@ -6939,10 +7041,10 @@ fn new_folder_session_keeps_a_curated_template() -> Result<(), Report<StoreError
     fs::write(template.join("AGENTS.md"), "mine").change_context(StoreError)?;
 
     // When making Research session `tokio-cancel`.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then the folder gets the user's AGENTS.md.
@@ -6961,7 +7063,7 @@ fn new_folder_session_refused_when_its_folder_exists() -> Result<(), Report<Stor
     state.write().home = orb_root.path().to_path_buf();
 
     // When making Research session `x`.
-    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
+    make_colony(&mut actor, world_of(&state, ProjectKind::Research), "x");
 
     // Then the mode line says the folder exists.
     assert_eq!(
@@ -6979,7 +7081,7 @@ fn refused_folder_session_adds_no_session() -> Result<(), Report<StoreError>> {
     fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
     // When making Research session `x`.
-    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
+    make_colony(&mut actor, world_of(&state, ProjectKind::Research), "x");
 
     // Then no session shows.
     assert!(
@@ -7022,10 +7124,10 @@ fn made_folder_session_closes_the_name_box() -> Result<(), Report<StoreError>> {
     );
 
     // When making it.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then the box is closed and the sidebar has the keys.
@@ -7046,7 +7148,7 @@ fn refused_folder_name_keeps_the_name_box_open() -> Result<(), Report<StoreError
     waiting_name_box(&state, world_of(&state, ProjectKind::Research), "x");
 
     // When making it.
-    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
+    make_colony(&mut actor, world_of(&state, ProjectKind::Research), "x");
 
     // Then the box stays open with the name, no longer waiting.
     assert_eq!(
@@ -7064,10 +7166,10 @@ fn new_folder_session_outside_the_filter_clears_it() -> Result<(), Report<StoreE
     state.write().sessions.filter = Some(orb);
 
     // When making Research session `tokio-cancel`, outside orb.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then the filter goes back to all projects.
@@ -7088,10 +7190,10 @@ fn new_folder_session_outside_the_filter_saves_the_cleared_filter() -> Result<()
     actor.save_ui();
 
     // When making Research session `tokio-cancel`, outside orb.
-    actor.new_colony(
+    make_colony(
+        &mut actor,
         world_of(&state, ProjectKind::Research),
         "tokio-cancel",
-        None,
     );
 
     // Then the store holds no filter.
@@ -7111,7 +7213,7 @@ fn refused_folder_session_keeps_the_filter() -> Result<(), Report<StoreError>> {
     state.write().sessions.filter = Some(orb);
 
     // When making Research session `x`.
-    actor.new_colony(world_of(&state, ProjectKind::Research), "x", None);
+    make_colony(&mut actor, world_of(&state, ProjectKind::Research), "x");
 
     // Then the filter stays on orb.
     assert_eq!(
@@ -8936,7 +9038,7 @@ async fn deleting_a_session_logs_it_and_its_panes() -> Result<(), Report<StoreEr
     actor.services.log = Log::new(path.clone());
 
     // When deleting aa's session.
-    actor.delete_session(inserted.session);
+    delete(&mut actor, inserted.session);
 
     // Then the log names the session, its agent and both panes.
     let content = fs::read_to_string(&path).unwrap_or_default();
@@ -9208,7 +9310,7 @@ fn api_start_whose_parent_was_deleted_meanwhile_is_top_level() -> Result<(), Rep
         dir: None,
     };
     let job = actor.api_start(start, None);
-    actor.delete_session(colony);
+    delete(&mut actor, colony);
     finish(&mut actor, job);
 
     // Then the new session has no parent.
@@ -9452,7 +9554,7 @@ fn fresh_colony_copies_the_kit_without_git() -> Result<(), Report<StoreError>> {
     let world = fresh_kit(&mut actor, &state, base.path())?;
 
     // When making colony `a` in it.
-    actor.new_colony(world, "a", None);
+    make_colony(&mut actor, world, "a");
 
     // Then its folder has the kit's files but not its `.git`.
     let dir = orb_root.path().join("worlds/kit/a");
@@ -9473,7 +9575,7 @@ fn fresh_colony_refused_when_its_folder_exists() -> Result<(), Report<StoreError
     fs::create_dir_all(orb_root.path().join("worlds/kit/a")).change_context(StoreError)?;
 
     // When making colony `a` in it.
-    actor.new_colony(world, "a", None);
+    make_colony(&mut actor, world, "a");
 
     // Then it's refused and no session shows.
     assert_eq!(
@@ -9488,6 +9590,102 @@ fn fresh_colony_refused_when_its_folder_exists() -> Result<(), Report<StoreError
 }
 
 #[rstest::rstest]
+fn new_fresh_colony_copies_its_folder_beside_the_queue() -> Result<(), Report<StoreError>> {
+    // Given a fresh world `kit`.
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let world = fresh_kit(&mut actor, &state, base.path())?;
+
+    // When asking for colony `a` in it.
+    let job = actor.new_colony(world, "a", None);
+
+    // Then a copy job comes back and the folder isn't made yet.
+    assert_eq!(
+        (job.is_some(), orb_root.path().join("worlds/kit/a").exists()),
+        (true, false),
+        "a fresh colony's folder should be copied by a job, not on the queue"
+    );
+    Ok(())
+}
+
+/// A fresh world `kit` whose colony `a` was copied, then the world removed
+/// before the copy landed: the actor, the landed copy, and the folder.
+fn copy_after_world_removed() -> Result<
+    (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        SessionsActor,
+        ColonyFolderReady,
+        PathBuf,
+    ),
+    Report<StoreError>,
+> {
+    let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+    let base = tempfile::tempdir().change_context(StoreError)?;
+    let world = fresh_kit(&mut actor, &state, base.path())?;
+    let Some(ColonyJob {
+        world,
+        if_active,
+        copy,
+    }) = actor.new_colony(world, "a", None)
+    else {
+        return Err(Report::new(StoreError).attach("a fresh colony should copy in a job"));
+    };
+    let made = copy.run();
+    actor.remove_project(world);
+    let dir = orb_root.path().join("worlds/kit/a");
+    let ready = ColonyFolderReady {
+        world,
+        if_active,
+        made,
+    };
+    Ok((orb_root, base, actor, ready, dir))
+}
+
+#[rstest::rstest]
+fn fresh_colony_copy_landing_after_its_world_was_removed_removes_the_folder()
+-> Result<(), Report<StoreError>> {
+    // Given colony `a`'s folder copied, then its world removed.
+    let (_orb_root, _base, mut actor, ready, dir) = copy_after_world_removed()?;
+
+    // When the copy lands and the removal it hands back runs.
+    finish_ready(&mut actor, ready);
+
+    // Then the copied folder is gone.
+    assert!(
+        !dir.exists(),
+        "a copy for a world removed meanwhile should be removed again"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn fresh_colony_copy_landing_after_its_world_was_removed_shows_why()
+-> Result<(), Report<StoreError>> {
+    // Given colony `a`'s folder copied, then its world removed.
+    let (_orb_root, _base, mut actor, ready, _dir) = copy_after_world_removed()?;
+
+    // When the copy lands.
+    finish_ready(&mut actor, ready);
+
+    // Then the mode line says the world is gone.
+    assert_eq!(
+        error_of(&actor).as_deref(),
+        Some("couldn't find that world"),
+        "a colony whose world was removed meanwhile should say why"
+    );
+    Ok(())
+}
+
+/// Hands `ready` to `actor` and runs any removal it hands back.
+fn finish_ready(actor: &mut SessionsActor, ready: ColonyFolderReady) {
+    actor
+        .colony_folder_ready(ready)
+        .into_iter()
+        .for_each(RemoveFolder::run);
+}
+
+#[rstest::rstest]
 fn shared_colony_runs_in_the_worlds_folder() -> Result<(), Report<StoreError>> {
     // Given a shared world.
     let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
@@ -9496,7 +9694,7 @@ fn shared_colony_runs_in_the_worlds_folder() -> Result<(), Report<StoreError>> {
     let world = added_world(&mut actor, &state, &root, ProjectKind::SharedWorld);
 
     // When making colony `triage` in it.
-    actor.new_colony(world, "triage", None);
+    make_colony(&mut actor, world, "triage");
 
     // Then a colony named `triage` runs in the world's folder.
     let session = only_session(&state)?;
@@ -9518,7 +9716,7 @@ fn shared_colony_refused_when_its_folder_is_gone() -> Result<(), Report<StoreErr
     fs::remove_dir(&root).change_context(StoreError)?;
 
     // When making colony `triage` in it.
-    actor.new_colony(world, "triage", None);
+    make_colony(&mut actor, world, "triage");
 
     // Then it's refused and no session shows.
     assert_eq!(
@@ -9539,7 +9737,7 @@ fn removing_a_world_keeps_its_colonies() -> Result<(), Report<StoreError>> {
     let base = tempfile::tempdir().change_context(StoreError)?;
     let root = world_dir(base.path(), "a", "orchestrators")?;
     let world = added_world(&mut actor, &state, &root, ProjectKind::SharedWorld);
-    actor.new_colony(world, "triage", None);
+    make_colony(&mut actor, world, "triage");
 
     // When removing the world.
     actor.remove_project(world);

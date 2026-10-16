@@ -389,6 +389,8 @@ Entries are added or amended **only with human approval**.
 - (worlds) Adding a world in the worlds screen asks `Shared` or `Fresh` once; a shared world's colonies all run in its folder, and a fresh world's each run in their own copy of its kit.
 - (worlds) A world's name is its folder's name, and a name another world has, Research and Learn included, is refused.
 - (worlds) A new colony in the user's own fresh world copies the world's folder as it is then, leaving out `.git`.
+- (worlds) A fresh colony's folder is copied, and a deleted fresh colony's folder removed, beside the sessions queue, so splits, new tabs, statuses and agent requests keep moving meanwhile.
+- (worlds) While a fresh colony's folder is copied, the mode line shows `starting session…` and the `New colony` box stays open; a copy whose world was removed meanwhile is removed again.
 - (worlds) Removing a world drops it from orb only; its folder, its colonies' folders and its colonies stay, and Research and Learn can't be removed.
 - (keybinds) `<C-g> C` opens the worlds screen, where `a` adds a world, `d` removes one after a `No`/`Yes` confirm, and `⏎` starts a colony in it.
 - (keybinds) `<C-g> ,` on a colony opens the session picker titled `Colonists`, listing the agents of every session under it, whatever the project filter.

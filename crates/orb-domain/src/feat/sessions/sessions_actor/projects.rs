@@ -86,17 +86,18 @@ impl SessionsActor {
     /// while `if_active`, the session active when the user asked, still is.
     /// Shared: in the world's folder, named `name` unless empty, refused when
     /// the folder is gone. Fresh: in a new folder `name` under the world's
-    /// colonies folder, copied from its kit (orb's built-in kit seeded when
-    /// missing), refused when the folder exists, and removed again when the
-    /// session isn't saved. A made colony outside the project filter clears
-    /// it. The name box closes once the colony is made and otherwise stays
-    /// open with the reason on the mode line.
+    /// colonies folder, copied from its kit by the returned job (see
+    /// [`KitCopy`]), and the colony once its folder arrives (see
+    /// [`Self::colony_folder_ready`]). A made colony outside the project
+    /// filter clears it. The name box closes once the colony is made and
+    /// otherwise stays open with the reason on the mode line.
+    #[must_use]
     pub(super) fn new_colony(
         &mut self,
         world: ProjectId,
         name: &str,
         if_active: Option<SessionId>,
-    ) {
+    ) -> Option<ColonyJob> {
         let (dirs, home) = {
             let app = self.state.read();
             let dirs = app
@@ -119,17 +120,67 @@ impl SessionsActor {
                 kit,
                 colonies,
                 seed,
-            }) => self
-                .make_folder(&kit, &colonies, seed, name, &home)
-                .and_then(|dir| {
-                    let saved =
-                        self.save_session(world, SessionKind::Colony, &dir, None, None, None, true);
-                    if saved.is_err() {
-                        remove_unstarted(&self.services.log, &dir);
-                    }
-                    saved
-                }),
+            }) => {
+                return Some(ColonyJob {
+                    world,
+                    if_active,
+                    copy: KitCopy {
+                        log: self.services.log.clone(),
+                        kit,
+                        colonies,
+                        seed,
+                        name: name.to_owned(),
+                        home,
+                    },
+                });
+            }
         };
+        self.colony_made(world, if_active, made);
+        None
+    }
+
+    /// A fresh colony's copy landed: re-checks that its world is still
+    /// there, saves the colony in the folder, and ends the start. A folder
+    /// whose world was removed meanwhile, or whose session didn't save, is
+    /// handed back for removal.
+    #[must_use]
+    pub(super) fn colony_folder_ready(&mut self, ready: ColonyFolderReady) -> Option<RemoveFolder> {
+        let ColonyFolderReady {
+            world,
+            if_active,
+            made,
+        } = ready;
+        let mut removal = None;
+        let made = made.and_then(|dir| {
+            let live = self
+                .state
+                .read()
+                .sessions
+                .project(world)
+                .is_some_and(|project| !project.removed);
+            let saved = if live {
+                self.save_session(world, SessionKind::Colony, &dir, None, None, None, true)
+            } else {
+                Err("couldn't find that world".to_owned())
+            };
+            if saved.is_err() {
+                removal = Some(self.remove_folder(dir));
+            }
+            saved
+        });
+        self.colony_made(world, if_active, made);
+        removal
+    }
+
+    /// Ends a colony start: answers the name box, clears a filter to
+    /// another world once the colony is `made`, and reports it ready or why
+    /// not.
+    fn colony_made(
+        &mut self,
+        world: ProjectId,
+        if_active: Option<SessionId>,
+        made: Result<SessionId, String>,
+    ) {
         let unfiltered = {
             let mut app = self.state.write();
             let app = &mut *app;
@@ -151,38 +202,6 @@ impl SessionsActor {
         self.end_start(made.map(drop), opens);
     }
 
-    /// Copies `kit` (seeded from `seed` when missing) to `colonies/name`,
-    /// making `colonies` first, and returns that folder; refused with
-    /// `<dir> already exists` when it exists. A folder this call made is
-    /// removed again on failure. The error is the message box text.
-    fn make_folder(
-        &self,
-        kit: &Path,
-        colonies: &Path,
-        seed: Option<FolderKind>,
-        name: &str,
-        home: &Path,
-    ) -> Result<PathBuf, String> {
-        fs::create_dir_all(colonies)
-            .map_err(|error| failed(&self.services.log, FOLDER_UNMADE, &error))?;
-        let dir = colonies.join(name);
-        if dir.exists() {
-            return Err(format!("{} already exists", tilde(&dir, home)));
-        }
-        let seeded = match seed {
-            Some(kind) if !kit.exists() => template::seed(kit, kind),
-            _ => Ok(()),
-        };
-        match seeded.and_then(|()| template::copy(kit, &dir)) {
-            Ok(()) => Ok(dir),
-            Err(report) => {
-                let shown = failed(&self.services.log, FOLDER_UNMADE, &report);
-                remove_unstarted(&self.services.log, &dir);
-                Err(shown)
-            }
-        }
-    }
-
     /// Removes project `id` from `<C-g> n` and the project filter once the store
     /// has; its sessions stay.
     pub(super) fn remove_project(&mut self, id: ProjectId) {
@@ -201,6 +220,83 @@ impl SessionsActor {
             project.removed = true;
         }
         self.report.report(Outcome::ProjectsChanged);
+    }
+}
+
+/// Copies a fresh world's kit into a new colony folder.
+pub(super) struct KitCopy {
+    log: Log,
+    kit: PathBuf,
+    colonies: PathBuf,
+    seed: Option<FolderKind>,
+    name: String,
+    home: PathBuf,
+}
+
+impl ColonyJob {
+    /// Runs the copy beside the actor's queue and posts its folder back to
+    /// `actor`; a job that dies posts a failure, so its start always ends.
+    /// A folder made while orb quits is removed again.
+    pub(super) fn spawn(self, actor: ActorRef<SessionsActor>) {
+        let Self {
+            world,
+            if_active,
+            copy,
+        } = self;
+        let log = copy.log.clone();
+        tokio::spawn(async move {
+            let made = tokio::task::spawn_blocking(move || copy.run())
+                .await
+                .unwrap_or_else(|error| {
+                    log.error("colony job", &error);
+                    Err(FOLDER_UNMADE.to_owned())
+                });
+            let dir = made.as_ref().ok().cloned();
+            let ready = ColonyFolderReady {
+                world,
+                if_active,
+                made,
+            };
+            if actor.tell(ready).await.is_err()
+                && let Some(dir) = dir
+            {
+                remove_unstarted(&log, &dir);
+            }
+        });
+    }
+}
+
+impl KitCopy {
+    /// Copies the kit (seeded when missing) to `colonies/name`, making
+    /// `colonies` first, and returns that folder; refused with `<dir>
+    /// already exists` when it exists. A folder this call made is removed
+    /// again on failure. The error is the message box text.
+    pub(super) fn run(self) -> Result<PathBuf, String> {
+        let Self {
+            log,
+            kit,
+            colonies,
+            seed,
+            name,
+            home,
+        } = self;
+        fs::create_dir_all(&colonies).map_err(|error| failed(&log, FOLDER_UNMADE, &error))?;
+        let dir = colonies.join(name);
+        if dir.exists() {
+            return Err(format!("{} already exists", tilde(&dir, &home)));
+        }
+        let seeded = match seed {
+            Some(kind) if !kit.exists() => template::seed(&kit, kind),
+            _ => Ok(()),
+        };
+        match seeded.and_then(|()| template::copy(&kit, &dir)) {
+            Ok(()) => Ok(dir),
+            Err(report) => {
+                let shown = failed(&log, FOLDER_UNMADE, &report);
+                remove_unstarted(&log, &dir);
+                Err(shown)
+            }
+        }
     }
 }
 

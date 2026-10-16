@@ -41,8 +41,8 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 
 - **orb has three actors.** `SessionsActor`, `WorktreesActor` and `SearchActor`, all kameo actors, are spawned in src/main.rs:175-193. Each one gets a `State` handle on the shared `AppState` and its own `Reporter`.
 - **Each actor matches its command enum in one place.** One `impl Message` holds one match over the enum (worktrees_actor.rs:80-94, sessions_actor.rs:439).
-- **Messages an actor sends to itself stay separate.** The hourly `Sweep` (worktrees_actor.rs:48), the two halves of the poll (`PollPlan`, `PollSeen`), a finished worktree (`WorktreeReady`), the start-up `KillSettled`, and search's `IndexNext` each have their own handler.
-- **Slow outside calls never block the queue.** The poll is two asks with the harness and zmx listing done between them, and a new worktree is made in a blocking task beside the actor. Commands queued behind either one keep moving.
+- **Messages an actor sends to itself stay separate.** The hourly `Sweep` (worktrees_actor.rs:48), the two halves of the poll (`PollPlan`, `PollSeen`), a finished worktree (`WorktreeReady`), a fresh colony's copied folder (`ColonyFolderReady`), the start-up `KillSettled`, and search's `IndexNext` each have their own handler.
+- **Slow outside calls never block the queue.** The poll is two asks with the harness and zmx listing done between them, a new worktree is made in a blocking task beside the actor, and a fresh colony's folder is copied, and a deleted one's removed, beside it the same way. Commands queued behind any of them keep moving.
 
 ## Who writes what
 

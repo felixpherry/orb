@@ -73,7 +73,10 @@
 //! It makes colonies: in a shared world, in the world's own folder; in a
 //! fresh world, in a new folder under it copied from the world's kit (orb
 //! writes Research's and Learn's kits from their built-in defaults when
-//! missing), never overwriting a folder that already exists.
+//! missing), never overwriting a folder that already exists. A fresh
+//! colony's folder is copied, and a deleted fresh colony's folder removed,
+//! beside the actor's queue, so other requests are handled meanwhile; a
+//! copy whose world was removed meanwhile is removed again.
 //!
 //! It adds projects and removes them: a removed project leaves `<C-g> n` and the
 //! project filter, its sessions stay, and adding it again
@@ -138,7 +141,7 @@ mod settle;
 mod start;
 
 use self::poll::{agent_mut, display_title, show};
-use self::projects::own_folder;
+use self::projects::{KitCopy, own_folder};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
 use self::start::{answer_name_box, current_branch, rename_hex_branch};
 
@@ -370,6 +373,30 @@ pub struct WorktreeReady {
     made: Result<MadeWorktree, String>,
 }
 
+/// A colony job copied (or failed to copy) a fresh colony's folder.
+#[derive(Debug)]
+pub struct ColonyFolderReady {
+    world: ProjectId,
+    if_active: Option<SessionId>,
+    made: Result<PathBuf, String>,
+}
+
+/// The slow part of a fresh colony's start: copying its folder, run beside
+/// the actor's queue.
+struct ColonyJob {
+    world: ProjectId,
+    if_active: Option<SessionId>,
+    copy: KitCopy,
+}
+
+/// A folder removed beside the actor's queue: a deleted fresh colony's, or
+/// one copied for a colony that wasn't made.
+struct RemoveFolder {
+    dir: PathBuf,
+    log: Log,
+    report: Reporter,
+}
+
 /// The slow part of a start: the git work that makes its worktree, run
 /// beside the actor's queue.
 struct WorktreeJob {
@@ -497,11 +524,19 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::DeleteSession {
                 session,
                 with_colonists: false,
-            } => self.delete_session(session),
+            } => {
+                if let Some(removal) = self.delete_session(session) {
+                    removal.spawn();
+                }
+            }
             SessionsCommand::DeleteSession {
                 session,
                 with_colonists: true,
-            } => self.delete_with_colonists(session),
+            } => {
+                for removal in self.delete_with_colonists(session) {
+                    removal.spawn();
+                }
+            }
             SessionsCommand::Visit(pane) => self.visit(pane),
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
@@ -510,7 +545,11 @@ impl Message<SessionsCommand> for SessionsActor {
                 world,
                 name,
                 if_active,
-            } => self.new_colony(world, &name, if_active),
+            } => {
+                if let Some(job) = self.new_colony(world, &name, if_active) {
+                    job.spawn(ctx.actor_ref().clone());
+                }
+            }
             SessionsCommand::RestoreWorktree(id) => {
                 if let Some(job) = self.restore_worktree(id) {
                     job.spawn(ctx.actor_ref().clone());
@@ -558,6 +597,21 @@ impl Message<WorktreeReady> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> impl Future<Output = Self::Reply> + Send {
         self.worktree_ready(msg);
+        std::future::ready(())
+    }
+}
+
+impl Message<ColonyFolderReady> for SessionsActor {
+    type Reply = ();
+
+    fn handle(
+        &mut self,
+        msg: ColonyFolderReady,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        if let Some(removal) = self.colony_folder_ready(msg) {
+            removal.spawn();
+        }
         std::future::ready(())
     }
 }
