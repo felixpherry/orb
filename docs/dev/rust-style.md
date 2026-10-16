@@ -101,7 +101,7 @@ The conventions orb's Rust code follows. Each section gives the rule first, then
 - **Put generic bounds in a `where` clause.**
 - **Prefer `match` to a chain of `if`s** (jumps/intent.rs:11).
 - **Name the action instead of writing a setter.** `state.sessions.enter(id)` (jumps/intent.rs:47) says what happens; a bare field setter doesn't.
-- **Run outside programs through `run_within`** (crates/orb-domain/src/common/child.rs:34), so each one has a time limit. The lint rejects `.output()`.
+- **Run outside programs through `run_within`** (crates/orb-domain/src/common/child.rs:34), so each one has a time limit. The lint rejects `.output()`, and `.status()` outside tests.
 - **Never throw away a kill or a removal.** No `let _ =` on one, and no `|_report|` closure that drops an error. The lint checks both.
 - **Keep a file's production part at 2,000 lines or fewer.** `just lint-filelen` counts the lines before the first `#[cfg(test)]`; test-only tests.rs and test_support.rs files don't count.
 - **Comments describe orb on its own terms.** No notes about plans, specs or divergences, and no explaining a behaviour by comparing it with another tool.

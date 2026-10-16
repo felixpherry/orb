@@ -13,9 +13,12 @@
 - Unlimited programs: a `.output()` call anywhere in Rust code (tests too)
   outside the timed runners in OUTPUT_ALLOWED fails, since it runs a program
   with no time limit.
+- Unlimited waits: a `.status()` after a call chain in production code fails,
+  since it waits on a program with no time limit.
 
 `--self-test` plants a bad name, a bad phrase, a dropped kill, a dropped
-report, an unreviewed zmx list site and an unlimited `.output()`, and exits 0
+report, an unreviewed zmx list site, an unlimited `.output()` and a bare
+`.status()`, and exits 0
 only if all are reported and a dropped kill in a test-only file is not.
 
 Test-only files (`tests.rs`, `test_support.rs`) have no production part.
@@ -85,6 +88,8 @@ OUTPUT = re.compile(r"\.output\(\)")
 OUTPUT_ALLOWED = {
     "crates/orb-domain/src/feat/harness/claude/supervisor.rs": "the async timed runner: tokio timeout over output() with kill_on_drop",
 }
+# A `.status()` that ends a call chain: `Command::new(..)....status()`.
+STATUS = re.compile(r"\)\s*\.status\(\)")
 
 SPAN = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[A-Za-z_]\w*(::\w+)*$")
@@ -186,6 +191,16 @@ def check_outputs(label, text):
     ]
 
 
+def check_statuses(label, text):
+    """Report `.status()` calls in production code, which wait on a program with no time limit."""
+    code = production(label, text)
+    return [
+        f"{label}:{code.count(chr(10), 0, found.start()) + 1}: "
+        ".status() waits on a program with no time limit; use run_within"
+        for found in STATUS.finditer(code)
+    ]
+
+
 def rust_files():
     for code_dir in CODE_DIRS:
         for path in sorted((ROOT / code_dir).rglob("*.rs")):
@@ -201,12 +216,13 @@ def self_test():
     report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
     zmx = check_zmx_lists("self-test", "fn f() {\n    self.zmx\n        .list(dir);\n}\n")
     output = check_outputs("self-test", "fn f() {\n    c.output();\n}\n")
-    for line in names + deny + kill + report + zmx + output:
+    status = check_statuses("self-test", "fn f() {\n    Command::new(p)\n        .status();\n}\n")
+    for line in names + deny + kill + report + zmx + output + status:
         print(line)
     if blind:
         print("self-test: a test-only file was checked as production")
         return 1
-    if not names or not deny or not kill or not report or not zmx or not output:
+    if not names or not deny or not kill or not report or not zmx or not output or not status:
         print("self-test: a check did not fail on its planted text")
         return 1
     print("self-test: every check reported its planted text")
@@ -228,6 +244,7 @@ def main():
         reports += check_drops(rel, text)
         reports += check_zmx_lists(rel, text)
         reports += check_outputs(rel, text)
+        reports += check_statuses(rel, text)
     for report in reports:
         print(report)
     if reports:

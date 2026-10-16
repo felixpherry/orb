@@ -10,13 +10,15 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use error_stack::{Report, ResultExt};
 use wherror::Error;
 
 use super::click::on_path;
+use crate::common::{Finished, run_within};
 use crate::feat::sessions::state::NoticeKind;
 
 /// herdr's "done" sound.
@@ -33,6 +35,9 @@ const LINUX_PLAYERS: [(&str, &[&str]); 5] = [
     ("mpg123", &["-q"]),
     ("mpv", &["--no-video", "--really-quiet"]),
 ];
+
+/// How long one player may run before it's stopped and the next is tried.
+const PLAYER_LIMIT: Duration = Duration::from_secs(5);
 
 /// A sound couldn't be set up or played.
 #[derive(Debug, Error)]
@@ -71,16 +76,22 @@ pub trait SoundPlayer: Send + Sync {
     fn play(&self, file: &Path) -> Result<(), Report<SoundError>>;
 }
 
-/// Plays a sound with the first program, in order, that exits 0.
+/// Plays a sound with the first program, in order, that exits 0 within its
+/// time limit; one still running past it is stopped and the next tried.
 #[derive(Debug)]
 pub struct CommandPlayers {
     /// Each program, with the arguments that go before the sound file.
     programs: Vec<(PathBuf, &'static [&'static str])>,
+    /// How long one player may run; tests shorten it.
+    limit: Duration,
 }
 
 impl CommandPlayers {
     pub fn new(programs: Vec<(PathBuf, &'static [&'static str])>) -> Self {
-        Self { programs }
+        Self {
+            programs,
+            limit: PLAYER_LIMIT,
+        }
     }
 }
 
@@ -92,16 +103,21 @@ impl SoundPlayer for CommandPlayers {
     fn play(&self, file: &Path) -> Result<(), Report<SoundError>> {
         let mut failures = Vec::new();
         for (program, args) in &self.programs {
-            let outcome = Command::new(program)
-                .args(*args)
-                .arg(file)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            match outcome {
-                Ok(status) if status.success() => return Ok(()),
-                Ok(status) => failures.push(format!("{}: {status}", program.display())),
+            let command = {
+                let mut command = Command::new(program);
+                command.args(*args).arg(file);
+                command
+            };
+            match run_within(command, self.limit) {
+                Ok(Finished::Exited(out)) if out.status.success() => return Ok(()),
+                Ok(Finished::Exited(out)) => {
+                    failures.push(format!("{}: {}", program.display(), out.status));
+                }
+                Ok(Finished::TimedOut) => failures.push(format!(
+                    "{}: still playing after {} s",
+                    program.display(),
+                    self.limit.as_secs_f32()
+                )),
                 Err(error) => failures.push(format!("{}: {error}", program.display())),
             }
         }
@@ -218,6 +234,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
@@ -325,6 +342,33 @@ mod tests {
 
         // Then only the first ran.
         assert_eq!(runs(dir.path()), ["first /s/done.mp3"], "the players tried");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn hung_player_gives_way_to_the_next() -> Result<(), Report<SoundError>> {
+        // Given a first player that hangs, a second that works, and a 2 s
+        // limit (macOS scans a new program on its first run, which can take a
+        // few hundred ms).
+        let dir = TempDir::new().change_context(SoundError)?;
+        let hung = dir.path().join("hung");
+        fs::write(&hung, "#!/bin/sh\nexec sleep 30\n").change_context(SoundError)?;
+        fs::set_permissions(&hung, fs::Permissions::from_mode(0o755)).change_context(SoundError)?;
+        let second = program(dir.path(), "second", 0)?;
+        let players = CommandPlayers {
+            programs: vec![(hung, &[]), (second, &[])],
+            limit: Duration::from_secs(2),
+        };
+
+        // When playing a sound.
+        players.play(Path::new("/s/done.mp3"))?;
+
+        // Then the second player ran.
+        assert_eq!(
+            runs(dir.path()),
+            ["second /s/done.mp3"],
+            "the players that recorded a run"
+        );
         Ok(())
     }
 

@@ -130,7 +130,7 @@ Entries are added or amended **only with human approval**.
 - (notify) orb plays herdr's "request" sound, built into orb, each time an agent starts needing approval or input, whether or not the user is looking at it.
 - (notify) orb plays herdr's "done" sound, built into orb, when an agent finishes a turn, unless orb's terminal is focused and the agent's pane is in the shown session's shown tab or a showing float.
 - (notify) On macOS, sounds play through `afplay`.
-- (notify) On Linux, a sound plays through the first of paplay, pw-play, ffplay, mpg123 and mpv that plays it, and nothing plays when none can.
+- (notify) On Linux, a sound plays through the first of paplay, pw-play, ffplay, mpg123 and mpv that plays it, and nothing plays when none can; a player still running after 5 s is stopped and the next one tried.
 - (notify) Sounds play even while macOS Focus hides the notification, and orb has no setting to turn them off.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (keybinds) In the sidebar, `r` on a session opens a Rename Session box filled in with its title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.

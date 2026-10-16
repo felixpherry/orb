@@ -32,7 +32,7 @@ Commit only when `just test` passes. A branch is done only when `just lint` pass
 - **Errors are reports.** Fallible code returns `error_stack::Report` over a `wherror` type that sits in the same file as the code that fails. No error.rs or traits.rs files.
 - **Outside tools sit behind a trait.** git, zmx, the harnesses and the notifiers each have one, with a fake for tests.
 - **Each state field has one writing actor.** Only the actor that owns an `AppState` field writes it; the intent handler is the one exception.
-- **Outside programs get a time limit.** Run them through `run_within`. The lint rejects a bare `.output()`.
+- **Outside programs get a time limit.** Run them through `run_within`. The lint rejects a bare `.output()`, and a `.status()` in production code.
 - **Never drop the result of a kill or a removal** with `let _ =`.
 - **Cut text by grapheme** with the unicode-segmentation crate, never with `.chars()` or byte indexes.
 - **Read environment variables only at start-up** in src/main.rs, then pass the values along.
