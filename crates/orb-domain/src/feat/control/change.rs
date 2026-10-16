@@ -5,8 +5,9 @@
 
 use crate::feat::control::protocol::{ApiError, ErrorCode};
 use crate::feat::picker::intent::pick;
+use crate::feat::sessions::intent::settle_now;
 use crate::feat::sessions::state::SidebarItem;
-use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
+use crate::feat::sessions::validator::{SETTLE_IN_PROGRESS, session_working};
 use crate::ids::{PaneId, SessionId};
 use crate::{AppState, Command, Focus, SessionsCommand};
 
@@ -133,31 +134,10 @@ fn closed(state: &mut AppState, session: SessionId) -> Vec<Command> {
 /// neighbouring card.
 fn settle(state: &mut AppState, session: SessionId) -> Result<Vec<Command>, ApiError> {
     exists(state, session)?;
-    if state
-        .sessions
-        .agents(session)
-        .into_iter()
-        .any(|agent| agent.status.in_progress())
-    {
+    if session_working(state, session) {
         return Err(ApiError::new(ErrorCode::Failed, SETTLE_IN_PROGRESS));
     }
-    state.attached.remove(&session);
-    state.sessions.leave(session);
-    if state
-        .sessions
-        .selected_session()
-        .map(|selected| selected.id)
-        == Some(session)
-    {
-        state.sessions.cursor =
-            state
-                .sessions
-                .card_neighbour(SidebarItem::Session(session), &state.layouts, &[]);
-    }
-    Ok(vec![Command::Sessions(SessionsCommand::SettleSession {
-        session,
-        with_colonists: false,
-    })])
+    Ok(settle_now(state, session, false))
 }
 
 /// Shows `pane` of `session` (else its focused pane) in its tab, makes the
@@ -194,12 +174,72 @@ fn focus(
 #[cfg(test)]
 mod tests {
     use super::{Change, apply};
-    use crate::Focus;
+    use crate::feat::control::protocol::ErrorCode;
     use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::Split;
-    use crate::feat::sessions::state::AgentStatus;
+    use crate::feat::sessions::state::{AgentStatus, SidebarItem};
     use crate::ids::{PaneId, SessionId};
-    use crate::intent_handler::test_support::{colony_with_colonists, left_pane_showing_1};
+    use crate::intent_handler::test_support::{
+        agent, colony_with_colonists, left_pane_showing_1, state_with,
+    };
+    use crate::{Command, Focus, SessionsCommand};
+
+    #[rstest::rstest]
+    fn settle_of_a_working_session_is_refused_with_failed() {
+        // Given session 1's agent working.
+        let mut state = state_with(
+            vec![agent(1, AgentStatus::Working), agent(2, AgentStatus::Idle)],
+            2,
+        );
+
+        // When an agent asks to settle session 1.
+        let result = apply(&mut state, &Change::SettleSession(SessionId(1)));
+
+        // Then it is refused as failed.
+        assert_eq!(
+            result.map_err(|error| error.code),
+            Err(ErrorCode::Failed),
+            "a session with a turn underway can't be settled"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settling_the_selected_session_moves_the_cursor_to_the_next_card() {
+        // Given sessions 2 and 1 listed in that order, the cursor on 2.
+        let mut state = state_with(
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+            2,
+        );
+
+        // When an agent asks to settle session 2.
+        let _ = apply(&mut state, &Change::SettleSession(SessionId(2)));
+
+        // Then the cursor is on session 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(1))),
+            "a settled selected session hands the cursor to the next card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_returns_one_settle_without_colonists() {
+        // Given colony 1 with idle colonists.
+        let mut state = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When an agent asks to settle colony 1.
+        let result = apply(&mut state, &Change::SettleSession(SessionId(1)));
+
+        // Then the sessions actor is asked to settle colony 1 alone.
+        assert_eq!(
+            result,
+            Ok(vec![Command::Sessions(SessionsCommand::SettleSession {
+                session: SessionId(1),
+                with_colonists: false,
+            })]),
+            "the API settles the named session only"
+        );
+    }
 
     #[rstest::rstest]
     #[case::close_pane(Change::ClosePane(PaneId(2)))]

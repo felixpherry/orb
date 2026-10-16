@@ -89,6 +89,15 @@ pub enum ToggleSettleError {
     InProgress,
 }
 
+/// Whether one of session `session`'s agent panes has a turn underway.
+pub fn session_working(state: &AppState, session: SessionId) -> bool {
+    state
+        .sessions
+        .agents(session)
+        .into_iter()
+        .any(|agent| agent.status.in_progress())
+}
+
 /// What the mode line says when settling is refused because a session is
 /// working.
 pub const SETTLE_IN_PROGRESS: &str = "Can't settle while a session is working";
@@ -109,13 +118,7 @@ pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError>
     }
     match sessions.selected_session() {
         None => Err(ToggleSettleError::NoSession),
-        Some(session)
-            if session.settled_at.is_none()
-                && sessions
-                    .agents(session.id)
-                    .into_iter()
-                    .any(|agent| agent.status.in_progress()) =>
-        {
+        Some(session) if session.settled_at.is_none() && session_working(state, session.id) => {
             Err(ToggleSettleError::InProgress)
         }
         Some(_) => Ok(()),
@@ -144,13 +147,11 @@ pub fn validate_settle_colonists(
     state: &AppState,
     session: SessionId,
 ) -> Result<(), SettleColonistsError> {
-    let working = state.sessions.under(session).into_iter().any(|id| {
-        state
-            .sessions
-            .agents(id)
-            .into_iter()
-            .any(|agent| agent.status.in_progress())
-    });
+    let working = state
+        .sessions
+        .under(session)
+        .into_iter()
+        .any(|id| session_working(state, id));
     if working {
         Err(SettleColonistsError::Working)
     } else {

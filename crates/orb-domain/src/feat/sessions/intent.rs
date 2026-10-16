@@ -161,28 +161,11 @@ pub(crate) fn settle_session(
         state.sessions.selected_session(),
     ) {
         (Ok(()), Some(selected)) if selected.id == session && selected.settled_at.is_none() => {
-            let colonists = if with_colonists {
-                state.sessions.under(session)
-            } else {
-                vec![]
-            };
             if with_colonists && validate_settle_colonists(state, session).is_err() {
                 state.sessions.error = Some(COLONIST_WORKING.to_owned());
                 return vec![];
             }
-            for id in std::iter::once(session).chain(colonists.iter().copied()) {
-                state.attached.remove(&id);
-                state.sessions.leave(id);
-            }
-            state.sessions.cursor = state.sessions.card_neighbour(
-                SidebarItem::Session(session),
-                &state.layouts,
-                &colonists,
-            );
-            vec![Command::Sessions(SessionsCommand::SettleSession {
-                session,
-                with_colonists,
-            })]
+            settle_now(state, session, with_colonists)
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
             state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
@@ -190,6 +173,42 @@ pub(crate) fn settle_session(
         }
         _ => vec![],
     }
+}
+
+/// Settles `session` on the screen side, with every unsettled session under
+/// it when `with_colonists`: they leave `attached` and stop being active, a
+/// cursor on `session` moves to the neighbouring card, and the sessions
+/// actor is asked to settle.
+pub(crate) fn settle_now(
+    state: &mut AppState,
+    session: SessionId,
+    with_colonists: bool,
+) -> Vec<Command> {
+    let colonists = if with_colonists {
+        state.sessions.under(session)
+    } else {
+        vec![]
+    };
+    for id in std::iter::once(session).chain(colonists.iter().copied()) {
+        state.attached.remove(&id);
+        state.sessions.leave(id);
+    }
+    if state
+        .sessions
+        .selected_session()
+        .map(|selected| selected.id)
+        == Some(session)
+    {
+        state.sessions.cursor = state.sessions.card_neighbour(
+            SidebarItem::Session(session),
+            &state.layouts,
+            &colonists,
+        );
+    }
+    vec![Command::Sessions(SessionsCommand::SettleSession {
+        session,
+        with_colonists,
+    })]
 }
 
 /// Whether `item`, answered `Yes` in its delete or discard confirm, is still
