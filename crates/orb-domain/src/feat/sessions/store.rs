@@ -17,8 +17,8 @@
 //! upgrade the database is copied aside to `<file>.bak-v<old version>`, and
 //! only the three newest copies are kept. A database from a newer orb is
 //! refused with the name of the copy to put back, and a test build (one not
-//! run from cargo's bin directory) refuses to upgrade unless asked. Times are
-//! milliseconds since the Unix epoch.
+//! run from cargo's bin directory or `~/.local/bin`) refuses to upgrade unless
+//! asked. Times are milliseconds since the Unix epoch.
 //!
 //! One orb at a time owns a store: it holds a lock beside the database for as
 //! long as it runs, since a second orb on the same store would stop the
@@ -424,19 +424,25 @@ pub enum Upgrade {
     AskFirst,
 }
 
-/// The installed orb (run from `cargo_bin`) may upgrade; any other orb asks
-/// first unless started with `--upgrade-data` (`upgrade_flag`). An exe whose
-/// folder can't be resolved counts as a test build.
+/// The installed orb (run from one of the `installed` folders, such as
+/// cargo's bin folder or `~/.local/bin` where install.sh puts it) may
+/// upgrade; any other orb asks first unless started with `--upgrade-data`
+/// (`upgrade_flag`). An exe whose folder can't be resolved counts as a test
+/// build.
 #[must_use]
-pub fn upgrade_policy(exe: Option<&Path>, cargo_bin: &Path, upgrade_flag: bool) -> Upgrade {
+pub fn upgrade_policy(exe: Option<&Path>, installed: &[PathBuf], upgrade_flag: bool) -> Upgrade {
     if upgrade_flag {
         return Upgrade::Allowed;
     }
     let installed = exe
         .and_then(Path::parent)
         .and_then(|dir| dir.canonicalize().ok())
-        .zip(cargo_bin.canonicalize().ok())
-        .is_some_and(|(dir, bin)| dir == bin);
+        .is_some_and(|dir| {
+            installed
+                .iter()
+                .filter_map(|bin| bin.canonicalize().ok())
+                .any(|bin| bin == dir)
+        });
     if installed {
         Upgrade::Allowed
     } else {

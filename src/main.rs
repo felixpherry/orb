@@ -131,8 +131,9 @@ fn install_crash_hook(log: Log) {
 }
 
 /// Whether this orb may upgrade the saved data: the installed orb (run from
-/// `$CARGO_HOME/bin`, default `~/.cargo/bin`) may; a test build may only when
-/// started with `--upgrade-data`.
+/// `$CARGO_HOME/bin`, default `~/.cargo/bin`, or from `~/.local/bin`, where
+/// install.sh puts it) may; a test build may only when started with
+/// `--upgrade-data`.
 fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
     let cargo_bin = std::env::var_os("CARGO_HOME")
         .map_or_else(|| home.join(".cargo"), PathBuf::from)
@@ -140,7 +141,7 @@ fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
     let exe = std::env::current_exe().ok();
     store::upgrade_policy(
         exe.as_deref(),
-        &cargo_bin,
+        &[cargo_bin, home.join(".local/bin")],
         args.iter().any(|arg| arg == "--upgrade-data"),
     )
 }

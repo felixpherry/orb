@@ -2133,6 +2133,7 @@ fn test_build_creates_a_fresh_database() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 #[case(Some("cargo/bin/orb"), false, Upgrade::Allowed)]
+#[case(Some("local/bin/orb"), false, Upgrade::Allowed)]
 #[case(Some("repo/target/debug/orb"), false, Upgrade::AskFirst)]
 #[case(Some("repo/target/debug/orb"), true, Upgrade::Allowed)]
 #[case(None, false, Upgrade::AskFirst)]
@@ -2142,9 +2143,10 @@ fn upgrade_policy_from_where_orb_runs(
     #[case] flag: bool,
     #[case] expected: Upgrade,
 ) -> Result<(), Report<StoreError>> {
-    // Given an installed orb in cargo's bin folder and a test build in target/.
+    // Given installed orbs in cargo's bin folder and ~/.local/bin, and a test
+    // build in target/.
     let dir = tempfile::tempdir().change_context(StoreError)?;
-    for built in ["cargo/bin/orb", "repo/target/debug/orb"] {
+    for built in ["cargo/bin/orb", "local/bin/orb", "repo/target/debug/orb"] {
         let file = dir.path().join(built);
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent).change_context(StoreError)?;
@@ -2154,7 +2156,8 @@ fn upgrade_policy_from_where_orb_runs(
 
     // When deciding the upgrade policy for the running orb.
     let exe = exe.map(|exe| dir.path().join(exe));
-    let policy = upgrade_policy(exe.as_deref(), &dir.path().join("cargo/bin"), flag);
+    let installed = [dir.path().join("cargo/bin"), dir.path().join("local/bin")];
+    let policy = upgrade_policy(exe.as_deref(), &installed, flag);
 
     // Then it matches where orb runs from.
     assert_eq!(
