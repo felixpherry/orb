@@ -54,7 +54,7 @@ fn jump_back_without_an_older_row_is_rejected() {
 }
 ```
 
-The intent handler (crates/orb-domain/src/intent_handler.rs:291-305):
+The intent handler (crates/orb-domain/src/intent_handler.rs:278-293):
 
 ```rust
 #[rstest::rstest]

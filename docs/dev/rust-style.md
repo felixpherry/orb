@@ -24,7 +24,7 @@ The conventions orb's Rust code follows. Each section gives the rule first, then
       .attach_with(|| format!("couldn't run {}", program.display()))?;
   ```
 
-  (crates/orb-domain/src/feat/notify/notifier.rs:153-170)
+  (crates/orb-domain/src/feat/notify/notifier.rs:160-180)
 
 - **Every public fallible function has a `# Errors` section** that says when it fails (`ZmxService::list`, zmx_service.rs:173-178).
 

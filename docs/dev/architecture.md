@@ -13,7 +13,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
    │    └ one call into feat/<x>/intent.rs, e.g. jump_back (feat/jumps/intent.rs:10)
    ▼
  Vec<Command> .............................. crates/orb-domain/src/command.rs:19
-   │  the loop's execute .................... crates/orb-tui/src/run.rs:840
+   │  the loop's execute .................... crates/orb-tui/src/run.rs:842
    ├─► pane commands: run right there in the loop
    └─► actor commands: one tell to one actor's mailbox
          │  the actor writes the AppState fields it owns
