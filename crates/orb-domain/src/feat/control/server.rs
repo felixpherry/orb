@@ -236,7 +236,9 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request) -> Reply {
 }
 
 /// `<op> caller=<id> pane=<id> session=<id> project=<id> -> ok|<code>`, with
-/// only the IDs `request` carries: never a name, a prompt or pasted text.
+/// only the IDs `request` carries: never a name, a prompt or pasted text. A
+/// `failed` reply adds its reason, which may quote git but never a prompt or
+/// pasted text.
 fn log_text(request: &Request, reply: &Reply) -> String {
     let fields = serde_json::to_value(request).unwrap_or_default();
     let text = |key| match fields.get(key) {
@@ -246,6 +248,7 @@ fn log_text(request: &Request, reply: &Reply) -> String {
     };
     let result = match &reply.error {
         None => "ok".to_owned(),
+        Some(error) if error.code == ErrorCode::Failed => format!("failed: {}", error.message),
         Some(error) => serde_json::to_value(error.code)
             .ok()
             .and_then(|code| code.as_str().map(str::to_owned))
@@ -980,6 +983,28 @@ mod tests {
         assert_eq!(
             text, "session.rename caller=4 session=2 -> settled",
             "the log line carries IDs only"
+        );
+    }
+
+    #[rstest::rstest]
+    fn log_line_of_a_failure_carries_its_reason() {
+        // Given a pane close that failed because the screen didn't answer.
+        let request = Request {
+            caller: None,
+            op: Op::PaneClose { pane: PaneId(3) },
+        };
+        let reply = Reply::err(ApiError::new(
+            ErrorCode::Failed,
+            "orb's screen didn't answer",
+        ));
+
+        // When writing its log line.
+        let text = log_text(&request, &reply);
+
+        // Then the reason follows the code.
+        assert_eq!(
+            text, "pane.close pane=3 -> failed: orb's screen didn't answer",
+            "a failure logs why"
         );
     }
 

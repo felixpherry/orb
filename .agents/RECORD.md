@@ -366,7 +366,7 @@ Entries are added or amended **only with human approval**.
 - (api) `orb agent reply` returns the agent's last reply from its transcript.
 - (api) orb session create waits up to 3 minutes for orb's answer; other requests without a limit of their own wait 60 s.
 - (integration) `orb integration install` also installs an `orb` skill for Claude Code and pi that teaches agents the API, including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits.
-- (log) The running orb writes one line to the log for each API request that changes something.
+- (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
 - (sessions) A session that finishes starting while a picker, the rename box or search has the keys waits until they close.
 - (pane) While orb runs in kitty, orb forwards a pane's kitty graphics commands to the outer kitty with the image data untouched, rewriting only image ids, placement positions, and when they are sent; a pane holding an agent drops them.
