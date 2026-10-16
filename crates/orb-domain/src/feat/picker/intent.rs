@@ -91,7 +91,10 @@ pub(crate) fn open_session_picker(state: &mut AppState) -> Vec<Command> {
         memory.colonists,
         None,
     );
-    open_picker(state, PickerState::sessions(items, state.focus).recall(&memory));
+    open_picker(
+        state,
+        PickerState::sessions(items, state.focus).recall(&memory),
+    );
     preview_command(state)
 }
 
@@ -541,7 +544,8 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
                 }
                 Some(PickerItem::Confirm(true))
                     if !from_pane
-                        && state.sessions.selected_agent(&state.layouts) == Some((session, pane)) =>
+                        && state.sessions.selected_agent(&state.layouts)
+                            == Some((session, pane)) =>
                 {
                     close_agent_pane(state, session, pane)
                 }

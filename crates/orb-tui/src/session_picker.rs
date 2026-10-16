@@ -1562,7 +1562,9 @@ mod tests {
 
         // Then no hint is drawn.
         assert!(
-            !lines(&buf).iter().any(|line| line.contains("settled match")),
+            !lines(&buf)
+                .iter()
+                .any(|line| line.contains("settled match")),
             "with nothing settled to show, the list stays empty"
         );
     }

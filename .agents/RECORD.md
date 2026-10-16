@@ -70,11 +70,12 @@ Entries are added or amended **only with human approval**.
 - (sidebar) Pinned sessions come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) An agent shows a green check and "done" when its latest turn ended after the keys were last in its pane.
 - (settle) A turn underway in any of a session's agent panes, including one waiting for approval or input, un-settles the session.
-- (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
+- (settle) Sessions never settle by themselves; only `s` in the sidebar or `<C-g> s` in a pane settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
 - (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
 - (sessions) Deleting a session kills every pane and deletes its tabs, panes, agents and, for a colony in a fresh world, its own folder, even while a session not deleted with it still runs in it; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
+- (keybinds) `<C-g> s` in a pane puts the sidebar cursor on the shown session's card and opens its settle confirm; a `Yes` that settles moves the keys to the sidebar.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled session closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
 - (projects) The project picker lists projects by their agents' latest activity, else when they were added, until filter text is typed.
@@ -108,7 +109,7 @@ Entries are added or amended **only with human approval**.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
-- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
+- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> s`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
 - (keybinds) Which keys are bound follows the side with the keys, the row under the sidebar cursor (or the shown session in a pane), and the session's kind, whose one rule leaves `<C-g> w` and `<C-g> b` unbound on Incognito sessions and colonies and binds `<C-g> ,` only on colonies.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
@@ -143,6 +144,7 @@ Entries are added or amended **only with human approval**.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`<C-g>` for the leader), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
+- (keybinds) which-key labels `<C-g> e` "toggle sidebar", `<C-g> h` "go to sidebar", `<C-g> l` "go to panes", `<C-g> t 1`–`9` "tab 1"–"tab 9", `<C-g> w` "session's worktree" and `<C-g> W` "all worktrees".
 - (dashboard) While no session whose panes orb holds is shown, the right-hand area shows a LazyVim-style start screen: a gradient ORB banner and a footer counting working agents, sessions and projects, with no menu and no keys.
 - (dashboard) When a pane's client can't start, the reason shows in red under the start screen's footer; other errors show in the message box.
 - (pane) orb keeps a `zmx attach` client for every pane of each attached session, and showing another session leaves them running.
@@ -192,7 +194,11 @@ Entries are added or amended **only with human approval**.
 - (picker) The session picker lists one row per agent pane in the sessions inside the project filter, newest chat first by the later of the agent's current turn start and its last turn end, leaving out sessions being deleted, sessions with no agents, agents of colonists unless `c` shows them, and agents of settled sessions unless the settled filter is on.
 - (keybinds) In the session picker's list, `d` closes the selected agent after the sidebar agent row's confirm and returns to the list.
 - (keybinds) In the session picker's list, `a`, `b`, `w`, `i` and `s` show all, blocked (needing approval or input), working or idle agents, or only the agents of settled sessions, one filter at a time, judging each agent by its own status, and pressing the active filter's key again shows all.
-- (picker) The session picker opens on all agents, with colonists' agents and agents of settled sessions hidden, and shows its active filter, and `· colonists` while `c` shows them, in its title.
+- (picker) The session picker opens on the filter, `c` toggle and typed text it had when it last closed (all agents, colonists' and settled sessions' agents hidden, nothing typed, after orb starts), and shows its active filter, and `· colonists` while `c` shows them, in its title.
+- (picker) The Colonists picker keeps its own filter and typed text between opens, one memory for every colony, apart from the session picker's.
+- (picker) The search picker reopens with the text it had when it last closed and searches it again.
+- (picker) orb keeps picker memory only while it runs; nothing about pickers is saved.
+- (picker) When typed text in the session or Colonists picker matches no listed agent but matches agents of settled sessions, the empty list says `N settled matches · s to show`, except under the settled filter.
 - (picker) A session picker row is labelled `<project>/<session>/<agent>`, where the agent is its pane's name, else its title, else `New agent`, and typed text fuzzy-matches the whole label.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on an agent closed or deleted since, or one Claude no longer knows, only closes it.
 - (picker) `⏎` in the session picker reveals the agent's session in the sidebar and moves the keys into the agent's pane, like `⏎` on its agent row.
@@ -263,7 +269,8 @@ Entries are added or amended **only with human approval**.
 - (layout) Inside the focused stack, Alt j and Alt k step to the next and previous pane in the stack's list.
 - (layout) Move mode's direction keys swap the focused tiled pane with the pane a focus move that way would reach inside its tab.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane, or its whole stack, and share the space evenly among the panes split in that direction.
-- (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
+- (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else the title its program last set, else `shell`, in the top edge.
+- (layout) A stack's list names each pane the way its frame does.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
 - (layout) `Alt +` grows the focused pane, or its stack, 30% of the tab towards the first neighbour above, below, left or right that lines up with its whole edge.
@@ -301,6 +308,7 @@ Entries are added or amended **only with human approval**.
 - (float) Each session has one layer of floating panes drawn over all of its tabs, so switching tabs keeps it shown and focused.
 - (keybinds) `Alt f` shows or hides the session's floats, opening a shell float when it has none.
 - (keybinds) While a float has the keys, `Alt n` opens a float, `Alt x` closes the focused float, and `Alt h/j/k/l` move between floats without switching tabs.
+- (keybinds) `Alt x` and `<C-g> p x` on a pane running an agent ask `Close <name>?` with `No` selected, and `Yes` closes it only while it is still the focused pane of the shown session; a shell pane closes at once.
 - (float) Closing the last float hides the layer and gives the keys back to the shown tab's focused pane.
 - (keybinds) `<C-g> p w` shows or hides the floats, `<C-g> p e` turns the focused pane into a float or a float back into the shown tab, and `<C-g> p i` pins or unpins the focused float.
 - (float) A pinned float stays drawn over the tiled panes while the floats are hidden, and gets the keys only when clicked.

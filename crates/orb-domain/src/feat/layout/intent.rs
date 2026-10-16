@@ -923,7 +923,13 @@ mod tests {
                     .is_some_and(SessionLayout::float_focused),
                 matches!(
                     open_confirm(&state),
-                    Some((PickerKind::ClosePane { pane: PaneId(2), .. }, _))
+                    Some((
+                        PickerKind::ClosePane {
+                            pane: PaneId(2),
+                            ..
+                        },
+                        _
+                    ))
                 )
             ),
             (true, true),
@@ -979,7 +985,9 @@ mod tests {
         assert_eq!(
             (
                 pane_count(&state),
-                commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(1))))
+                commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                    1
+                ))))
             ),
             (2, false),
             "Yes closes only the pane that was focused when it asked"
