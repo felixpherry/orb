@@ -30,7 +30,7 @@ pub struct PaneLaunch {
 }
 
 /// What a session is for, which decides its look and keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SessionKind {
     /// Work in a project's checkout or worktree.
     Plain,

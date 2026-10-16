@@ -85,7 +85,7 @@ fn sessions(agents: Vec<Agent>) -> Sessions {
 
 /// Draws `state` on an 80x8 screen.
 fn draw(state: &AppState) -> Buffer {
-    draw_with(state, &Keys::new(keymap(), Scope::Sidebar))
+    draw_with(state, &Keys::new(keymap(), Scope::SIDEBAR))
 }
 
 /// Draws `state` on an 80x8 screen with `keys` pending.
@@ -98,7 +98,7 @@ fn draw_with(state: &AppState, keys: &Keys) -> Buffer {
 
 /// Draws `state` on an 80x40 screen, tall enough for the whole start screen.
 fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
-    let keys = Keys::new(keymap(), Scope::Sidebar);
+    let keys = Keys::new(keymap(), Scope::SIDEBAR);
     frame(state, pane_error, &keys, 40, BACKGROUND)
         .backend()
         .buffer()
@@ -230,7 +230,7 @@ fn draw_with_pane_and_toast(
     toast: Option<&Toast>,
 ) -> Buffer {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-    let keys = Keys::new(keymap(), Scope::Sidebar);
+    let keys = Keys::new(keymap(), Scope::SIDEBAR);
     let Ok(_) = terminal.draw(|frame| {
         render(
             frame,
@@ -433,7 +433,7 @@ fn delete_worktree_confirm_draws_over_the_worktree_list() {
     let buffer = frame(
         &state,
         None,
-        &Keys::new(keymap(), Scope::Sidebar),
+        &Keys::new(keymap(), Scope::SIDEBAR),
         20,
         BACKGROUND,
     )
@@ -456,7 +456,7 @@ fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
     let mut hits = HitMap::default();
     let buffer = {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let keys = Keys::new(keymap(), Scope::SIDEBAR);
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -569,7 +569,7 @@ fn cells_without_a_background_get_the_chosen_background() {
     let buffer = frame(
         &AppState::default(),
         None,
-        &Keys::new(keymap(), Scope::Sidebar),
+        &Keys::new(keymap(), Scope::SIDEBAR),
         8,
         background,
     )
@@ -695,7 +695,7 @@ fn rename_box_is_not_drawn_without_the_keys() {
 fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
     // Given `<C-g>` pressed on a two-row screen, too short for the popup.
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
-    let mut keys = Keys::new(keymap(), Scope::Sidebar);
+    let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
     press(&mut keys, LEADER);
 
     // When drawing a frame.
@@ -730,7 +730,7 @@ fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
 fn leader_popup_sits_above_the_mode_line() {
     // Given `<C-g>` pressed on a 20-row screen.
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-    let mut keys = Keys::new(keymap(), Scope::Sidebar);
+    let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
     press(&mut keys, LEADER);
 
     // When drawing a frame.
@@ -846,7 +846,7 @@ fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
 /// `panes` running; `None` while it's hidden.
 fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position> {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-    let keys = Keys::new(keymap(), Scope::Sidebar);
+    let keys = Keys::new(keymap(), Scope::SIDEBAR);
     let Ok(_) = terminal.draw(|frame| {
         render(
             frame,
@@ -1753,7 +1753,7 @@ fn stack_list_is_centred() {
 fn draw_hits(state: &AppState) -> (Buffer, HitMap) {
     let mut hits = HitMap::default();
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-    let keys = Keys::new(keymap(), Scope::Sidebar);
+    let keys = Keys::new(keymap(), Scope::SIDEBAR);
     let Ok(_) = terminal.draw(|frame| {
         render(
             frame,
@@ -1969,7 +1969,7 @@ fn hidden_sidebar_returns_no_layout() {
             &HashMap::new(),
             None,
             None,
-            &Keys::new(keymap(), Scope::Sidebar),
+            &Keys::new(keymap(), Scope::SIDEBAR),
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
             BACKGROUND,

@@ -80,7 +80,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 1. **Add the `Intent` variant** and its which-key label in the `Display` impl (intent.rs:239).
 2. **Add a validator if the intent can fail.** A plain function in feat/<feature>/validator.rs that takes `&AppState` and returns its own error enum (crates/orb-domain/src/feat/jumps/validator.rs:7-28).
 3. **Add the intent function** in feat/<feature>/intent.rs. It validates, changes state, returns commands, and does nothing when the check fails (jumps/intent.rs:10-20). Then add its one-line arm to `handle` (intent_handler.rs:93).
-4. **Bind the key** in the right `Scope` (crates/orb-tui/src/keymap.rs:111). See keybindings.md.
+4. **Bind the key** in the right `Scope` (crates/orb-tui/src/keymap.rs:81). See keybindings.md.
 5. **Add a command variant** to the owning actor's enum and an arm to its match. A new struct without its enum variant does nothing.
 6. **Draw it, if it shows on screen.** Give the new element its own module in crates/orb-tui/src/ (toast.rs is one), list it in lib.rs and call it from render.rs (render.rs:183).
 7. **Write the tests** as testing.md describes: the validator on its own, the intent function for the state it changes and for the commands it returns, the actor for what it writes. Then the module, type and error docs as rust-style.md describes.

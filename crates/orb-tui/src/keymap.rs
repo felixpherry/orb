@@ -15,18 +15,19 @@
 //! worlds screen. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
 //! row, `l`/`h`/`⏎` but none of `r`/`p`/`s`/`d` on a colonists row) go
-//! through the same keymap. In a pane every other key goes to its
-//! program. An open picker, the rename box and
+//! through the same keymap. Which keys are bound follows the side with
+//! the keys, the row they act on and the session's kind; [`hidden`] is the
+//! one rule that leaves a kind's useless keys unbound. In a pane every
+//! other key goes to its program. An open picker, the rename box and
 //! the sidebar search take typed characters and have their own fixed keys.
 //! The projects screen and the session and worktree pickers open in list
 //! mode, where letters are keys, until `/`.
 
 use std::fmt;
 
-use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
-use orb_domain::feat::sessions::state::{SessionKind, Sessions, SidebarItem};
+use orb_domain::feat::sessions::state::{SessionKind, SidebarItem};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -51,151 +52,117 @@ impl fmt::Display for KeyCategory {
     }
 }
 
-/// What the sidebar cursor is on, which decides the keys that do something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Selection {
-    /// A session in a project's checkout or worktree.
+/// Which side has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Side {
+    Sidebar,
+    Pane,
+}
+
+/// What the keys act on: the sidebar cursor's row, or in a pane the shown
+/// session (always [`Row::Session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Row {
+    /// A session's card.
     Session,
-    /// An Incognito session, whose folder is orb's own.
-    OwnFolderSession,
-    /// A colony.
-    Colony,
-    /// An agent row of a session in a project's checkout or worktree.
+    /// An agent row under a session's card.
     Agent,
-    /// An agent row of an Incognito session.
-    OwnFolderAgent,
-    /// An agent row of a colony.
-    ColonyAgent,
     /// A colony's colonists row.
-    ColonyColonists,
+    Colonists,
     /// No row, the settled shelf's header, or the colonists row of a
     /// session that isn't a colony.
-    Nothing,
+    Empty,
 }
 
-impl Selection {
-    /// What `sessions`' cursor is on.
-    pub(crate) fn of(sessions: &Sessions, layouts: &Layouts) -> Self {
-        if let Some(SidebarItem::Colonists(id)) = sessions.cursor {
-            return match sessions.session(id) {
-                Some(session) if session.kind == SessionKind::Colony => Self::ColonyColonists,
-                _ => Self::Nothing,
-            };
-        }
-        let agent = sessions.selected_agent(layouts).is_some();
-        match (sessions.selected_session(), agent) {
-            (Some(session), true) if session.kind == SessionKind::Colony => Self::ColonyAgent,
-            (Some(session), false) if session.kind == SessionKind::Colony => Self::Colony,
-            (Some(session), true) if session.kind != SessionKind::Plain => Self::OwnFolderAgent,
-            (Some(_), true) => Self::Agent,
-            (Some(session), false) if session.kind != SessionKind::Plain => Self::OwnFolderSession,
-            (Some(_), false) => Self::Session,
-            (None, _) => Self::Nothing,
-        }
-    }
-
-    /// What the shown session is, for the keys in a pane.
-    fn shown(state: &AppState) -> Self {
-        match state.keyed_session().map(|session| session.kind) {
-            None => Self::Nothing,
-            Some(SessionKind::Plain) => Self::Session,
-            Some(SessionKind::Colony) => Self::Colony,
-            Some(SessionKind::Incognito) => Self::OwnFolderSession,
-        }
-    }
-}
-
-/// Which bindings apply: the focused side's, less the keys that do nothing
-/// for the selection.
+/// Which bindings apply: the side with the keys, the row they act on, and
+/// the kind of session there, whose [`hidden`] rule leaves a few keys
+/// unbound. With no session the kind reads as [`SessionKind::Plain`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Scope {
-    /// The sidebar on a session.
-    Sidebar,
-    /// The sidebar with no session selected, or on a colonists row of a
-    /// session that isn't a colony.
-    SidebarEmpty,
-    /// The sidebar on an Incognito session:
-    /// [`Scope::Sidebar`]'s keys but `<C-g> w`/`<C-g> b`.
-    SidebarIncognito,
-    /// The sidebar on a colony: [`Scope::Sidebar`]'s keys but
-    /// `<C-g> w`/`<C-g> b`, plus `<C-g> ,`.
-    SidebarColony,
-    /// A pane of the shown session.
-    Pane,
-    /// A pane of an Incognito session: [`Scope::Pane`]'s keys but
-    /// `<C-g> w`/`<C-g> b`.
-    PaneIncognito,
-    /// A pane of a colony: [`Scope::Pane`]'s keys but `<C-g> w`/`<C-g> b`,
-    /// plus `<C-g> ,`.
-    PaneColony,
-    /// The sidebar on an agent row: [`Scope::Sidebar`]'s keys but `p`/`s`.
-    SidebarAgent,
-    /// The sidebar on an agent row of an Incognito session:
-    /// [`Scope::SidebarAgent`]'s keys but `<C-g> w`/`<C-g> b`.
-    SidebarAgentIncognito,
-    /// The sidebar on an agent row of a colony: [`Scope::SidebarAgent`]'s
-    /// keys but `<C-g> w`/`<C-g> b`, plus `<C-g> ,`.
-    SidebarAgentColony,
-    /// The sidebar on a colony's colonists row: [`Scope::SidebarEmpty`]'s
-    /// keys plus `<C-g> ,`.
-    SidebarColonists,
+pub(crate) struct Scope {
+    side: Side,
+    row: Row,
+    kind: SessionKind,
 }
 
 impl Scope {
-    /// The scope for keys in `focus` with `selection`. A pane focus with
-    /// nothing selected doesn't last (the keys leave once no layout is
-    /// shown), so it reads as [`Scope::Pane`].
-    pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
-        match (focus, selection) {
-            (Focus::Pane, Selection::OwnFolderSession | Selection::OwnFolderAgent) => {
-                Self::PaneIncognito
-            }
-            (
-                Focus::Pane,
-                Selection::Colony | Selection::ColonyAgent | Selection::ColonyColonists,
-            ) => Self::PaneColony,
-            (Focus::Pane, Selection::Session | Selection::Agent | Selection::Nothing) => Self::Pane,
-            (Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search, Selection::Colony) => {
-                Self::SidebarColony
-            }
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::ColonyAgent,
-            ) => Self::SidebarAgentColony,
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::ColonyColonists,
-            ) => Self::SidebarColonists,
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::Session,
-            ) => Self::Sidebar,
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::Nothing,
-            ) => Self::SidebarEmpty,
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::OwnFolderSession,
-            ) => Self::SidebarIncognito,
-            (Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search, Selection::Agent) => {
-                Self::SidebarAgent
-            }
-            (
-                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::OwnFolderAgent,
-            ) => Self::SidebarAgentIncognito,
+    /// The scope for keys in `focus` over `state`: the sidebar cursor's row
+    /// and its session, or in a pane the shown session. A pane focus with
+    /// nothing shown doesn't last (the keys leave once no layout is shown),
+    /// so it reads as a plain session's pane.
+    pub(crate) fn of(focus: Focus, state: &AppState) -> Self {
+        let plain = |side, row| Self {
+            side,
+            row,
+            kind: SessionKind::Plain,
+        };
+        if focus == Focus::Pane {
+            let kind = state.keyed_session().map_or(SessionKind::Plain, |s| s.kind);
+            return Self {
+                side: Side::Pane,
+                row: Row::Session,
+                kind,
+            };
+        }
+        let sessions = &state.sessions;
+        if let Some(SidebarItem::Colonists(id)) = sessions.cursor {
+            return match sessions.session(id) {
+                Some(session) if session.kind == SessionKind::Colony => Self {
+                    side: Side::Sidebar,
+                    row: Row::Colonists,
+                    kind: SessionKind::Colony,
+                },
+                _ => plain(Side::Sidebar, Row::Empty),
+            };
+        }
+        match sessions.selected_session() {
+            Some(session) => Self {
+                side: Side::Sidebar,
+                row: match sessions.selected_agent(&state.layouts) {
+                    Some(_) => Row::Agent,
+                    None => Row::Session,
+                },
+                kind: session.kind,
+            },
+            None => plain(Side::Sidebar, Row::Empty),
         }
     }
 
-    /// The scope for keys in `focus` over `state`'s selection, or over the
-    /// shown session in a pane.
-    pub(crate) fn of(focus: Focus, state: &AppState) -> Self {
-        let selection = match focus {
-            Focus::Pane => Selection::shown(state),
-            _ => Selection::of(&state.sessions, &state.layouts),
-        };
-        Self::new(focus, selection)
+    /// Every scope the keys can be in: a session's card or agent row of each
+    /// kind and a pane of each, a colony's colonists row, and no session.
+    fn all() -> impl Iterator<Item = Self> {
+        let kinds = [
+            SessionKind::Plain,
+            SessionKind::Incognito,
+            SessionKind::Colony,
+        ];
+        let at = |side, row, kind| Self { side, row, kind };
+        kinds
+            .into_iter()
+            .flat_map(move |kind| {
+                [
+                    at(Side::Sidebar, Row::Session, kind),
+                    at(Side::Sidebar, Row::Agent, kind),
+                    at(Side::Pane, Row::Session, kind),
+                ]
+            })
+            .chain([
+                at(Side::Sidebar, Row::Colonists, SessionKind::Colony),
+                at(Side::Sidebar, Row::Empty, SessionKind::Plain),
+            ])
+    }
+}
+
+/// The keys a kind of session leaves unbound, since they do nothing there:
+/// `<C-g> ,` everywhere but a colony, `<C-g> w`/`<C-g> b` on Incognito
+/// sessions and colonies, whose folders aren't a project's.
+fn hidden(kind: SessionKind, intent: &Intent) -> bool {
+    match kind {
+        SessionKind::Plain => matches!(intent, Intent::OpenColonists),
+        SessionKind::Incognito => matches!(
+            intent,
+            Intent::ChangeWorkspace | Intent::SwitchBranch | Intent::OpenColonists
+        ),
+        SessionKind::Colony => matches!(intent, Intent::ChangeWorkspace | Intent::SwitchBranch),
     }
 }
 
@@ -205,287 +172,138 @@ pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
 /// orb's which-key leader in the sidebar and in panes.
 pub(crate) const LEADER: KeyEvent = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
 
-/// The sidebar and pane bindings, scoped by focus and selection.
+/// The sidebar and pane bindings, each group bound in the scopes its filter
+/// picks, less the keys each scope's session kind hides.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
-    const SIDEBAR: [Scope; 8] = [
-        Scope::Sidebar,
-        Scope::SidebarEmpty,
-        Scope::SidebarIncognito,
-        Scope::SidebarColony,
-        Scope::SidebarAgent,
-        Scope::SidebarAgentIncognito,
-        Scope::SidebarAgentColony,
-        Scope::SidebarColonists,
-    ];
-    const PANE: [Scope; 3] = [Scope::Pane, Scope::PaneIncognito, Scope::PaneColony];
-    const SESSION: [Scope; 9] = [
-        Scope::Sidebar,
-        Scope::SidebarIncognito,
-        Scope::SidebarColony,
-        Scope::SidebarAgent,
-        Scope::SidebarAgentIncognito,
-        Scope::SidebarAgentColony,
-        Scope::Pane,
-        Scope::PaneIncognito,
-        Scope::PaneColony,
-    ];
+    use KeyCategory::{Agents, General, Navigation, Sessions};
     let mut keymap = Keymap::new().with_leader(LEADER);
     keymap.describe_group("<leader>", "leader");
     keymap.describe_group("<leader>p", "pane");
     keymap.describe_group("<leader>t", "tab");
-    for scope in SIDEBAR {
-        keymap
-            .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
-            .bind("k", Intent::SelectPrev, KeyCategory::Navigation, scope)
-            .bind("gg", Intent::SelectFirst, KeyCategory::Navigation, scope)
-            .bind("G", Intent::SelectLast, KeyCategory::Navigation, scope)
-            .bind(
-                "<c-d>",
-                Intent::SelectHalfPageDown,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<c-u>",
-                Intent::SelectHalfPageUp,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
-            .bind("/", Intent::Search, KeyCategory::Navigation, scope)
-            .bind("i", Intent::Search, KeyCategory::Navigation, scope)
-            .bind("l", Intent::Unfold, KeyCategory::Navigation, scope)
-            .bind("h", Intent::Fold, KeyCategory::Navigation, scope)
-            .bind(
-                "<leader>f",
-                Intent::FilterProjects,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>l",
-                Intent::FocusPanes,
-                KeyCategory::Navigation,
-                scope,
-            );
-    }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarIncognito,
-        Scope::SidebarColony,
-    ] {
-        keymap
-            .bind("r", Intent::Rename, KeyCategory::Agents, scope)
-            .bind("p", Intent::TogglePin, KeyCategory::Agents, scope)
-            .bind("s", Intent::ToggleSettle, KeyCategory::Agents, scope)
-            .bind("d", Intent::Delete, KeyCategory::Agents, scope);
-    }
-    for scope in [
-        Scope::SidebarAgent,
-        Scope::SidebarAgentIncognito,
-        Scope::SidebarAgentColony,
-    ] {
-        keymap
-            .bind("r", Intent::Rename, KeyCategory::Agents, scope)
-            .bind("d", Intent::Delete, KeyCategory::Agents, scope);
-    }
-    for scope in SIDEBAR.into_iter().chain(PANE) {
-        keymap
-            .bind("<leader>q", Intent::Quit, KeyCategory::General, scope)
-            .bind(
-                "<leader>e",
-                Intent::ToggleSidebar,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader><space>",
-                Intent::OpenSessionPicker,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>n",
-                Intent::NewSession,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>P",
-                Intent::OpenProjects,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>i",
-                Intent::NewIncognito,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind("<leader>c", Intent::NewColony, KeyCategory::Sessions, scope)
-            .bind(
-                "<leader>C",
-                Intent::OpenWorlds,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>/",
-                Intent::OpenSearch,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>W",
-                Intent::OpenWorktreePicker,
-                KeyCategory::Navigation,
-                scope,
-            );
-    }
-    for scope in [
-        Scope::SidebarColony,
-        Scope::SidebarAgentColony,
-        Scope::SidebarColonists,
-        Scope::PaneColony,
-    ] {
-        keymap.bind(
-            "<leader>,",
-            Intent::OpenColonists,
-            KeyCategory::Navigation,
-            scope,
-        );
-    }
-    for scope in [Scope::Sidebar, Scope::SidebarAgent, Scope::Pane] {
-        keymap
-            .bind(
-                "<leader>w",
-                Intent::ChangeWorkspace,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>b",
-                Intent::SwitchBranch,
-                KeyCategory::Sessions,
-                scope,
-            );
-    }
-    for scope in SESSION {
-        keymap
-            .bind("<leader>tn", Intent::NewTab, KeyCategory::Navigation, scope)
-            .bind(
-                "<leader>tx",
-                Intent::CloseTab,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>tr",
-                Intent::RenameTab,
-                KeyCategory::Navigation,
-                scope,
-            );
-        for n in 1..=9 {
-            keymap.bind(
-                &format!("<leader>t{n}"),
-                Intent::GoToTab(n),
-                KeyCategory::Navigation,
-                scope,
-            );
-        }
-    }
-    for scope in PANE {
-        keymap
-            .bind(
-                "<leader>h",
-                Intent::LeavePane,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pd",
-                Intent::SplitPane(Split::Down),
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pr",
-                Intent::SplitPane(Split::Right),
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>ps",
-                Intent::StackPane,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pf",
-                Intent::ToggleZoom,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>tb",
-                Intent::BreakPane,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>px",
-                Intent::ClosePane,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pw",
-                Intent::ToggleFloats,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pe",
-                Intent::ToggleFloatEmbed,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pi",
-                Intent::TogglePinFloat,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>pc",
-                Intent::RenamePane,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
+    let sidebar = |s: &Scope| s.side == Side::Sidebar;
+    bind(
+        &mut keymap,
+        sidebar,
+        &[
+            ("j", Intent::SelectNext, Navigation),
+            ("k", Intent::SelectPrev, Navigation),
+            ("gg", Intent::SelectFirst, Navigation),
+            ("G", Intent::SelectLast, Navigation),
+            ("<c-d>", Intent::SelectHalfPageDown, Navigation),
+            ("<c-u>", Intent::SelectHalfPageUp, Navigation),
+            ("<enter>", Intent::Attach, Sessions),
+            ("/", Intent::Search, Navigation),
+            ("i", Intent::Search, Navigation),
+            ("l", Intent::Unfold, Navigation),
+            ("h", Intent::Fold, Navigation),
+            ("<leader>f", Intent::FilterProjects, Sessions),
+            ("<leader>l", Intent::FocusPanes, Navigation),
+        ],
+    );
+    bind(
+        &mut keymap,
+        |s| sidebar(s) && s.row == Row::Session,
+        &[
+            ("r", Intent::Rename, Agents),
+            ("p", Intent::TogglePin, Agents),
+            ("s", Intent::ToggleSettle, Agents),
+            ("d", Intent::Delete, Agents),
+        ],
+    );
+    bind(
+        &mut keymap,
+        |s| sidebar(s) && s.row == Row::Agent,
+        &[("r", Intent::Rename, Agents), ("d", Intent::Delete, Agents)],
+    );
+    bind(
+        &mut keymap,
+        |_| true,
+        &[
+            ("<leader>q", Intent::Quit, General),
+            ("<leader>e", Intent::ToggleSidebar, Navigation),
+            ("<leader><space>", Intent::OpenSessionPicker, Navigation),
+            ("<leader>n", Intent::NewSession, Sessions),
+            ("<leader>P", Intent::OpenProjects, Sessions),
+            ("<leader>i", Intent::NewIncognito, Sessions),
+            ("<leader>c", Intent::NewColony, Sessions),
+            ("<leader>C", Intent::OpenWorlds, Sessions),
+            ("<leader>/", Intent::OpenSearch, Navigation),
+            ("<leader>W", Intent::OpenWorktreePicker, Navigation),
+        ],
+    );
+    bind(
+        &mut keymap,
+        |s| s.row != Row::Empty,
+        &[("<leader>,", Intent::OpenColonists, Navigation)],
+    );
+    let session = |s: &Scope| matches!(s.row, Row::Session | Row::Agent);
+    bind(
+        &mut keymap,
+        session,
+        &[
+            ("<leader>w", Intent::ChangeWorkspace, Sessions),
+            ("<leader>b", Intent::SwitchBranch, Sessions),
+            ("<leader>tn", Intent::NewTab, Navigation),
+            ("<leader>tx", Intent::CloseTab, Navigation),
+            ("<leader>tr", Intent::RenameTab, Navigation),
+        ],
+    );
+    let tabs: Vec<(String, Intent, KeyCategory)> = (1..=9)
+        .map(|n| (format!("<leader>t{n}"), Intent::GoToTab(n), Navigation))
+        .collect();
+    bind(&mut keymap, session, &tabs);
+    bind(
+        &mut keymap,
+        |s| s.side == Side::Pane,
+        &[
+            ("<leader>h", Intent::LeavePane, Navigation),
+            ("<leader>pd", Intent::SplitPane(Split::Down), Navigation),
+            ("<leader>pr", Intent::SplitPane(Split::Right), Navigation),
+            ("<leader>ps", Intent::StackPane, Navigation),
+            ("<leader>pf", Intent::ToggleZoom, Navigation),
+            ("<leader>tb", Intent::BreakPane, Navigation),
+            ("<leader>px", Intent::ClosePane, Navigation),
+            ("<leader>pw", Intent::ToggleFloats, Navigation),
+            ("<leader>pe", Intent::ToggleFloatEmbed, Navigation),
+            ("<leader>pi", Intent::TogglePinFloat, Navigation),
+            ("<leader>pc", Intent::RenamePane, Navigation),
+            (
                 "<leader>r",
                 Intent::EnterPaneMode(PaneMode::Resize),
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
+                Navigation,
+            ),
+            (
                 "<leader>m",
                 Intent::EnterPaneMode(PaneMode::Move),
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader><c-g>",
-                Intent::SendCtrlG,
-                KeyCategory::Navigation,
-                scope,
-            );
-    }
+                Navigation,
+            ),
+            ("<leader><c-g>", Intent::SendCtrlG, Navigation),
+        ],
+    );
     keymap
+}
+
+/// Binds each of `keys` in every scope `within` picks, unless that scope's
+/// session kind hides it.
+fn bind<W, S>(
+    keymap: &mut Keymap<KeyEvent, Scope, Intent, KeyCategory>,
+    within: W,
+    keys: &[(S, Intent, KeyCategory)],
+) where
+    W: Fn(&Scope) -> bool,
+    S: AsRef<str>,
+{
+    for scope in Scope::all().filter(within) {
+        for (sequence, intent, category) in keys {
+            if !hidden(scope.kind, intent) {
+                keymap.bind(sequence.as_ref(), intent.clone(), *category, scope);
+            }
+        }
+    }
 }
 
 /// Feeds `key` to the keymap; returns the intent once a binding completes.
@@ -703,11 +521,38 @@ mod tests {
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        KeyCategory, Keys, LEADER, Route, Scope, Selection, alt_route, keymap, mode_route,
+        KeyCategory, Keys, LEADER, Route, Row, Scope, Side, alt_route, keymap, mode_route,
         picker_list_route, picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
     use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
+
+    /// The scopes by the names tests use.
+    impl Scope {
+        const fn at(side: Side, row: Row, kind: SessionKind) -> Self {
+            Self { side, row, kind }
+        }
+        pub(crate) const SIDEBAR: Self = Self::at(Side::Sidebar, Row::Session, SessionKind::Plain);
+        pub(crate) const SIDEBAR_INCOGNITO: Self =
+            Self::at(Side::Sidebar, Row::Session, SessionKind::Incognito);
+        pub(crate) const SIDEBAR_COLONY: Self =
+            Self::at(Side::Sidebar, Row::Session, SessionKind::Colony);
+        pub(crate) const SIDEBAR_AGENT: Self =
+            Self::at(Side::Sidebar, Row::Agent, SessionKind::Plain);
+        pub(crate) const SIDEBAR_AGENT_INCOGNITO: Self =
+            Self::at(Side::Sidebar, Row::Agent, SessionKind::Incognito);
+        pub(crate) const SIDEBAR_AGENT_COLONY: Self =
+            Self::at(Side::Sidebar, Row::Agent, SessionKind::Colony);
+        pub(crate) const SIDEBAR_COLONISTS: Self =
+            Self::at(Side::Sidebar, Row::Colonists, SessionKind::Colony);
+        pub(crate) const SIDEBAR_EMPTY: Self =
+            Self::at(Side::Sidebar, Row::Empty, SessionKind::Plain);
+        pub(crate) const PANE: Self = Self::at(Side::Pane, Row::Session, SessionKind::Plain);
+        pub(crate) const PANE_INCOGNITO: Self =
+            Self::at(Side::Pane, Row::Session, SessionKind::Incognito);
+        pub(crate) const PANE_COLONY: Self =
+            Self::at(Side::Pane, Row::Session, SessionKind::Colony);
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -944,7 +789,7 @@ mod tests {
     #[case(key(KeyCode::Char('h')), Intent::Fold)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
 
         // When pressing the key.
         let intent = press(&mut keys, pressed);
@@ -959,7 +804,7 @@ mod tests {
 
     #[rstest::rstest]
     fn slash_and_i_search_in_every_sidebar_scope(
-        #[values(Scope::Sidebar, Scope::SidebarEmpty, Scope::SidebarIncognito)] scope: Scope,
+        #[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY, Scope::SIDEBAR_INCOGNITO)] scope: Scope,
         #[values('/', 'i')] pressed: char,
     ) {
         // Given the keymap in a sidebar scope.
@@ -978,7 +823,7 @@ mod tests {
 
     #[rstest::rstest]
     fn sidebar_jump_keys_map_to_their_intents(
-        #[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope,
+        #[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY)] scope: Scope,
         #[values(
             (vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))], Intent::SelectFirst),
             (vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)], Intent::SelectLast),
@@ -1007,35 +852,62 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar, Selection::Session, Scope::Sidebar)]
-    #[case(Focus::Sidebar, Selection::Nothing, Scope::SidebarEmpty)]
-    #[case(Focus::Sidebar, Selection::OwnFolderSession, Scope::SidebarIncognito)]
-    #[case(Focus::Pane, Selection::Session, Scope::Pane)]
-    #[case(Focus::Pane, Selection::OwnFolderSession, Scope::PaneIncognito)]
-    #[case(Focus::Sidebar, Selection::Agent, Scope::SidebarAgent)]
     #[case(
-        Focus::Sidebar,
-        Selection::OwnFolderAgent,
-        Scope::SidebarAgentIncognito
+        in_sidebar(SessionKind::Plain, Some(SidebarItem::Session(SessionId(1)))),
+        Scope::SIDEBAR
     )]
-    #[case(Focus::Pane, Selection::Agent, Scope::Pane)]
-    #[case(Focus::Pane, Selection::OwnFolderAgent, Scope::PaneIncognito)]
-    #[case(Focus::Sidebar, Selection::Colony, Scope::SidebarColony)]
-    #[case(Focus::Sidebar, Selection::ColonyAgent, Scope::SidebarAgentColony)]
-    #[case(Focus::Pane, Selection::Colony, Scope::PaneColony)]
-    #[case(Focus::Pane, Selection::ColonyAgent, Scope::PaneColony)]
-    #[case(Focus::Sidebar, Selection::ColonyColonists, Scope::SidebarColonists)]
+    #[case(in_sidebar(SessionKind::Plain, None), Scope::SIDEBAR_EMPTY)]
+    #[case(
+        in_sidebar(SessionKind::Plain, Some(SidebarItem::SettledShelf)),
+        Scope::SIDEBAR_EMPTY
+    )]
+    #[case(
+        in_sidebar(SessionKind::Incognito, Some(SidebarItem::Session(SessionId(1)))),
+        Scope::SIDEBAR_INCOGNITO
+    )]
+    #[case(
+        in_sidebar(SessionKind::Colony, Some(SidebarItem::Session(SessionId(1)))),
+        Scope::SIDEBAR_COLONY
+    )]
+    #[case(in_sidebar(SessionKind::Plain, Some(AGENT)), Scope::SIDEBAR_AGENT)]
+    #[case(
+        in_sidebar(SessionKind::Incognito, Some(AGENT)),
+        Scope::SIDEBAR_AGENT_INCOGNITO
+    )]
+    #[case(
+        in_sidebar(SessionKind::Colony, Some(AGENT)),
+        Scope::SIDEBAR_AGENT_COLONY
+    )]
+    #[case(
+        in_sidebar(SessionKind::Colony, Some(SidebarItem::Colonists(SessionId(1)))),
+        Scope::SIDEBAR_COLONISTS
+    )]
+    #[case(in_pane(Some(SessionKind::Plain)), Scope::PANE)]
+    #[case(in_pane(None), Scope::PANE)]
+    #[case(in_pane(Some(SessionKind::Incognito)), Scope::PANE_INCOGNITO)]
+    #[case(in_pane(Some(SessionKind::Colony)), Scope::PANE_COLONY)]
     fn scope_follows_focus_and_the_selection(
-        #[case] focus: Focus,
-        #[case] selection: Selection,
+        #[case] keys: (Focus, AppState),
         #[case] expected: Scope,
     ) {
-        // Given / When / Then the scope matches the focused side and selection.
-        assert_eq!(
-            Scope::new(focus, selection),
-            expected,
-            "the scope in {focus:?} on {selection:?}"
-        );
+        // Given the keys in a side, over a row.
+        let (focus, state) = keys;
+
+        // When reading the scope.
+        let scope = Scope::of(focus, &state);
+
+        // Then it matches the side, the row and the session's kind.
+        assert_eq!(scope, expected, "the scope in {focus:?}");
+    }
+
+    /// The scope with the keys in the sidebar over `sessions`.
+    fn sidebar_scope(sessions: Sessions) -> Scope {
+        let state = AppState {
+            layouts: layouts_for(&sessions.projects),
+            sessions,
+            ..AppState::default()
+        };
+        Scope::of(Focus::Sidebar, &state)
     }
 
     /// One project of `kind` holding agent 1 in session 1, with the cursor
@@ -1081,33 +953,33 @@ mod tests {
     #[case::normal_session(
         ProjectKind::Normal,
         SidebarItem::Session(SessionId(1)),
-        Selection::Session
+        Scope::SIDEBAR
     )]
     #[case::incognito_session(
         ProjectKind::Incognito,
         SidebarItem::Session(SessionId(1)),
-        Selection::OwnFolderSession
+        Scope::SIDEBAR_INCOGNITO
     )]
     #[case::normal_agent(
         ProjectKind::Normal,
         SidebarItem::Agent { session: SessionId(1), pane: PaneId(1) },
-        Selection::Agent
+        Scope::SIDEBAR_AGENT
     )]
     #[case::incognito_agent(
         ProjectKind::Incognito,
         SidebarItem::Agent { session: SessionId(1), pane: PaneId(1) },
-        Selection::OwnFolderAgent
+        Scope::SIDEBAR_AGENT_INCOGNITO
     )]
     fn selection_follows_the_lone_rows_project_kind(
         #[case] kind: ProjectKind,
         #[case] cursor: SidebarItem,
-        #[case] expected: Selection,
+        #[case] expected: Scope,
     ) {
         // Given the cursor on a session.
         let sessions = lone(kind, cursor);
 
-        // When reading the selection.
-        let selection = Selection::of(&sessions, &layouts_for(&sessions.projects));
+        // When reading the scope.
+        let selection = sidebar_scope(sessions);
 
         // Then it follows the project's kind.
         assert_eq!(
@@ -1117,29 +989,29 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::colony(SidebarItem::Session(SessionId(1)), Selection::Colony)]
+    #[case::colony(SidebarItem::Session(SessionId(1)), Scope::SIDEBAR_COLONY)]
     #[case::colony_agent(
         SidebarItem::Agent { session: SessionId(1), pane: PaneId(1) },
-        Selection::ColonyAgent
+        Scope::SIDEBAR_AGENT_COLONY
     )]
-    fn selection_on_a_colony_is_a_colony(#[case] cursor: SidebarItem, #[case] expected: Selection) {
+    fn selection_on_a_colony_is_a_colony(#[case] cursor: SidebarItem, #[case] expected: Scope) {
         // Given the cursor on a colony in a shared world.
         let mut sessions = lone(ProjectKind::SharedWorld, cursor);
         for session in &mut sessions.sessions {
             session.kind = SessionKind::Colony;
         }
 
-        // When reading the selection.
-        let selection = Selection::of(&sessions, &layouts_for(&sessions.projects));
+        // When reading the scope.
+        let selection = sidebar_scope(sessions);
 
         // Then it is the colony's.
         assert_eq!(selection, expected, "the selection on {cursor:?}");
     }
 
     #[rstest::rstest]
-    #[case::colony(SessionKind::Colony, Selection::ColonyColonists)]
-    #[case::other(SessionKind::Plain, Selection::Nothing)]
-    fn selection_on_a_colonists_row(#[case] kind: SessionKind, #[case] expected: Selection) {
+    #[case::colony(SessionKind::Colony, Scope::SIDEBAR_COLONISTS)]
+    #[case::other(SessionKind::Plain, Scope::SIDEBAR_EMPTY)]
+    fn selection_on_a_colonists_row(#[case] kind: SessionKind, #[case] expected: Scope) {
         // Given the cursor on session 1's colonists row.
         let mut sessions = lone(
             ProjectKind::SharedWorld,
@@ -1149,8 +1021,8 @@ mod tests {
             session.kind = kind;
         }
 
-        // When reading the selection.
-        let selection = Selection::of(&sessions, &layouts_for(&sessions.projects));
+        // When reading the scope.
+        let selection = sidebar_scope(sessions);
 
         // Then it is a colony's colonists row only when 1 is a colony.
         assert_eq!(
@@ -1161,7 +1033,7 @@ mod tests {
 
     #[rstest::rstest]
     fn colonists_row_leaves_r_p_s_d_unbound(
-        #[values(Scope::SidebarColonists, Scope::SidebarEmpty)] scope: Scope,
+        #[values(Scope::SIDEBAR_COLONISTS, Scope::SIDEBAR_EMPTY)] scope: Scope,
         #[values('r', 'p', 's', 'd')] pressed: char,
     ) {
         // Given the keymap on a colonists row.
@@ -1185,11 +1057,7 @@ mod tests {
         for session in &mut sessions.sessions {
             session.kind = SessionKind::Colony;
         }
-        let scope = Scope::new(
-            Focus::Sidebar,
-            Selection::of(&sessions, &layouts_for(&sessions.projects)),
-        );
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), sidebar_scope(sessions));
         press(&mut keys, LEADER);
 
         // When pressing `w`.
@@ -1246,7 +1114,7 @@ mod tests {
 
     #[rstest::rstest]
     fn agent_rows_leave_p_and_s_unbound(
-        #[values(Scope::SidebarAgent, Scope::SidebarAgentIncognito)] scope: Scope,
+        #[values(Scope::SIDEBAR_AGENT, Scope::SIDEBAR_AGENT_INCOGNITO)] scope: Scope,
         #[values('p', 's')] pressed: char,
     ) {
         // Given the keymap on an agent row.
@@ -1265,7 +1133,7 @@ mod tests {
 
     #[rstest::rstest]
     fn agent_row_keys_map_to_their_intents(
-        #[values(Scope::SidebarAgent, Scope::SidebarAgentIncognito)] scope: Scope,
+        #[values(Scope::SIDEBAR_AGENT, Scope::SIDEBAR_AGENT_INCOGNITO)] scope: Scope,
         #[values(
             (KeyCode::Char('r'), Intent::Rename),
             (KeyCode::Char('d'), Intent::Delete),
@@ -1290,7 +1158,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn n_is_unbound_in_the_sidebar(#[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope) {
+    fn n_is_unbound_in_the_sidebar(#[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY)] scope: Scope) {
         // Given the keymap in the sidebar.
         let mut keys = Keys::new(keymap(), scope);
 
@@ -1476,7 +1344,7 @@ mod tests {
     #[case(vec![key(KeyCode::Char('r'))])]
     fn session_keys_are_unbound_with_nothing_selected(#[case] pressed: Vec<KeyEvent>) {
         // Given the keymap in the sidebar with no session selected.
-        let mut keys = Keys::new(keymap(), Scope::SidebarEmpty);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR_EMPTY);
 
         // When pressing `p`, `s` or `r`.
         let intents: Vec<Option<Intent>> = pressed
@@ -1494,7 +1362,7 @@ mod tests {
     #[rstest::rstest]
     fn r_is_unbound_on_the_settled_header_or_no_row() {
         // Given the keymap in the sidebar with no session selected.
-        let mut keys = Keys::new(keymap(), Scope::SidebarEmpty);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR_EMPTY);
 
         // When pressing `r`.
         let intent = press(&mut keys, key(KeyCode::Char('r')));
@@ -1508,7 +1376,7 @@ mod tests {
     #[case('d', Intent::Delete)]
     fn sidebar_agent_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
 
         // When pressing the key once.
         let intent = press(&mut keys, key(KeyCode::Char(c)));
@@ -1520,7 +1388,7 @@ mod tests {
     #[rstest::rstest]
     fn held_j_selects_the_next_agent() {
         // Given a held `j` as the kitty protocol reports it.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
         let held = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('j'),
             KeyModifiers::NONE,
@@ -1675,7 +1543,7 @@ mod tests {
     #[rstest::rstest]
     fn plain_q_in_the_sidebar_does_nothing() {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
 
         // When pressing `q`.
         let intent = press(&mut keys, key(KeyCode::Char('q')));
@@ -1799,7 +1667,7 @@ mod tests {
 
     #[rstest::rstest]
     fn old_direct_keys_are_unbound_in_the_sidebar(
-        #[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope,
+        #[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY)] scope: Scope,
         #[values(
             ctrl('\\'),
             ctrl('4'),
@@ -1838,11 +1706,11 @@ mod tests {
     #[rstest::rstest]
     fn ctrl_g_opens_the_leader_popup(
         #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::SidebarIncognito,
-            Scope::Pane,
-            Scope::PaneIncognito
+            Scope::SIDEBAR,
+            Scope::SIDEBAR_EMPTY,
+            Scope::SIDEBAR_INCOGNITO,
+            Scope::PANE,
+            Scope::PANE_INCOGNITO
         )]
         scope: Scope,
     ) {
@@ -1860,7 +1728,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_s_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+    fn leader_s_is_unbound(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
         // Given `<C-g>` pressed in `scope`.
         let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, LEADER);
@@ -1877,7 +1745,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_a_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+    fn leader_a_is_unbound(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
         // Given `<C-g>` pressed in `scope`.
         let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, LEADER);
@@ -1896,7 +1764,7 @@ mod tests {
     #[rstest::rstest]
     fn leader_r_is_unbound_in_the_sidebar() {
         // Given `<C-g>` pressed in the sidebar.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
         press(&mut keys, LEADER);
 
         // When pressing `r`.
@@ -2074,7 +1942,7 @@ mod tests {
     #[rstest::rstest]
     fn space_is_unbound_in_the_sidebar() {
         // Given the keymap in the sidebar on a session.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
 
         // When pressing Space.
         let intent = press(&mut keys, key(KeyCode::Char(' ')));
@@ -2088,65 +1956,65 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Pane, "e", Intent::ToggleSidebar)]
-    #[case(Scope::Sidebar, "e", Intent::ToggleSidebar)]
-    #[case(Scope::Pane, " ", Intent::OpenSessionPicker)]
-    #[case(Scope::SidebarEmpty, " ", Intent::OpenSessionPicker)]
-    #[case(Scope::Sidebar, "n", Intent::NewSession)]
-    #[case(Scope::Pane, "n", Intent::NewSession)]
-    #[case(Scope::SidebarEmpty, "P", Intent::OpenProjects)]
-    #[case(Scope::Pane, "P", Intent::OpenProjects)]
-    #[case(Scope::Sidebar, "f", Intent::FilterProjects)]
-    #[case(Scope::SidebarEmpty, "f", Intent::FilterProjects)]
-    #[case(Scope::PaneIncognito, "i", Intent::NewIncognito)]
-    #[case(Scope::SidebarEmpty, "i", Intent::NewIncognito)]
-    #[case(Scope::Sidebar, "w", Intent::ChangeWorkspace)]
-    #[case(Scope::Pane, "w", Intent::ChangeWorkspace)]
-    #[case(Scope::Sidebar, "b", Intent::SwitchBranch)]
-    #[case(Scope::Pane, "b", Intent::SwitchBranch)]
-    #[case(Scope::Sidebar, "/", Intent::OpenSearch)]
-    #[case(Scope::Pane, "/", Intent::OpenSearch)]
-    #[case(Scope::SidebarEmpty, "W", Intent::OpenWorktreePicker)]
-    #[case(Scope::Pane, "W", Intent::OpenWorktreePicker)]
-    #[case(Scope::Pane, "pd", Intent::SplitPane(Split::Down))]
-    #[case(Scope::Pane, "pr", Intent::SplitPane(Split::Right))]
-    #[case(Scope::Pane, "pf", Intent::ToggleZoom)]
-    #[case(Scope::Pane, "px", Intent::ClosePane)]
-    #[case(Scope::Pane, "pw", Intent::ToggleFloats)]
-    #[case(Scope::Pane, "pe", Intent::ToggleFloatEmbed)]
-    #[case(Scope::PaneIncognito, "pi", Intent::TogglePinFloat)]
-    #[case(Scope::Pane, "pc", Intent::RenamePane)]
-    #[case(Scope::Pane, "ps", Intent::StackPane)]
-    #[case(Scope::Pane, "tb", Intent::BreakPane)]
-    #[case(Scope::Pane, "tn", Intent::NewTab)]
-    #[case(Scope::Sidebar, "tn", Intent::NewTab)]
-    #[case(Scope::Pane, "tx", Intent::CloseTab)]
-    #[case(Scope::Sidebar, "tx", Intent::CloseTab)]
-    #[case(Scope::Pane, "tr", Intent::RenameTab)]
-    #[case(Scope::Sidebar, "tr", Intent::RenameTab)]
-    #[case(Scope::Pane, "t1", Intent::GoToTab(1))]
-    #[case(Scope::Sidebar, "t6", Intent::GoToTab(6))]
-    #[case(Scope::Pane, "t9", Intent::GoToTab(9))]
-    #[case(Scope::Pane, "\x07", Intent::SendCtrlG)]
-    #[case(Scope::Pane, "q", Intent::Quit)]
-    #[case(Scope::Pane, "r", Intent::EnterPaneMode(PaneMode::Resize))]
-    #[case(Scope::PaneIncognito, "r", Intent::EnterPaneMode(PaneMode::Resize))]
-    #[case(Scope::Pane, "m", Intent::EnterPaneMode(PaneMode::Move))]
-    #[case(Scope::PaneIncognito, "m", Intent::EnterPaneMode(PaneMode::Move))]
-    #[case(Scope::Sidebar, "q", Intent::Quit)]
-    #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
-    #[case(Scope::Pane, "h", Intent::LeavePane)]
-    #[case(Scope::PaneIncognito, "h", Intent::LeavePane)]
-    #[case(Scope::Sidebar, "l", Intent::FocusPanes)]
-    #[case(Scope::SidebarEmpty, "l", Intent::FocusPanes)]
-    #[case(Scope::SidebarEmpty, "c", Intent::NewColony)]
-    #[case(Scope::PaneIncognito, "c", Intent::NewColony)]
-    #[case(Scope::Sidebar, "C", Intent::OpenWorlds)]
-    #[case(Scope::Pane, "C", Intent::OpenWorlds)]
-    #[case(Scope::SidebarColony, ",", Intent::OpenColonists)]
-    #[case(Scope::SidebarAgentColony, ",", Intent::OpenColonists)]
-    #[case(Scope::PaneColony, ",", Intent::OpenColonists)]
-    #[case(Scope::SidebarColonists, ",", Intent::OpenColonists)]
+    #[case(Scope::PANE, "e", Intent::ToggleSidebar)]
+    #[case(Scope::SIDEBAR, "e", Intent::ToggleSidebar)]
+    #[case(Scope::PANE, " ", Intent::OpenSessionPicker)]
+    #[case(Scope::SIDEBAR_EMPTY, " ", Intent::OpenSessionPicker)]
+    #[case(Scope::SIDEBAR, "n", Intent::NewSession)]
+    #[case(Scope::PANE, "n", Intent::NewSession)]
+    #[case(Scope::SIDEBAR_EMPTY, "P", Intent::OpenProjects)]
+    #[case(Scope::PANE, "P", Intent::OpenProjects)]
+    #[case(Scope::SIDEBAR, "f", Intent::FilterProjects)]
+    #[case(Scope::SIDEBAR_EMPTY, "f", Intent::FilterProjects)]
+    #[case(Scope::PANE_INCOGNITO, "i", Intent::NewIncognito)]
+    #[case(Scope::SIDEBAR_EMPTY, "i", Intent::NewIncognito)]
+    #[case(Scope::SIDEBAR, "w", Intent::ChangeWorkspace)]
+    #[case(Scope::PANE, "w", Intent::ChangeWorkspace)]
+    #[case(Scope::SIDEBAR, "b", Intent::SwitchBranch)]
+    #[case(Scope::PANE, "b", Intent::SwitchBranch)]
+    #[case(Scope::SIDEBAR, "/", Intent::OpenSearch)]
+    #[case(Scope::PANE, "/", Intent::OpenSearch)]
+    #[case(Scope::SIDEBAR_EMPTY, "W", Intent::OpenWorktreePicker)]
+    #[case(Scope::PANE, "W", Intent::OpenWorktreePicker)]
+    #[case(Scope::PANE, "pd", Intent::SplitPane(Split::Down))]
+    #[case(Scope::PANE, "pr", Intent::SplitPane(Split::Right))]
+    #[case(Scope::PANE, "pf", Intent::ToggleZoom)]
+    #[case(Scope::PANE, "px", Intent::ClosePane)]
+    #[case(Scope::PANE, "pw", Intent::ToggleFloats)]
+    #[case(Scope::PANE, "pe", Intent::ToggleFloatEmbed)]
+    #[case(Scope::PANE_INCOGNITO, "pi", Intent::TogglePinFloat)]
+    #[case(Scope::PANE, "pc", Intent::RenamePane)]
+    #[case(Scope::PANE, "ps", Intent::StackPane)]
+    #[case(Scope::PANE, "tb", Intent::BreakPane)]
+    #[case(Scope::PANE, "tn", Intent::NewTab)]
+    #[case(Scope::SIDEBAR, "tn", Intent::NewTab)]
+    #[case(Scope::PANE, "tx", Intent::CloseTab)]
+    #[case(Scope::SIDEBAR, "tx", Intent::CloseTab)]
+    #[case(Scope::PANE, "tr", Intent::RenameTab)]
+    #[case(Scope::SIDEBAR, "tr", Intent::RenameTab)]
+    #[case(Scope::PANE, "t1", Intent::GoToTab(1))]
+    #[case(Scope::SIDEBAR, "t6", Intent::GoToTab(6))]
+    #[case(Scope::PANE, "t9", Intent::GoToTab(9))]
+    #[case(Scope::PANE, "\x07", Intent::SendCtrlG)]
+    #[case(Scope::PANE, "q", Intent::Quit)]
+    #[case(Scope::PANE, "r", Intent::EnterPaneMode(PaneMode::Resize))]
+    #[case(Scope::PANE_INCOGNITO, "r", Intent::EnterPaneMode(PaneMode::Resize))]
+    #[case(Scope::PANE, "m", Intent::EnterPaneMode(PaneMode::Move))]
+    #[case(Scope::PANE_INCOGNITO, "m", Intent::EnterPaneMode(PaneMode::Move))]
+    #[case(Scope::SIDEBAR, "q", Intent::Quit)]
+    #[case(Scope::SIDEBAR_EMPTY, "q", Intent::Quit)]
+    #[case(Scope::PANE, "h", Intent::LeavePane)]
+    #[case(Scope::PANE_INCOGNITO, "h", Intent::LeavePane)]
+    #[case(Scope::SIDEBAR, "l", Intent::FocusPanes)]
+    #[case(Scope::SIDEBAR_EMPTY, "l", Intent::FocusPanes)]
+    #[case(Scope::SIDEBAR_EMPTY, "c", Intent::NewColony)]
+    #[case(Scope::PANE_INCOGNITO, "c", Intent::NewColony)]
+    #[case(Scope::SIDEBAR, "C", Intent::OpenWorlds)]
+    #[case(Scope::PANE, "C", Intent::OpenWorlds)]
+    #[case(Scope::SIDEBAR_COLONY, ",", Intent::OpenColonists)]
+    #[case(Scope::SIDEBAR_AGENT_COLONY, ",", Intent::OpenColonists)]
+    #[case(Scope::PANE_COLONY, ",", Intent::OpenColonists)]
+    #[case(Scope::SIDEBAR_COLONISTS, ",", Intent::OpenColonists)]
     fn leader_keys_yield_their_intents(
         #[case] scope: Scope,
         #[case] then: &str,
@@ -2172,17 +2040,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ C P Space W b c e f i l n q t w")]
-    #[case(Scope::SidebarEmpty, "/ C P Space W c e f i l n q")]
-    #[case(Scope::SidebarIncognito, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::Pane, "/ <C-g> C P Space W b c e h i m n p q r t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> C P Space W c e h i m n p q r t")]
-    #[case(Scope::SidebarAgent, "/ C P Space W b c e f i l n q t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::SidebarColony, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::SidebarAgentColony, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::PaneColony, ", / <C-g> C P Space W c e h i m n p q r t")]
-    #[case(Scope::SidebarColonists, ", / C P Space W c e f i l n q")]
+    #[case(Scope::SIDEBAR, "/ C P Space W b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_EMPTY, "/ C P Space W c e f i l n q")]
+    #[case(Scope::SIDEBAR_INCOGNITO, "/ C P Space W c e f i l n q t")]
+    #[case(Scope::PANE, "/ <C-g> C P Space W b c e h i m n p q r t w")]
+    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::SIDEBAR_AGENT, "/ C P Space W b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ C P Space W c e f i l n q t")]
+    #[case(Scope::SIDEBAR_COLONY, ", / C P Space W c e f i l n q t")]
+    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / C P Space W c e f i l n q t")]
+    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::SIDEBAR_COLONISTS, ", / C P Space W c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 
@@ -2198,15 +2066,15 @@ mod tests {
         // Given orb's keymap in a pane.
 
         // When listing the keys after `<C-g> p`.
-        let found = leader_popup(Scope::Pane, &[key(KeyCode::Char('p'))]).join(" ");
+        let found = leader_popup(Scope::PANE, &[key(KeyCode::Char('p'))]).join(" ");
 
         // Then they are the pane keys.
         assert_eq!(found, "c d e f i r s w x", "<C-g> p keys in a pane");
     }
 
     #[rstest::rstest]
-    #[case::sidebar(Scope::Sidebar, "1 2 3 4 5 6 7 8 9 n r x")]
-    #[case::pane_adds_break(Scope::Pane, "1 2 3 4 5 6 7 8 9 b n r x")]
+    #[case::sidebar(Scope::SIDEBAR, "1 2 3 4 5 6 7 8 9 n r x")]
+    #[case::pane_adds_break(Scope::PANE, "1 2 3 4 5 6 7 8 9 b n r x")]
     fn leader_t_popup_lists_the_tab_keys(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap with a session selected.
 
@@ -2218,7 +2086,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_g_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+    fn leader_g_is_unbound(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
         // Given `<C-g>` pressed in `scope`.
         let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, LEADER);
@@ -2235,8 +2103,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, Scope::SidebarIncognito)]
-    #[case(Scope::Pane, Scope::PaneIncognito)]
+    #[case(Scope::SIDEBAR, Scope::SIDEBAR_INCOGNITO)]
+    #[case(Scope::PANE, Scope::PANE_INCOGNITO)]
     fn incognito_scope_binds_its_base_scopes_keys_but_w_and_b(
         #[case] base: Scope,
         #[case] incognito: Scope,
@@ -2308,7 +2176,7 @@ mod tests {
     #[rstest::rstest]
     fn ctrl_g_ctrl_g_sends_ctrl_g_in_a_pane() {
         // Given `<C-g>` pressed in a pane.
-        let mut keys = Keys::new(keymap(), Scope::Pane);
+        let mut keys = Keys::new(keymap(), Scope::PANE);
         press(&mut keys, LEADER);
 
         // When pressing `<C-g>` again.

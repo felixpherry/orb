@@ -109,6 +109,7 @@ Entries are added or amended **only with human approval**.
 - (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
 - (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
+- (keybinds) Which keys are bound follows the side with the keys, the row under the sidebar cursor (or the shown session in a pane), and the session's kind, whose one rule leaves `<C-g> w` and `<C-g> b` unbound on Incognito sessions and colonies and binds `<C-g> ,` only on colonies.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) While the sidebar has the keys, `Alt +`/`Alt =` widen it and `Alt -` narrows it, 4 columns a step, kept between 24 and 80 columns.

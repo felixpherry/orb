@@ -288,7 +288,7 @@ mod tests {
 
     /// orb's keymap on an agent with `<C-g>` pressed.
     fn leader_on_agent() -> Keys {
-        leader(Keys::new(keymap(), Scope::Sidebar))
+        leader(Keys::new(keymap(), Scope::SIDEBAR))
     }
 
     /// A buffer the size of `SCREEN` with the popup drawn inside `area`.
@@ -321,10 +321,10 @@ mod tests {
                     &format!("<leader>{key}"),
                     Intent::NewSession,
                     KeyCategory::Sessions,
-                    Scope::Sidebar,
+                    Scope::SIDEBAR,
                 );
             }
-            leader(Keys::new(km, Scope::Sidebar))
+            leader(Keys::new(km, Scope::SIDEBAR))
         };
 
         // When drawing the popup.
@@ -384,9 +384,9 @@ mod tests {
                 "<leader>xa",
                 Intent::NewSession,
                 KeyCategory::Sessions,
-                Scope::Sidebar,
+                Scope::SIDEBAR,
             );
-            leader(Keys::new(km, Scope::Sidebar))
+            leader(Keys::new(km, Scope::SIDEBAR))
         };
 
         // When drawing the popup.
@@ -460,7 +460,7 @@ mod tests {
     #[rstest::rstest]
     fn no_popup_without_a_pending_sequence() {
         // Given orb's keymap with nothing pressed.
-        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let keys = Keys::new(keymap(), Scope::SIDEBAR);
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -476,7 +476,7 @@ mod tests {
     #[rstest::rstest]
     fn leader_popup_in_a_pane_lists_the_pane_and_tab_groups() {
         // Given `<C-g>` pressed in a pane.
-        let keys = leader(Keys::new(keymap(), Scope::Pane));
+        let keys = leader(Keys::new(keymap(), Scope::PANE));
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -494,7 +494,7 @@ mod tests {
     fn pane_popup_lists_the_float_rows() {
         // Given `<C-g>` and `p` pressed in a pane.
         let keys = {
-            let mut keys = leader(Keys::new(keymap(), Scope::Pane));
+            let mut keys = leader(Keys::new(keymap(), Scope::PANE));
             press(
                 &mut keys,
                 KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
