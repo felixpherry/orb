@@ -37,6 +37,7 @@ use crate::feat::sessions::store::{
     AgentRow, FloatRow, NewPaneAgent, SessionFloats, SessionRow, SettledOverride, Store,
     StoreError, TabRow, Ui, assert_every_pane_row_held,
 };
+use crate::feat::sessions::validator::{COLONIST_WORKING, SETTLE_IN_PROGRESS};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::zmx::zmx_service::fake::FakeZmx;
 use crate::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxService, ZmxSession};
@@ -1652,6 +1653,28 @@ async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<S
     Ok(())
 }
 
+#[rstest::rstest]
+#[tokio::test]
+async fn settle_refused_by_a_working_agent_shows_why() -> Result<(), Report<StoreError>> {
+    // Given agent aa's session, its agent working.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+
+    // When settling it.
+    actor.settle_session(inserted.session);
+
+    // Then the message box says a session is working.
+    assert_eq!(
+        error_of(&actor).as_deref(),
+        Some(SETTLE_IN_PROGRESS),
+        "a settle a turn beat to the worker should say why, as the key does"
+    );
+    Ok(())
+}
+
 /// Agents aa, bb and cc's polled sessions, bb a colonist of aa and cc of bb,
 /// cc's agent `cc_status` and the others idle.
 async fn colony_of_three(
@@ -1713,6 +1736,25 @@ async fn settling_with_colonists_settles_none_while_one_works() -> Result<(), Re
     assert_eq!(
         saved, [None; 3],
         "a colonist's turn that started after the key press wins"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn settling_with_colonists_refused_by_a_working_colonist_shows_why()
+-> Result<(), Report<StoreError>> {
+    // Given colony aa with colonist bb, whose colonist cc is working.
+    let (mut actor, ids) = colony_of_three(AgentStatus::Working).await?;
+
+    // When settling aa with its colonists.
+    actor.settle_with_colonists(ids[0]);
+
+    // Then the message box says a colonist is working.
+    assert_eq!(
+        error_of(&actor).as_deref(),
+        Some(COLONIST_WORKING),
+        "a settle a colonist's turn beat to the worker should say why"
     );
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! Pinning, renaming, settling and deleting sessions, and killing their panes.
 
 use super::*;
+use crate::feat::sessions::validator::{COLONIST_WORKING, SETTLE_IN_PROGRESS};
 
 impl SessionsActor {
     /// Pins session `id`; pinning a settled session un-settles it.
@@ -56,13 +57,19 @@ impl SessionsActor {
     }
 
     /// Settles every session in `ids`, unless one has a turn underway: then
-    /// none.
+    /// none, and the message box says why, as the key press would.
     fn settle_all(&mut self, ids: Vec<SessionId>) {
-        let working = ids.iter().any(|&id| {
+        let working = |id| {
             self.session_rows(id)
                 .any(|row| self.status(row.id).is_some_and(AgentStatus::in_progress))
-        });
-        if working {
+        };
+        let refusal = match ids.split_first() {
+            Some((&first, _)) if working(first) => Some(SETTLE_IN_PROGRESS),
+            Some((_, under)) if under.iter().any(|&id| working(id)) => Some(COLONIST_WORKING),
+            _ => None,
+        };
+        if let Some(why) = refusal {
+            self.report.report(Outcome::Failed(why.to_owned()));
             return;
         }
         for id in ids {
