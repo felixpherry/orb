@@ -5,7 +5,8 @@
 //! attributes, kitty keyboard flags, mode reports, its size and cell size in
 //! pixels, its colours, and the terminal's name, which is orb's own) are
 //! answered straight back to the child, and clipboard copies are reported to
-//! the caller. Size queries go unanswered while the cells' pixels are unknown,
+//! the caller. The title the child last set (OSC 0 or 2) is kept for the
+//! caller to read; a title reset clears it. Size queries go unanswered while the cells' pixels are unknown,
 //! and colour queries while the pane wasn't told its colours. The pane
 //! holds a synchronized update itself, in the order the child wrote it: it
 //! stays hidden until the child ends it, its text passes 2 MiB, or its
@@ -90,6 +91,8 @@ struct Listener {
     size: Arc<Mutex<PaneSize>>,
     /// What the child is told its colours are.
     colors: Option<PaneColors>,
+    /// The title the child last set, shared with the emulator.
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl Listener {
@@ -133,6 +136,8 @@ impl EventListener for Listener {
                     write_to(&self.writer, format(color).as_bytes());
                 }
             }
+            Event::Title(title) => *lock(&self.title) = Some(title),
+            Event::ResetTitle => *lock(&self.title) = None,
             _ => {}
         }
     }
@@ -145,6 +150,8 @@ pub(crate) struct Emulator {
     writer: SharedWriter,
     /// The pane's current size, shared with the listener's size answers.
     size: Arc<Mutex<PaneSize>>,
+    /// The title the child last set, which the listener keeps.
+    title: Arc<Mutex<Option<String>>>,
     /// The last press that started a selection, for counting double and
     /// triple clicks.
     press: Option<Press>,
@@ -222,17 +229,20 @@ impl Emulator {
             ..Config::default()
         };
         let shared_size = Arc::new(Mutex::new(size));
+        let title = Arc::new(Mutex::new(None));
         let listener = Listener {
             writer: writer.clone(),
             notify,
             size: shared_size.clone(),
             colors,
+            title: title.clone(),
         };
         Self {
             term: Term::new(config, &size, listener),
             parser: Processor::new(),
             writer,
             size: shared_size,
+            title,
             press: None,
             edge_scrolled: None,
             splitter: Splitter::default(),
@@ -524,6 +534,12 @@ impl Emulator {
     /// Whether the child asked for mouse reports.
     pub(crate) fn reads_mouse(&self) -> bool {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// The title the child last set (OSC 0 or 2); `None` when it set none,
+    /// an empty one, or reset it.
+    pub(crate) fn title(&self) -> Option<String> {
+        lock(&self.title).clone().filter(|title| !title.is_empty())
     }
 
     /// A wheel notch over the pane drawn at `area`: a wheel report while
@@ -1088,6 +1104,67 @@ mod tests {
             [PaneEvent::Clipboard("hello".to_owned())],
             "OSC 52 copy should be reported"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::osc_0(b"\x1b]0;htop\x07")]
+    #[case::osc_2(b"\x1b]2;htop\x07")]
+    fn program_title_is_kept(#[case] output: &[u8]) {
+        // Given a fresh emulator.
+        let (mut emulator, _, _) = emulator();
+
+        // When the child sets its title to htop.
+        emulator.feed(output);
+
+        // Then the title is htop.
+        assert_eq!(
+            emulator.title().as_deref(),
+            Some("htop"),
+            "OSC 0 and OSC 2 both set the title"
+        );
+    }
+
+    #[rstest::rstest]
+    fn a_newer_title_replaces_the_old_one() {
+        // Given a child that titled itself htop.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b]2;htop\x07");
+
+        // When it titles itself vim.
+        emulator.feed(b"\x1b]2;vim\x07");
+
+        // Then the title is vim.
+        assert_eq!(
+            emulator.title().as_deref(),
+            Some("vim"),
+            "the latest title wins"
+        );
+    }
+
+    #[rstest::rstest]
+    fn a_title_reset_clears_it() {
+        // Given a child that saved its empty title, then titled itself vim.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b[22;0t\x1b]2;vim\x07");
+
+        // When it restores the saved title.
+        emulator.feed(b"\x1b[23;0t");
+
+        // Then there is no title.
+        assert_eq!(emulator.title(), None, "a reset to no title clears it");
+    }
+
+    #[rstest::rstest]
+    fn an_empty_title_reads_as_none() {
+        // Given a child that titled itself vim.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"\x1b]2;vim\x07");
+
+        // When it sets an empty title.
+        emulator.feed(b"\x1b]2;\x07");
+
+        // Then there is no title.
+        assert_eq!(emulator.title(), None, "an empty title means none");
     }
 
     #[rstest::rstest]

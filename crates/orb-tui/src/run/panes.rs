@@ -636,7 +636,7 @@ impl App {
             state
                 .shown_layout()
                 .and_then(|layout| {
-                    tabs::placement(&state, layout, self.pane_area)
+                    tabs::placement(&state, &self.panes, layout, self.pane_area)
                         .panes
                         .into_iter()
                         .find(|place| place.pane == id)

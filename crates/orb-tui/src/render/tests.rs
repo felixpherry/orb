@@ -2023,7 +2023,7 @@ fn pane_mode_draws_no_key_box_away_from_the_pane() {
 fn drawn_float(state: &AppState, buffer: &Buffer) -> Option<Rect> {
     let [_, body] = crate::tabs::areas(right_of(buffer));
     let layout = state.shown_layout()?;
-    crate::tabs::placement(state, layout, body)
+    crate::tabs::placement(state, &HashMap::new(), layout, body)
         .panes
         .into_iter()
         .find(|place| place.floating)

@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `<C-g> s` in a pane settles the session on screen, after the same confirm as the sidebar's `s`.
 - The session, Colonists and search pickers keep their filter and typed text until orb quits.
 - When typed text in the session picker matches only settled agents, the empty list says how many (`N settled matches · s to show`).
+- A pane with no name and no agent title is called by the title its program sets (htop, vim, your shell's prompt) instead of `shell`.
 
 ### Changed
 

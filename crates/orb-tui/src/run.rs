@@ -466,7 +466,7 @@ impl App {
                 let state = self.state.read();
                 state
                     .shown_layout()
-                    .map(|layout| tabs::placement(&state, layout, self.pane_area).panes)
+                    .map(|layout| tabs::placement(&state, &self.panes, layout, self.pane_area).panes)
                     .unwrap_or_default()
             };
             for place in &placed {

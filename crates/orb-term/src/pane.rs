@@ -282,6 +282,12 @@ impl Pane {
         lock(&self.emulator).reads_mouse()
     }
 
+    /// The title the child last set (OSC 0 or 2); `None` when it set none,
+    /// an empty one, or reset it.
+    pub fn title(&self) -> Option<String> {
+        lock(&self.emulator).title()
+    }
+
     /// A wheel notch over the pane drawn at `area`: to the child while it
     /// reads the mouse, as arrow keys on the alternate screen, else a
     /// scroll of the pane's history. `pixel` is as [`Pane::mouse`] takes it.

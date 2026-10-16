@@ -1,6 +1,7 @@
 //! The right-hand area while a session is shown: a one-row tab bar, then the
 //! shown tab's panes laid out by its tree, each in a rounded frame titled
-//! with its name. The frame shows where the focus is: blue while the pane
+//! with its name, else its agent's title, else its program's title, else
+//! `shell`. The frame shows where the focus is: blue while the pane
 //! has the keys, grey while it has the focus and the keys are elsewhere,
 //! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
 //! centred list naming its panes, one row each between two dim bars and a
@@ -64,7 +65,7 @@ pub(crate) fn render(
 ) -> Option<Position> {
     let [bar, body] = areas(right);
     tab_bar(state, layout, keys_in_pane, bar, buf, hits);
-    let placement = placement(state, layout, body);
+    let placement = placement(state, panes, layout, body);
     let mut cursor = None;
     let ranked = || placement.panes.iter().enumerate();
     for (rank, place) in ranked().filter(|(_, place)| !place.floating) {
@@ -81,7 +82,7 @@ pub(crate) fn render(
             .iter()
             .find(|place| place.pane == stack.shown)
             .map_or(stack.area.x, |place| place.area.x);
-        stack_list(state, stack, left, lit, buf, hits);
+        stack_list(state, panes, stack, left, lit, buf, hits);
         hits.record_stack(stack.area, stack.panes.clone(), stack.shown);
     }
     for (rank, place) in ranked().filter(|(_, place)| place.floating) {
@@ -135,7 +136,7 @@ fn draw_pane(
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(border))
         .title(Line::styled(
-            format!(" {} ", pane_title(state, place.pane)),
+            format!(" {} ", pane_title(state, panes, place.pane)),
             title,
         ));
     let block = if place.pinned {
@@ -148,26 +149,34 @@ fn draw_pane(
 }
 
 /// Where `layout`'s shown tab draws its panes in `body`, each stack's list as
-/// wide as its longest pane title plus its bars and `> `. Every caller
-/// places panes through here so drawing, resizing and spawning agree.
-pub(crate) fn placement(state: &AppState, layout: &SessionLayout, body: Rect) -> Placement {
-    layout.placed(body, |panes| {
-        panes
+/// wide as its longest pane title (read with the programs' titles in
+/// `panes`) plus its bars and `> `. Every caller places panes through here
+/// so drawing, resizing and spawning agree.
+pub(crate) fn placement(
+    state: &AppState,
+    panes: &HashMap<PaneId, Pane>,
+    layout: &SessionLayout,
+    body: Rect,
+) -> Placement {
+    layout.placed(body, |stacked| {
+        stacked
             .iter()
-            .map(|pane| Span::raw(pane_title(state, *pane)).width())
+            .map(|pane| Span::raw(pane_title(state, panes, *pane)).width())
             .max()
             .map_or(0, |longest| u16::try_from(longest + 4).unwrap_or(u16::MAX))
     })
 }
 
 /// Draws `stack`'s list: a dim bar down each side, and between them a row
-/// per pane that fits, the shown pane's bold blue while `lit`, with a `>`
+/// per pane that fits, named as its frame is (with the programs' titles in
+/// `panes`), the shown pane's bold blue while `lit`, with a `>`
 /// two columns left of the left bar when that stays right of `left`, the
 /// stack's left edge. Names too long for the row end in `…`. Records every
 /// other row in `hits`, reading the mouse so a click focuses its pane
 /// without starting a selection.
 fn stack_list(
     state: &AppState,
+    panes: &HashMap<PaneId, Pane>,
     stack: &StackList,
     left: u16,
     lit: bool,
@@ -186,7 +195,7 @@ fn stack_list(
             (false, _) => Style::new().fg(DARK3),
         };
         let text = cut_right(
-            &format!(" {}", pane_title(state, *pane)),
+            &format!(" {}", pane_title(state, panes, *pane)),
             usize::from(row.width),
         );
         buf.set_stringn(row.x, row.y, text, usize::from(row.width), style);
@@ -203,8 +212,9 @@ fn stack_list(
 }
 
 /// What orb calls pane `pane` in its frame and the stack list: its name,
-/// else the title of the agent running in it, else `shell`.
-pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
+/// else the title of the agent running in it, else the title its program
+/// last set (its client in `panes`), else `shell`.
+pub(crate) fn pane_title(state: &AppState, panes: &HashMap<PaneId, Pane>, pane: PaneId) -> String {
     state
         .layouts
         .entry(pane)
@@ -221,6 +231,7 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
                 })
                 .and_then(|agent| agent.title.clone())
         })
+        .or_else(|| panes.get(&pane).and_then(Pane::title))
         .unwrap_or_else(|| "shell".to_owned())
 }
 
@@ -426,16 +437,23 @@ fn visible_tabs(widths: &[u16], active: usize, room: u16) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::thread;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use orb_domain::AppState;
+    use orb_domain::feat::harness::HarnessId;
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
+    use orb_domain::feat::sessions::state::{
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions,
+    };
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
-    use orb_domain::ids::{PaneId, SessionId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
+    use orb_term::{CellSize, GraphicsSupport, Pane, PaneCommand, PaneSize};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{areas, render, visible_tabs};
+    use super::{areas, pane_title, render, visible_tabs};
     use crate::mouse::HitMap;
     use crate::sidebar::PIN;
 
@@ -589,5 +607,121 @@ mod tests {
 
         // Then only the shown tab is visible.
         assert_eq!(range, 0..1, "the shown tab alone");
+    }
+
+    /// Pane 1 as a live client whose program titled itself `htop`, once
+    /// orb has read the title.
+    fn titled_htop() -> Option<HashMap<PaneId, Pane>> {
+        let command = PaneCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                r"printf '\033]2;htop\007'; sleep 5".into(),
+            ],
+            cwd: "/".into(),
+            env: vec![("PATH".into(), "/bin:/usr/bin".into())],
+            graphics: GraphicsSupport::None,
+            colors: None,
+        };
+        let size = PaneSize {
+            cols: 20,
+            rows: 5,
+            cell: CellSize::default(),
+        };
+        let pane = Pane::spawn(&command, size, |_| {}).ok()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if pane.title().is_some() {
+                return Some(HashMap::from([(PaneId(1), pane)]));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// Pane 1 of session 1, named `name`, running agent 1 titled `title`.
+    fn pane_1(name: Option<&str>, title: Option<&str>) -> AppState {
+        let mut layouts = Layouts::default();
+        layouts.insert(
+            SessionId(1),
+            SessionLayout::of(PaneEntry {
+                name: name.map(str::to_owned),
+                ..entry(1)
+            }),
+        );
+        let agent = Agent {
+            last_session: None,
+            harness: HarnessId::new("claude"),
+            id: AgentId(1),
+            title: title.map(str::to_owned),
+            cwd: "/tmp".into(),
+            transcript: None,
+            status: AgentStatus::Idle,
+            turn_started_at: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(1),
+                session: SessionId(1),
+            }),
+            branch: None,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            model: None,
+        };
+        AppState {
+            layouts,
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "orb".into(),
+                    root: "/tmp".into(),
+                    created_at: UNIX_EPOCH,
+                    removed: false,
+                    repo: true,
+                    agents: vec![agent],
+                    kind: ProjectKind::Normal,
+                }],
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::own_name(Some("logs"), Some("Fix the bug"), "logs")]
+    #[case::agent_title(None, Some("Fix the bug"), "Fix the bug")]
+    #[case::program_title(None, None, "htop")]
+    fn pane_title_takes_the_name_then_the_agent_then_the_program(
+        #[case] name: Option<&str>,
+        #[case] title: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        // Given pane 1, named `name`, running an agent titled `title`, whose
+        // program titled itself htop.
+        let state = pane_1(name, title);
+        let panes = titled_htop();
+
+        // When naming the pane.
+        let named = panes.map(|panes| pane_title(&state, &panes, PaneId(1)));
+
+        // Then the first of them that is set names it.
+        assert_eq!(
+            named.as_deref(),
+            Some(expected),
+            "name, then agent title, then program title"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_title_without_any_title_is_shell() {
+        // Given pane 1 with no name, an untitled agent, and no client whose
+        // program set a title.
+        let state = pane_1(None, None);
+
+        // When naming the pane.
+        let named = pane_title(&state, &HashMap::new(), PaneId(1));
+
+        // Then it is called shell.
+        assert_eq!(named, "shell", "with nothing set, the pane is a shell");
     }
 }
