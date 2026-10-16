@@ -222,7 +222,7 @@ impl Frontend {
         log: Log,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
-        outer_terminal::run(|terminal, outer| {
+        outer_terminal::run(&log.clone(), |terminal, outer| {
             outer_terminal::enable(terminal.backend_mut(), outer.pixel_mouse())?;
             outer_terminal::install_panic_hook(log.clone());
             let env = [

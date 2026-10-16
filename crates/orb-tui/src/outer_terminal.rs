@@ -16,7 +16,9 @@
 //! exactly orb's navy, orb paints one step off it, since kitty draws pane
 //! images over any cell of its own background colour, even one orb painted.
 //! Resizing orb's window redraws it without erasing the whole screen, so the
-//! panes' images stay on it.
+//! panes' images stay on it. The log gets one line saying what the terminal
+//! answered: its name and version, whether images reach it, its cell size,
+//! and why the probe failed when it did.
 
 use std::io::{self, Stdout, Write};
 use std::panic;
@@ -138,21 +140,26 @@ where
 }
 
 /// Runs `f` on orb's terminal in raw mode on the alternate screen, with what
-/// the outer terminal said about itself, asked before anything reads input.
-/// Restores the terminal whatever `f` returns; ratatui's panic hook covers a
-/// panic.
+/// the outer terminal said about itself, asked before anything reads input
+/// and written to `log` as one line. Restores the terminal whatever `f`
+/// returns; ratatui's panic hook covers a panic.
 ///
 /// # Errors
 ///
 /// Returns an error if setting up the terminal fails, or `f`'s error.
-pub(crate) fn run<F>(f: F) -> io::Result<()>
+pub(crate) fn run<F>(log: &Log, f: F) -> io::Result<()>
 where
     F: FnOnce(&mut OrbTerminal, OuterTerminal) -> io::Result<()>,
 {
     let result = ratatui::try_init().and_then(|initial| {
         drop(initial);
-        let outer = probe();
+        let (outer, version, end) = probe();
         let mut terminal = Terminal::new(KeepImages(CrosstermBackend::new(io::stdout())))?;
+        let cell = cell_size(terminal.backend_mut().window_size().ok());
+        log.line(
+            "terminal",
+            &probe_line(version.as_deref(), &outer, cell, &end),
+        );
         f(&mut terminal, outer)
     });
     ratatui::restore();
@@ -192,6 +199,50 @@ impl OuterTerminal {
     }
 }
 
+/// How the start-up probe ended.
+#[derive(Debug)]
+pub(crate) enum ProbeEnd {
+    /// The terminal answered up to the fence.
+    Answered,
+    /// No fence within [`PROBE_WAIT`].
+    TimedOut,
+    /// stdin closed before the fence.
+    Closed,
+    /// Reading stdin failed.
+    ReadFailed(Errno),
+    /// Writing the questions failed.
+    WriteFailed(io::Error),
+}
+
+/// The start-up log line: the terminal's name and version, whether images
+/// reach it, the cell size, and how the probe ended when it didn't answer.
+pub(crate) fn probe_line(
+    version: Option<&str>,
+    outer: &OuterTerminal,
+    cell: CellSize,
+    end: &ProbeEnd,
+) -> String {
+    let failure = match end {
+        ProbeEnd::Answered => None,
+        ProbeEnd::TimedOut => Some(format!("no answer within {} ms", PROBE_WAIT.as_millis())),
+        ProbeEnd::Closed => Some("stdin closed before the answer".to_owned()),
+        ProbeEnd::ReadFailed(error) => Some(format!("couldn't read the answer: {error}")),
+        ProbeEnd::WriteFailed(error) => Some(format!("couldn't ask: {error}")),
+    };
+    let who = match (version, failure) {
+        (Some(version), None) => version.to_owned(),
+        (None, None) => "no name given".to_owned(),
+        (None, Some(failure)) => failure,
+        (Some(version), Some(failure)) => format!("{version}, {failure}"),
+    };
+    let images = match outer.graphics {
+        GraphicsSupport::None => "images off",
+        GraphicsSupport::Kitty { transient: true } => "images on (transient)",
+        GraphicsSupport::Kitty { transient: false } => "images on",
+    };
+    format!("{who}, {images}, cell {}x{} px", cell.width, cell.height)
+}
+
 /// Asks the outer terminal for its name and version (XTVERSION), its default
 /// text colour (OSC 10), its background (OSC 11) and its colours 0–15 (OSC 4),
 /// fenced by a device-attributes query (DA1) every terminal answers last, and
@@ -202,11 +253,15 @@ impl OuterTerminal {
 // ponytail: answers arriving after PROBE_WAIT reach the input thread as keys;
 // a filter in front of crossterm's reader would close that if a slow terminal
 // ever shows it.
-fn probe() -> OuterTerminal {
+/// Returns what it said, its XTVERSION text and how the probe ended.
+fn probe() -> (OuterTerminal, Option<String>, ProbeEnd) {
     let mut out = io::stdout();
     match ask(&mut out).and_then(|()| out.flush()) {
-        Ok(()) => parse_probe(&read_replies(PROBE_WAIT)),
-        Err(_) => OuterTerminal::default(),
+        Ok(()) => {
+            let (replies, end) = read_replies(PROBE_WAIT);
+            (parse_probe(&replies), version(&replies), end)
+        }
+        Err(error) => (OuterTerminal::default(), None, ProbeEnd::WriteFailed(error)),
     }
 }
 
@@ -223,22 +278,27 @@ where
 }
 
 /// Bytes read from stdin until the fence's reply is among them or `wait`
-/// passes. Polls fd 0 itself: on macOS `poll` fails on `/dev/tty`.
-fn read_replies(wait: Duration) -> Vec<u8> {
+/// passes, and how the read ended. Polls fd 0 itself: on macOS `poll` fails
+/// on `/dev/tty`.
+fn read_replies(wait: Duration) -> (Vec<u8>, ProbeEnd) {
     let stdin = io::stdin();
     let deadline = Instant::now() + wait;
     let mut replies = Vec::new();
     let mut chunk = [0; 1024];
-    while !has_fence(&replies) {
+    let end = loop {
+        if has_fence(&replies) {
+            break ProbeEnd::Answered;
+        }
         let Some(timeout) = deadline
             .checked_duration_since(Instant::now())
             .and_then(|left| Timespec::try_from(left).ok())
         else {
-            break;
+            break ProbeEnd::TimedOut;
         };
         match poll(&mut [PollFd::new(&stdin, PollFlags::IN)], Some(&timeout)) {
             Err(Errno::INTR) => continue,
-            Ok(0) | Err(_) => break,
+            Ok(0) => break ProbeEnd::TimedOut,
+            Err(error) => break ProbeEnd::ReadFailed(error),
             Ok(_) => {}
         }
         match rustix::io::read(&stdin, &mut chunk) {
@@ -246,10 +306,11 @@ fn read_replies(wait: Duration) -> Vec<u8> {
                 replies.extend_from_slice(chunk.get(..read).unwrap_or_default());
             }
             Err(Errno::INTR) => {}
-            Ok(_) | Err(_) => break,
+            Ok(_) => break ProbeEnd::Closed,
+            Err(error) => break ProbeEnd::ReadFailed(error),
         }
-    }
-    replies
+    };
+    (replies, end)
 }
 
 /// Whether `replies` hold a device-attributes reply (`ESC [ ? … c`).
@@ -269,10 +330,7 @@ fn has_fence(replies: &[u8]) -> bool {
 pub(crate) fn parse_probe(replies: &[u8]) -> OuterTerminal {
     let text = String::from_utf8_lossy(replies);
     let mut outer = OuterTerminal::default();
-    for reply in text
-        .split('\x1b')
-        .map(|part| part.split_once('\x07').map_or(part, |(reply, _)| reply))
-    {
+    for reply in each_reply(&text) {
         if let Some(version) = reply.strip_prefix("P>|") {
             outer.graphics = graphics_support(version);
         }
@@ -294,6 +352,20 @@ pub(crate) fn parse_probe(replies: &[u8]) -> OuterTerminal {
         }
     }
     outer
+}
+
+/// The XTVERSION text in the probe replies, such as `kitty(0.48.2)`.
+fn version(replies: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(replies);
+    each_reply(&text)
+        .find_map(|reply| reply.strip_prefix("P>|"))
+        .map(str::to_owned)
+}
+
+/// Each reply in the probe's text: split at ESC, cut at a BEL.
+fn each_reply(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\x1b')
+        .map(|part| part.split_once('\x07').map_or(part, |(reply, _)| reply))
 }
 
 /// One cell's pixels from the outer terminal's window size; zero when it
@@ -453,12 +525,13 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use orb_term::GraphicsSupport;
+    use orb_term::{CellSize, GraphicsSupport};
     use ratatui::backend::{Backend, ClearType, CrosstermBackend};
     use ratatui::style::Color;
 
     use super::{
-        KeepImages, OuterTerminal, ask, copy_to_clipboard, disable, enable, has_fence, parse_probe,
+        KeepImages, OuterTerminal, ProbeEnd, ask, copy_to_clipboard, disable, enable, has_fence,
+        parse_probe, probe_line,
     };
     use crate::render::BACKGROUND;
 
@@ -737,5 +810,47 @@ mod tests {
 
         // Then reading stops only once the device attributes arrived.
         assert_eq!(fenced, expected, "fence in {replies:?}");
+    }
+
+    #[rstest::rstest]
+    #[case::kitty(
+        Some("kitty(0.48.2)"),
+        GraphicsSupport::Kitty { transient: true },
+        CellSize { width: 10, height: 21 },
+        ProbeEnd::Answered,
+        "kitty(0.48.2), images on (transient), cell 10x21 px"
+    )]
+    #[case::timed_out(
+        None,
+        GraphicsSupport::None,
+        CellSize::default(),
+        ProbeEnd::TimedOut,
+        "no answer within 300 ms, images off, cell 0x0 px"
+    )]
+    #[case::not_kitty(
+        Some("WezTerm 20240203"),
+        GraphicsSupport::None,
+        CellSize { width: 8, height: 16 },
+        ProbeEnd::Answered,
+        "WezTerm 20240203, images off, cell 8x16 px"
+    )]
+    fn probe_line_says_what_orb_found(
+        #[case] version: Option<&str>,
+        #[case] graphics: GraphicsSupport,
+        #[case] cell: CellSize,
+        #[case] end: ProbeEnd,
+        #[case] expected: &str,
+    ) {
+        // Given what the probe found.
+        let outer = OuterTerminal {
+            graphics,
+            ..OuterTerminal::default()
+        };
+
+        // When writing the start-up line.
+        let line = probe_line(version, &outer, cell, &end);
+
+        // Then it reads as expected.
+        assert_eq!(line, expected, "the terminal line");
     }
 }
