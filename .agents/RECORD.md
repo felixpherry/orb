@@ -384,6 +384,7 @@ Entries are added or amended **only with human approval**.
 - (pane) After a pane's program places a kitty image without C=1, orb moves that pane's cursor to the image's last row, right of it, as kitty does, so a shell's next prompt prints below the image.
 - (pane) A pane's images on its main screen scroll with its text, show while the pane is scrolled back, and are freed once they scroll out of its history.
 - (pane) A pane with images on its main screen keeps up to 512 fewer lines of history than other panes.
+- (tui) orb writes at most 256 KiB of pane image data to kitty per frame and sends the rest, then the image's placement, over the next frames; more than 32 MiB waiting goes out in one frame.
 - (tui) At start-up orb asks its outer terminal for its name and version, its foreground, background and colours 0–15, and forwards images only when it is kitty, marking them transient from kitty 0.48.
 - (tui) Resizing orb's terminal clears it without deleting kitty images.
 - (pane) A printable key carries its text to a program that asked for it through the kitty keyboard protocol.

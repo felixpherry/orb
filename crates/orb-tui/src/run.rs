@@ -530,7 +530,7 @@ impl App {
     /// or a session is starting, so the spinners and elapsed time tick, or
     /// the message box runs out, so it hides, or the session picker's preview
     /// waits to be read again, so a transcript that stopped growing still
-    /// catches up.
+    /// catches up; at once while pane image bytes wait for the next frame.
     fn deadline(&self) -> Option<Instant> {
         let tick = self
             .state
@@ -542,10 +542,12 @@ impl App {
         let toast = self.toasts.deadline(Instant::now());
         let preview = stale_preview(&self.state.read())
             .map(|(agent, _)| preview_due(self.last_preview, agent, Instant::now()));
+        let images = self.compositor.pending().then(Instant::now);
         tick.into_iter()
             .chain(sync)
             .chain(toast)
             .chain(preview)
+            .chain(images)
             .min()
     }
 

@@ -11,6 +11,11 @@
 //! float's images sit above those of the panes under it. All of it is
 //! written in the frame's own screen update, with the cursor saved before
 //! and restored after.
+//!
+//! One frame writes at most 256 KiB of the panes' image bytes, cut only
+//! between whole commands; the rest waits for the next frames, and the
+//! placements wait until it is out, so kitty never places an image it
+//! hasn't got. More than 32 MiB waiting goes out in one frame.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -27,6 +32,13 @@ const RANK_SPAN: i32 = 1 << 24;
 /// The highest rank with a band of its own; higher ranks share it, which
 /// keeps every band under kitty's limit.
 const TOP_RANK: usize = 54;
+/// The most pane image bytes one frame writes to kitty; the rest waits
+/// for the next frames, cut only between whole commands.
+const FRAME_BUDGET: usize = 256 * 1024;
+/// The most image bytes left waiting; past it a frame writes them all, as
+/// it did before the budget, so a pane sending images faster than frames
+/// write them can't grow the wait without end.
+const BACKLOG_CAP: usize = 32 * 1024 * 1024;
 
 /// One drawn pane's images this frame: its image model's id, its rank among
 /// the placed panes (tiled first, then floats bottom to top), and its
@@ -40,9 +52,16 @@ pub(crate) struct Compositor {
     shown: HashMap<u64, HashMap<(u32, u32), Visible>>,
     /// Per image model: the kitty ids of the images it last held.
     images: HashMap<u64, Vec<u32>>,
+    /// Image bytes past a frame's budget, written first next frame.
+    backlog: Vec<u8>,
 }
 
 impl Compositor {
+    /// Whether image bytes are waiting for the next frame.
+    pub(crate) fn pending(&self) -> bool {
+        !self.backlog.is_empty()
+    }
+
     /// Writes this frame's image bytes to `out` for the panes `drawn`, after
     /// taking the waiting bytes of the panes in `panes` that weren't drawn
     /// and reading which images every pane still holds.
@@ -72,10 +91,14 @@ impl Compositor {
         self.write(out, drawn, &hidden, live)
     }
 
-    /// Writes, inside `ESC 7 … ESC 8`, the drawn panes' waiting bytes, then
-    /// `hidden` (the other panes' waiting bytes), then what places, moves
-    /// and takes off placements, then frees for the images of models no
-    /// longer in `live`. Writes nothing when none of that has anything.
+    /// Writes, inside `ESC 7 … ESC 8`, the bytes left from the last frame,
+    /// the drawn panes' waiting bytes, then `hidden` (the other panes'
+    /// waiting bytes), then what places, moves and takes off placements,
+    /// then frees for the images of models no longer in `live`. Writes
+    /// nothing when none of that has anything. When the waiting bytes pass
+    /// [`FRAME_BUDGET`], it writes only their first part and keeps the rest
+    /// and everything after it for the next frame, unless they pass
+    /// [`BACKLOG_CAP`].
     fn write<W>(
         &mut self,
         out: &mut W,
@@ -86,11 +109,21 @@ impl Compositor {
     where
         W: Write,
     {
-        let mut body: Vec<u8> = drawn
-            .iter()
-            .flat_map(|(_, _, frame)| frame.out.iter().copied())
-            .chain(hidden.iter().copied())
-            .collect();
+        let mut body = std::mem::take(&mut self.backlog);
+        body.extend(
+            drawn
+                .iter()
+                .flat_map(|(_, _, frame)| frame.out.iter().copied()),
+        );
+        body.extend_from_slice(hidden);
+        let cut = match body.len() {
+            len if len > BACKLOG_CAP => len,
+            _ => cut(&body, FRAME_BUDGET),
+        };
+        if cut < body.len() {
+            self.backlog = body.split_off(cut);
+            return wrapped(out, &body);
+        }
         let mut before = std::mem::take(&mut self.shown);
         for (model, rank, frame) in drawn {
             let shown = before.remove(model).unwrap_or_default();
@@ -128,13 +161,43 @@ impl Compositor {
             }
         }
         self.images = live;
-        if body.is_empty() {
-            return Ok(());
-        }
-        out.write_all(b"\x1b7")?;
-        out.write_all(&body)?;
-        out.write_all(b"\x1b8")
+        wrapped(out, &body)
     }
+}
+
+/// Writes `body` inside `ESC 7 … ESC 8`, or nothing when it is empty.
+fn wrapped<W>(out: &mut W, body: &[u8]) -> io::Result<()>
+where
+    W: Write,
+{
+    if body.is_empty() {
+        return Ok(());
+    }
+    out.write_all(b"\x1b7")?;
+    out.write_all(body)?;
+    out.write_all(b"\x1b8")
+}
+
+/// Where to cut `body`, a run of whole commands, so its first part holds
+/// at most `budget` bytes, or only the first command when that alone is
+/// bigger.
+fn cut(body: &[u8], budget: usize) -> usize {
+    if body.len() <= budget {
+        return body.len();
+    }
+    let mut last = None;
+    for end in body
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| pair == b"\x1b\\")
+        .map(|(at, _)| at + 2)
+    {
+        if end > budget {
+            return last.unwrap_or(end);
+        }
+        last = Some(end);
+    }
+    body.len()
 }
 
 /// kitty's z for an image the pane of `rank` asked to stack at `z`: under
@@ -222,6 +285,17 @@ mod tests {
             return "write failed".to_owned();
         };
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Two whole transmits of image 7 together just over [`FRAME_BUDGET`]:
+    /// the first fills the budget but for 100 bytes, the second is 200.
+    fn two_transmits() -> (String, String) {
+        let command = |size: usize| {
+            let head = "\x1b_Ga=t,f=32,s=10,v=20,t=d,i=7,q=2,m=1;";
+            let payload = "A".repeat(size - head.len() - 2);
+            format!("{head}{payload}\x1b\\")
+        };
+        (command(super::FRAME_BUDGET - 100), command(200))
     }
 
     /// kitty's placement of [`visible`] at its cell.
@@ -373,6 +447,82 @@ mod tests {
         assert!(
             matches!(zs.as_slice(), [tiled, float] if tiled < float && *float < -1_073_741_824),
             "z values {zs:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn image_bytes_past_the_budget_wait_for_the_next_frame() {
+        // Given a pane that sent two transmits together over the budget.
+        let mut compositor = Compositor::default();
+        let (first, second) = two_transmits();
+        let frame = drawn(1, 0, vec![visible()], format!("{first}{second}").as_bytes());
+
+        // When composing once.
+        let written = written(&mut compositor, &[frame], &[]);
+
+        // Then only the first transmit is written, and the rest waits.
+        assert_eq!(
+            (written, compositor.pending()),
+            (format!("\x1b7{first}\x1b8"), true),
+            "the first frame's write"
+        );
+    }
+
+    #[rstest::rstest]
+    fn placements_wait_until_the_image_bytes_are_out() {
+        // Given a pane that sent two transmits together over the budget.
+        let mut compositor = Compositor::default();
+        let (first, second) = two_transmits();
+        let frame = drawn(1, 0, vec![visible()], format!("{first}{second}").as_bytes());
+
+        // When composing once.
+        let written = written(&mut compositor, &[frame], &[]);
+
+        // Then nothing is placed.
+        assert!(
+            !written.contains("a=p"),
+            "no placement before the image is out"
+        );
+    }
+
+    #[rstest::rstest]
+    fn backlog_goes_out_on_the_next_frame() {
+        // Given a frame that held back a transmit past the budget.
+        let mut compositor = Compositor::default();
+        let (first, second) = two_transmits();
+        let frame = drawn(1, 0, vec![visible()], format!("{first}{second}").as_bytes());
+        written(&mut compositor, &[frame], &[]);
+
+        // When composing the next frame.
+        let written = written(&mut compositor, &[drawn(1, 0, vec![visible()], b"")], &[]);
+
+        // Then it holds the held-back transmit, then the placement.
+        assert_eq!(
+            written,
+            format!("\x1b7{second}{PLACED}\x1b8"),
+            "the second frame's write"
+        );
+    }
+
+    #[rstest::rstest]
+    fn image_bytes_past_the_backlog_cap_go_out_in_one_frame() {
+        // Given a pane that sent a transmit filling the budget, then one
+        // bigger than the most bytes left waiting.
+        let mut compositor = Compositor::default();
+        let (first, _) = two_transmits();
+        let huge = format!(
+            "\x1b_Ga=t,f=32,s=10,v=20,t=d,i=7,q=2;{}\x1b\\",
+            "A".repeat(super::BACKLOG_CAP)
+        );
+        let frame = drawn(1, 0, vec![visible()], format!("{first}{huge}").as_bytes());
+
+        // When composing once.
+        written(&mut compositor, &[frame], &[]);
+
+        // Then nothing is left waiting.
+        assert!(
+            !compositor.pending(),
+            "a backlog past its cap goes out at once"
         );
     }
 }
