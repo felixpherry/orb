@@ -200,6 +200,64 @@ fn scaled(
     })
 }
 
+/// The columns and rows a placement covers, as kitty counts them to move
+/// the cursor past it: `c`/`r` when given, else from the shown part of an
+/// image `size` pixels at `cell`; `None` when that needs a size or cell
+/// size orb doesn't know.
+pub(super) fn cells_covered(
+    placement: &Placement,
+    size: Option<(u32, u32)>,
+    cell: CellSize,
+) -> Option<(u32, u32)> {
+    if cell.width == 0 || cell.height == 0 {
+        return None;
+    }
+    let (cell_width, cell_height) = (u64::from(cell.width), u64::from(cell.height));
+    let offset = (
+        u64::from(placement.offset.0).min(cell_width - 1),
+        u64::from(placement.offset.1).min(cell_height - 1),
+    );
+    let shown = || {
+        let [x, y, width, height] = placement.src.unwrap_or_default();
+        let (image_width, image_height) = size?;
+        let shown = (
+            u64::from(extent(width, x, Some(image_width))?),
+            u64::from(extent(height, y, Some(image_height))?),
+        );
+        (shown.0 > 0 && shown.1 > 0).then_some(shown)
+    };
+    let (columns, rows) = match (
+        placement.cells.0.filter(|&columns| columns > 0),
+        placement.cells.1.filter(|&rows| rows > 0),
+    ) {
+        (Some(columns), Some(rows)) => (u64::from(columns), u64::from(rows)),
+        (Some(columns), None) => {
+            let (width, height) = shown()?;
+            let width_px = cell_width * u64::from(columns) + offset.0;
+            let rows = width_px
+                .saturating_mul(height)
+                .div_ceil(width * cell_height);
+            (u64::from(columns), rows)
+        }
+        (None, Some(rows)) => {
+            let (width, height) = shown()?;
+            let height_px = cell_height * u64::from(rows) + offset.1;
+            let columns = height_px
+                .saturating_mul(width)
+                .div_ceil(height * cell_width);
+            (columns, u64::from(rows))
+        }
+        (None, None) => {
+            let (width, height) = shown()?;
+            (
+                (width + offset.0).div_ceil(cell_width),
+                (height + offset.1).div_ceil(cell_height),
+            )
+        }
+    };
+    Some((u32::try_from(columns).ok()?, u32::try_from(rows).ok()?))
+}
+
 /// How many cells of `cell` pixels `pixels` pixels reach into.
 fn cells_over(pixels: u32, cell: u16) -> u16 {
     u16::try_from(pixels.div_ceil(u32::from(cell))).unwrap_or(u16::MAX)
@@ -209,7 +267,7 @@ fn cells_over(pixels: u32, cell: u16) -> u16 {
 mod tests {
     use ratatui::layout::Rect;
 
-    use super::visible;
+    use super::{cells_covered, visible};
     use crate::graphics::{Image, Placement, Visible};
     use crate::pane::CellSize;
 
@@ -242,6 +300,7 @@ mod tests {
             outer: 1,
             generation: 0,
             px: Some((width, height)),
+            declared: Some((width, height)),
             alt: false,
         }
     }
@@ -372,5 +431,49 @@ mod tests {
             Some((Some(4), Some(2))),
             "the cells it is scaled to"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::natural_size((None, None), 0, Some((25, 30)), Some((3, 2)))]
+    #[case::columns_only((Some(4), None), 0, Some((100, 40)), Some((4, 1)))]
+    #[case::rows_only((None, Some(2)), 0, Some((100, 40)), Some((10, 2)))]
+    #[case::both_given((Some(5), Some(3)), 0, None, Some((5, 3)))]
+    #[case::offset_adds_a_column((None, None), 5, Some((20, 20)), Some((3, 1)))]
+    #[case::unknown_size((None, None), 0, None, None)]
+    fn cells_covered_counts_as_kitty_does(
+        #[case] cells: (Option<u32>, Option<u32>),
+        #[case] offset_x: u32,
+        #[case] size: Option<(u32, u32)>,
+        #[case] expected: Option<(u32, u32)>,
+    ) {
+        // Given a placement scaled to `cells`, `offset_x` pixels into its
+        // cell, of an image `size` pixels.
+        let placement = Placement {
+            cells,
+            offset: (offset_x, 0),
+            ..placement(0, 0)
+        };
+
+        // When counting the cells the cursor moves past.
+        let covered = cells_covered(&placement, size, CELL);
+
+        // Then they are the cells kitty counts.
+        assert_eq!(covered, expected, "cells covered");
+    }
+
+    #[rstest::rstest]
+    fn cells_covered_of_a_huge_scale_gives_no_move() {
+        // Given a placement scaled to the most columns a child can ask for,
+        // of an image as tall as a child can say.
+        let placement = Placement {
+            cells: (Some(u32::MAX), None),
+            ..placement(0, 0)
+        };
+
+        // When counting the cells the cursor moves past.
+        let covered = cells_covered(&placement, Some((1, u32::MAX)), CELL);
+
+        // Then there is no count, since the rows don't fit.
+        assert_eq!(covered, None, "cells covered by a huge scale");
     }
 }

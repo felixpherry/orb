@@ -380,6 +380,10 @@ Entries are added or amended **only with human approval**.
 - (pane) The pane's PTY carries its size in pixels, and orb answers the child's pixel-size (`CSI 14 t`) and cell-size (`CSI 16 t`) queries when it knows its cell size, its foreground query (OSC 10) with the outer terminal's foreground, and its background query (OSC 11) with orb's background.
 - (pane) While orb runs in kitty, pane programs get `TERMINAL_BROWSER_PRESENT=patched` and `TERMINAL_BROWSER_FRAMES=shared`.
 - (pane) orb answers a pane's XTVERSION query with its own name, `orb(<version>)`, and its OSC 4 queries for colours 0–15 with the outer terminal's colours, staying silent for a colour the outer terminal didn't give.
+- (pane) A pane's chunked image upload larger than kitty would take (over about 533 MB of encoded data) is dropped without reaching kitty.
+- (pane) After a pane's program places a kitty image without C=1, orb moves that pane's cursor to the image's last row, right of it, as kitty does, so a shell's next prompt prints below the image.
+- (pane) A pane's images on its main screen scroll with its text, show while the pane is scrolled back, and are freed once they scroll out of its history.
+- (pane) A pane with images on its main screen keeps up to 512 fewer lines of history than other panes.
 - (tui) At start-up orb asks its outer terminal for its name and version, its foreground, background and colours 0–15, and forwards images only when it is kitty, marking them transient from kitty 0.48.
 - (tui) Resizing orb's terminal clears it without deleting kitty images.
 - (pane) A printable key carries its text to a program that asked for it through the kitty keyboard protocol.

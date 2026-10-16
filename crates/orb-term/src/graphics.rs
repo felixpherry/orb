@@ -10,6 +10,12 @@
 //! says ever reaches the child. A pane can stop answering them, which also
 //! drops everything else its child sends about images. Each frame, the placements on the screen the
 //! child shows are worked out inside the pane's content.
+//!
+//! A placement on the main screen moves up with the lines that screen
+//! scrolls into its history, shows while the view is scrolled back, and is
+//! dropped once it leaves the history, its image freed when nothing else
+//! places it. A placement made without `C=1` tells the caller how many cells
+//! to move the cursor past it, as kitty counts them.
 
 mod command;
 mod place;
@@ -32,6 +38,9 @@ static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 const FIRST_ANON: u32 = 0x8000_0000;
 /// The keys that place an image, dropped from every forwarded transmit.
 const PLACEMENT_KEYS: &[u8] = b"pICXYxywhcrzUPQHV";
+/// The most base64 one chunked upload may collect: kitty's own 400 MB
+/// ceiling for an image's data, encoded.
+const UPLOAD_CAP: usize = 400_000_000 / 3 * 4;
 
 /// What a pane's images need this frame: bytes for kitty first, then where
 /// its placements show.
@@ -87,6 +96,8 @@ pub(crate) struct PaneGraphics {
     upload: Option<Upload>,
     /// Bytes for kitty, in the child's order: transmits, frame edits, frees.
     out: Vec<u8>,
+    /// The most one upload may collect; tests shrink it.
+    upload_cap: usize,
 }
 
 /// One of the child's images, as kitty knows it.
@@ -99,14 +110,20 @@ struct Image {
     generation: u32,
     /// Its size in pixels, when the child said.
     px: Option<(u32, u32)>,
+    /// The size the child declared (`s`, `v`) whatever the format; for a
+    /// PNG this is only what the child says, so it moves the cursor but
+    /// never sizes a drawing.
+    declared: Option<(u32, u32)>,
     /// Whether it was sent on the alternate screen.
     alt: bool,
 }
 
 /// Where the child placed an image: the cell its cursor was on, and the
 /// placement's own keys.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Placement {
+    /// Its grid line: 0 is the top of the screen, a negative line is in the
+    /// history. A main-screen placement's line moves as the screen scrolls.
     line: i32,
     col: u16,
     /// Pixels right and down within that cell (`X`, `Y`).
@@ -131,6 +148,8 @@ struct Upload {
     rest: Vec<u8>,
     /// The quietness a later chunk asked for, which replaces the first one's.
     quiet: Option<i64>,
+    /// Past the cap: later chunks are swallowed and nothing runs.
+    too_big: bool,
 }
 
 /// Where the child's cursor was, and on which screen, when a command arrived.
@@ -154,6 +173,7 @@ impl PaneGraphics {
             next_anon: FIRST_ANON,
             upload: None,
             out: Vec::new(),
+            upload_cap: UPLOAD_CAP,
         }
     }
 
@@ -179,35 +199,65 @@ impl PaneGraphics {
 
     /// Applies one command (the bytes between `ESC _ G` and `ESC \`) sent
     /// with the child's cursor at `line`, `col` on the alternate screen when
-    /// `alt`; what the child should hear back goes to `replies`.
+    /// `alt`, in cells of `cell` pixels; what the child should hear back goes
+    /// to `replies`. Returns the columns and rows to move the cursor past a
+    /// placement it made, when the child didn't ask for no move (`C=1`) and
+    /// orb knows the size.
     pub(crate) fn command(
         &mut self,
         body: &[u8],
         line: i32,
         col: u16,
         alt: bool,
+        cell: CellSize,
         replies: &mut Vec<u8>,
-    ) {
-        let Some(mut command) = KittyCommand::parse(body) else {
-            return;
-        };
+    ) -> Option<(u32, u32)> {
+        let (child, placement) = self.apply(body, Cursor { line, col, alt }, replies)?;
+        place::cells_covered(&placement, self.images.get(&child)?.declared, cell)
+    }
+
+    /// Applies one command at the cursor `at`; returns the placement the
+    /// cursor moves past, with its child image id.
+    fn apply(
+        &mut self,
+        body: &[u8],
+        at: Cursor,
+        replies: &mut Vec<u8>,
+    ) -> Option<(u32, Placement)> {
+        let mut command = KittyCommand::parse(body)?;
         let (GraphicsSupport::Kitty { transient }, true) = (self.support, self.answering) else {
             if action(&command) == b'q' {
                 reply(replies, &command, "EINVAL:no graphics");
             }
-            return;
+            return None;
         };
-        let at = Cursor { line, col, alt };
         if let Some(upload) = &mut self.upload
             && continues(&command)
         {
-            upload.quiet = command.int(b'q').or(upload.quiet);
-            command.set(b'q', Value::Int(2));
-            command.write_to(&mut upload.rest);
-            if command.int(b'm') != Some(1) {
-                self.finish(at, transient, replies);
+            if !upload.too_big {
+                upload.quiet = command.int(b'q').or(upload.quiet);
+                command.set(b'q', Value::Int(2));
+                command.write_to(&mut upload.rest);
+                if upload.first.len() + upload.rest.len() > self.upload_cap {
+                    // Dropped as kitty drops it, with the answer kitty gives.
+                    upload.too_big = true;
+                    upload.rest = Vec::new();
+                    if let Some(mut first) = KittyCommand::parse(&upload.first) {
+                        if let Some(quiet) = upload.quiet {
+                            first.set(b'q', Value::Int(quiet));
+                        }
+                        reply(replies, &first, "EFBIG:too much data");
+                    }
+                }
             }
-            return;
+            if command.int(b'm') != Some(1) {
+                if upload.too_big {
+                    self.upload = None;
+                } else {
+                    return self.finish(at, transient, replies);
+                }
+            }
+            return None;
         }
         // Any other command ends a partial upload, as it does in kitty.
         self.upload = None;
@@ -216,29 +266,31 @@ impl PaneGraphics {
                 first: body.to_vec(),
                 rest: Vec::new(),
                 quiet: None,
+                too_big: false,
             });
-            return;
+            return None;
         }
-        self.run(command, &[], at, transient, replies);
+        self.run(command, &[], at, transient, replies)
     }
 
     /// Runs the collected upload as one command, its chunks reaching kitty
     /// together.
-    fn finish(&mut self, at: Cursor, transient: bool, replies: &mut Vec<u8>) {
-        let Some(upload) = self.upload.take() else {
-            return;
-        };
-        let Some(mut command) = KittyCommand::parse(&upload.first) else {
-            return;
-        };
+    fn finish(
+        &mut self,
+        at: Cursor,
+        transient: bool,
+        replies: &mut Vec<u8>,
+    ) -> Option<(u32, Placement)> {
+        let upload = self.upload.take()?;
+        let mut command = KittyCommand::parse(&upload.first)?;
         if let Some(quiet) = upload.quiet {
             command.set(b'q', Value::Int(quiet));
         }
-        self.run(command, &upload.rest, at, transient, replies);
+        self.run(command, &upload.rest, at, transient, replies)
     }
 
     /// Acts on one whole command; `rest` holds its later chunks, ready for
-    /// kitty.
+    /// kitty. Returns the placement the cursor moves past, if any.
     fn run(
         &mut self,
         command: KittyCommand<'_>,
@@ -246,7 +298,7 @@ impl PaneGraphics {
         at: Cursor,
         transient: bool,
         replies: &mut Vec<u8>,
-    ) {
+    ) -> Option<(u32, Placement)> {
         match action(&command) {
             b'q' => {
                 let direct = matches!(command.char(b't'), None | Some(b'd'));
@@ -256,17 +308,25 @@ impl PaneGraphics {
                     "EINVAL:orb answers only direct queries"
                 };
                 reply(replies, &command, answer);
+                None
             }
             b't' | b'T' => self.transmit(command, rest, at, transient, replies),
             b'p' => self.place(&command, at, replies),
-            b'd' => self.delete(&command, at.alt),
-            b'f' | b'a' | b'c' => self.edit(command, rest),
-            _ => {}
+            b'd' => {
+                self.delete(&command, at.alt);
+                None
+            }
+            b'f' | b'a' | b'c' => {
+                self.edit(command, rest);
+                None
+            }
+            _ => None,
         }
     }
 
     /// Sends an image on to kitty under its outer id, unplaced and quiet, and
-    /// remembers where `a=T` placed it.
+    /// remembers where `a=T` placed it; returns that placement when the
+    /// cursor moves past it.
     fn transmit(
         &mut self,
         mut command: KittyCommand<'_>,
@@ -274,20 +334,13 @@ impl PaneGraphics {
         at: Cursor,
         transient: bool,
         replies: &mut Vec<u8>,
-    ) {
+    ) -> Option<(u32, Placement)> {
         let child = match id(&command, b'i') {
             Some(child) => child,
             None => self.anon(),
         };
-        let px = match (
-            command.int(b'f'),
-            uint(&command, b's'),
-            uint(&command, b'v'),
-        ) {
-            (Some(100), _, _) => None,
-            (_, Some(width), Some(height)) => Some((width, height)),
-            _ => None,
-        };
+        let declared = uint(&command, b's').zip(uint(&command, b'v'));
+        let px = declared.filter(|_| command.int(b'f') != Some(100));
         let outer = match self.images.entry(child) {
             Entry::Occupied(entry) => {
                 // Sending an id again deletes its placements in kitty.
@@ -295,6 +348,7 @@ impl PaneGraphics {
                 let image = entry.into_mut();
                 image.generation = image.generation.wrapping_add(1);
                 image.px = px;
+                image.declared = declared;
                 image.alt = at.alt;
                 image.outer
             }
@@ -304,19 +358,15 @@ impl PaneGraphics {
                     outer,
                     generation: 0,
                     px,
+                    declared,
                     alt: at.alt,
                 });
                 outer
             }
         };
-        if action(&command) == b'T' && command.int(b'U') != Some(1) {
-            let placement = match id(&command, b'p') {
-                Some(placement) => placement,
-                None => self.anon(),
-            };
-            self.placements
-                .insert((child, placement), placement_at(&command, at));
-        }
+        let placed = (action(&command) == b'T' && command.int(b'U') != Some(1))
+            .then(|| self.remember(&command, child, at))
+            .flatten();
         reply(replies, &command, "OK");
         command.set(b'a', Value::Char(b't'));
         command.set(b'i', Value::Int(outer.into()));
@@ -327,27 +377,47 @@ impl PaneGraphics {
         }
         command.write_to(&mut self.out);
         self.out.extend_from_slice(rest);
+        placed
     }
 
     /// Places an image the child already sent, replacing the placement with
-    /// the same id.
-    fn place(&mut self, command: &KittyCommand<'_>, at: Cursor, replies: &mut Vec<u8>) {
-        let Some(child) = id(command, b'i') else {
-            return;
-        };
+    /// the same id; returns that placement when the cursor moves past it.
+    fn place(
+        &mut self,
+        command: &KittyCommand<'_>,
+        at: Cursor,
+        replies: &mut Vec<u8>,
+    ) -> Option<(u32, Placement)> {
+        let child = id(command, b'i')?;
         if !self.images.contains_key(&child) {
             reply(replies, command, "ENOENT:no such image");
-            return;
+            return None;
         }
-        if command.int(b'U') != Some(1) {
-            let placement = match id(command, b'p') {
-                Some(placement) => placement,
-                None => self.anon(),
-            };
-            self.placements
-                .insert((child, placement), placement_at(command, at));
-        }
+        let placed = (command.int(b'U') != Some(1))
+            .then(|| self.remember(command, child, at))
+            .flatten();
         reply(replies, command, "OK");
+        placed
+    }
+
+    /// Keeps the placement `command` makes of image `child` at the cursor
+    /// `at`; returns it when the cursor moves past it, which is unless the
+    /// child asked for no move (`C=1`) or placed it relative to another
+    /// (`P`).
+    fn remember(
+        &mut self,
+        command: &KittyCommand<'_>,
+        child: u32,
+        at: Cursor,
+    ) -> Option<(u32, Placement)> {
+        let key = match id(command, b'p') {
+            Some(placement) => placement,
+            None => self.anon(),
+        };
+        let placement = placement_at(command, at);
+        self.placements.insert((child, key), placement);
+        let moves = command.int(b'C') != Some(1) && id(command, b'P').is_none();
+        moves.then_some((child, placement))
     }
 
     /// Deletes placements on the screen the child is on (`d=a`, `d=A`) or of
@@ -400,6 +470,50 @@ impl PaneGraphics {
         self.free_where(|_, image, placed| image.alt == alt && !placed);
     }
 
+    /// Whether the child has placements on the main screen.
+    pub(crate) fn has_main_placements(&self) -> bool {
+        self.placements.values().any(|placement| !placement.alt)
+    }
+
+    /// The main screen scrolled `lines` into its history (negative: back
+    /// out of it), which now holds `history` lines: main-screen placements
+    /// move with it, those above the history are dropped, and images left
+    /// with no placement by that are freed.
+    pub(crate) fn scrolled(&mut self, lines: i32, history: usize) {
+        let top = -i32::try_from(history).unwrap_or(i32::MAX);
+        for placement in self
+            .placements
+            .values_mut()
+            .filter(|placement| !placement.alt)
+        {
+            placement.line = placement.line.saturating_sub(lines);
+        }
+        self.drop_main(|placement| placement.line < top);
+    }
+
+    /// The scroll count was lost: drops every main-screen placement and
+    /// frees images left with none.
+    pub(crate) fn lost_scroll(&mut self) {
+        self.drop_main(|_| true);
+    }
+
+    /// Drops the main-screen placements `doomed` picks, and frees the images
+    /// that leaves with no placement.
+    fn drop_main<F>(&mut self, doomed: F)
+    where
+        F: Fn(&Placement) -> bool,
+    {
+        let mut emptied = Vec::new();
+        self.placements.retain(|&(child, _), placement| {
+            let keep = placement.alt || !doomed(placement);
+            if !keep {
+                emptied.push(child);
+            }
+            keep
+        });
+        self.free_where(|child, _, placed| !placed && emptied.contains(&child));
+    }
+
     /// The child reset the terminal: frees every image.
     pub(crate) fn reset(&mut self) {
         self.upload = None;
@@ -413,8 +527,9 @@ impl PaneGraphics {
 
     /// Takes the bytes waiting for kitty, and works out where the placements
     /// show in `content`, whose cells are `cell` pixels, while the child is
-    /// on the alternate screen when `alt_now`. Nothing shows while the view
-    /// is `display_offset` lines back in the history.
+    /// on the alternate screen when `alt_now`. While the view is
+    /// `display_offset` lines back in the history, the main screen's
+    /// placements show that many lines lower.
     pub(crate) fn frame(
         &mut self,
         content: Rect,
@@ -424,12 +539,17 @@ impl PaneGraphics {
     ) -> GraphicsFrame {
         // The alternate screen has no history, so only the main screen is
         // ever scrolled back.
+        let offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
         let (visible, holes) = self
             .placements
             .iter()
-            .filter(|(_, placement)| placement.alt == alt_now && display_offset == 0)
+            .filter(|(_, placement)| placement.alt == alt_now)
             .filter_map(|(&(child, id), placement)| {
-                place::visible(placement, self.images.get(&child)?, id, content, cell)
+                let shown = Placement {
+                    line: placement.line.saturating_add(offset),
+                    ..*placement
+                };
+                place::visible(&shown, self.images.get(&child)?, id, content, cell)
             })
             .unzip();
         GraphicsFrame {
@@ -572,7 +692,7 @@ mod tests {
     /// screen; returns what the child hears back.
     fn send(graphics: &mut PaneGraphics, body: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
-        graphics.command(body, 0, 0, false, &mut replies);
+        graphics.command(body, 0, 0, false, CellSize::default(), &mut replies);
         replies
     }
 
@@ -727,6 +847,54 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn upload_past_the_cap_sends_nothing_to_kitty() {
+        // Given a pane in kitty that takes uploads of at most 64 bytes.
+        let mut graphics = PaneGraphics::new(KITTY);
+        graphics.upload_cap = 64;
+
+        // When the child sends an upload of more than that, to its last chunk.
+        send(
+            &mut graphics,
+            b"a=T,f=24,s=8,v=8,i=3,q=2,m=1;AAAAAAAAAAAAAAAA",
+        );
+        send(&mut graphics, b"m=1;BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        send(&mut graphics, b"m=1;CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+        send(&mut graphics, b"m=0;DDDD");
+
+        // Then nothing is waiting for kitty.
+        assert!(
+            graphics.take_out().is_empty(),
+            "an upload past the cap stays out of kitty"
+        );
+    }
+
+    #[rstest::rstest]
+    fn chunks_after_a_dropped_upload_start_no_new_upload() {
+        // Given a pane in kitty whose child's upload went past the cap.
+        let mut graphics = PaneGraphics::new(KITTY);
+        graphics.upload_cap = 64;
+        send(
+            &mut graphics,
+            b"a=T,f=24,s=8,v=8,i=3,q=2,m=1;AAAAAAAAAAAAAAAA",
+        );
+        send(
+            &mut graphics,
+            b"m=1;BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        );
+
+        // When its last chunk arrives, then a small transmit.
+        send(&mut graphics, b"m=0;CCCC");
+        send(&mut graphics, b"a=t,f=24,s=1,v=1,i=4,q=2;c21hbGw=");
+
+        // Then only the small transmit reaches kitty.
+        assert_eq!(
+            payloads(&graphics.take_out()),
+            vec![b"c21hbGw=".to_vec()],
+            "what reaches kitty after a dropped upload"
+        );
+    }
+
+    #[rstest::rstest]
     fn query_is_never_forwarded() {
         // Given a pane in kitty.
         let mut graphics = PaneGraphics::new(KITTY);
@@ -810,16 +978,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn scrolled_back_main_screen_hides_placements() {
-        // Given an image the child placed on the main screen.
+    fn scrolled_back_main_screen_shows_placements_lower() {
+        // Given an image the child placed on the main screen's top line.
         let mut graphics = PaneGraphics::new(KITTY);
         send(&mut graphics, PLACED);
 
         // When drawing the pane scrolled three lines back into its history.
         let frame = frame(&mut graphics, 3, false);
 
-        // Then the image doesn't show.
-        assert!(frame.visible.is_empty(), "images don't follow the history");
+        // Then the image shows three lines down.
+        let rows: Vec<_> = frame.visible.iter().map(|visible| visible.at.y).collect();
+        assert_eq!(rows, vec![3], "images follow the history");
     }
 
     #[rstest::rstest]

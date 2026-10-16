@@ -12,7 +12,9 @@
 //! deadline passes and the caller flushes it. Kitty graphics commands are
 //! kept out of the screen and handed to the pane's own image model, at the
 //! cursor the text before them left; its answers go straight back to the
-//! child. User input is encoded for the modes the child currently has on;
+//! child. Images on the main screen scroll with the text, and the cursor
+//! moves past a placed image as kitty moves it, unless the child asked it not
+//! to (`C=1`). User input is encoded for the modes the child currently has on;
 //! pixel mouse reports, and whether they work, are answered and sent as the
 //! child asked.
 //!
@@ -47,6 +49,11 @@ use crate::splitter::{Piece, Splitter};
 
 /// Lines of output a pane keeps above its screen.
 const HISTORY: usize = 10_000;
+/// Lines a pane with main-screen images keeps free in its history. Their
+/// images move by the change in the history's size, which stops counting
+/// once the history is full; trimming it this far before each feed keeps the
+/// count, unless one feed scrolls more than this.
+const TRACK_SLACK: usize = 512;
 /// Lines one wheel notch scrolls, or arrow keys it sends.
 const WHEEL_LINES: i32 = 3;
 /// Presses on one cell closer together than this are a double or triple
@@ -149,6 +156,9 @@ pub(crate) struct Emulator {
     hold: Option<Hold>,
     /// The child's kitty images.
     graphics: PaneGraphics,
+    /// The main screen's history size when last seen, to count the lines it
+    /// scrolled since.
+    main_history: usize,
     /// Whether the child turned pixel mouse reports (1016) on.
     pixel_mouse: bool,
     /// The cell of the last mouse event sent on to the child, so motion
@@ -228,6 +238,7 @@ impl Emulator {
             splitter: Splitter::default(),
             hold: None,
             graphics: PaneGraphics::new(graphics),
+            main_history: 0,
             pixel_mouse: false,
             last_cell: None,
         }
@@ -257,16 +268,7 @@ impl Emulator {
     /// Acts on one piece of the child's output that isn't held.
     fn apply(&mut self, piece: Piece<'_>, now: Instant) {
         match piece {
-            // ponytail: a switch is seen only when one run of text ends on
-            // the other screen; leaving and re-entering within one run keeps
-            // the alternate screen's images until the next switch.
-            Piece::Text(text) => {
-                let alt = self.alt_screen();
-                self.parser.advance(&mut self.term, &text);
-                if self.alt_screen() != alt {
-                    self.graphics.switched_screen();
-                }
-            }
+            Piece::Text(text) => self.advance(&text),
             Piece::SyncStart => self.hold = Some(Hold::new(now + SYNC_TIMEOUT)),
             // Ends an update the parser started from a combined form
             // (`CSI ? 2026 ; 1049 h`), which reaches it unchanged.
@@ -279,14 +281,18 @@ impl Emulator {
                 let cursor = self.term.grid().cursor.point;
                 let column = u16::try_from(cursor.column.0).unwrap_or(u16::MAX);
                 let mut replies = Vec::new();
-                self.graphics.command(
+                let covered = self.graphics.command(
                     &body,
                     cursor.line.0,
                     column,
                     self.alt_screen(),
+                    lock(&self.size).cell,
                     &mut replies,
                 );
                 self.write(&replies);
+                if let Some(covered) = covered {
+                    self.move_past(cursor.column.0, covered);
+                }
             }
             Piece::ClearedScreen => self.graphics.cleared_screen(self.alt_screen()),
             Piece::Reset => {
@@ -313,6 +319,79 @@ impl Emulator {
             }
             Piece::VersionQuery => self.write(VERSION_REPLY.as_bytes()),
         }
+    }
+
+    /// Feeds `bytes` to the parser. A switch of screens frees the alternate
+    /// screen's images; on the main screen, placements move with the lines
+    /// the feed scrolled into the history.
+    fn advance(&mut self, bytes: &[u8]) {
+        let alt = self.alt_screen();
+        self.before_main_change();
+        self.parser.advance(&mut self.term, bytes);
+        // ponytail: a switch is seen only when one run of text ends on the
+        // other screen; leaving and re-entering within one run keeps the
+        // alternate screen's images until the next switch.
+        if self.alt_screen() != alt {
+            self.graphics.switched_screen();
+        }
+        self.after_main_change();
+    }
+
+    /// Moves the cursor, at `column`, past a placed image covering
+    /// `columns` × `rows` cells as kitty does: down to the image's last row
+    /// (scrolling at the bottom), then right of it, or to the next line's
+    /// start when that is past the last column.
+    fn move_past(&mut self, column: usize, (columns, rows): (u32, u32)) {
+        let down =
+            usize::try_from(rows.saturating_sub(1)).map_or(HISTORY, |down| down.min(HISTORY));
+        let mut bytes = b"\n".repeat(down);
+        let right = match usize::try_from(columns).unwrap_or(usize::MAX) {
+            0 => Vec::new(),
+            columns if column.saturating_add(columns) >= self.term.columns() => b"\r\n".to_vec(),
+            columns => format!("\x1b[{columns}C").into_bytes(),
+        };
+        bytes.extend_from_slice(&right);
+        self.advance(&bytes);
+    }
+
+    /// Before the main screen changes: a pane with main-screen placements
+    /// trims its history to leave [`TRACK_SLACK`] lines free, and the
+    /// history's size is noted.
+    fn before_main_change(&mut self) {
+        if self.alt_screen() {
+            return;
+        }
+        if self.graphics.has_main_placements() && self.term.history_size() > HISTORY - TRACK_SLACK {
+            let grid = self.term.grid_mut();
+            grid.update_history(HISTORY - TRACK_SLACK);
+            grid.update_history(HISTORY);
+        }
+        self.main_history = self.term.history_size();
+    }
+
+    /// After the main screen changed: its placements move by the lines it
+    /// scrolled into its history, or are dropped when a full history lost
+    /// the count.
+    fn after_main_change(&mut self) {
+        if self.alt_screen() {
+            return;
+        }
+        let history = self.term.history_size();
+        // ponytail: only the history's size is counted, so lines scrolled
+        // inside a scroll region (DECSTBM) and a resize that reflows to a new
+        // width leave placements where they were; count region scrolls and
+        // reflow if a main-screen program with images ever needs it.
+        if self.graphics.has_main_placements() {
+            if history >= HISTORY {
+                self.graphics.lost_scroll();
+            } else {
+                // Both sizes are at most HISTORY lines.
+                let lines = i32::try_from(history).unwrap_or(i32::MAX)
+                    - i32::try_from(self.main_history).unwrap_or(i32::MAX);
+                self.graphics.scrolled(lines, history);
+            }
+        }
+        self.main_history = history;
     }
 
     /// Whether the child is on its alternate screen.
@@ -352,7 +431,9 @@ impl Emulator {
     /// Reflows the screen to `size`.
     pub(crate) fn resize(&mut self, size: PaneSize) {
         *lock(&self.size) = size;
+        self.before_main_change();
         self.term.resize(size);
+        self.after_main_change();
     }
 
     /// When the pending synchronized update must be shown even if the child
@@ -1766,6 +1847,190 @@ mod tests {
             "first {:?}, second {:?}",
             String::from_utf8_lossy(&first),
             String::from_utf8_lossy(&second)
+        );
+    }
+
+    /// An image of 25×30 pixels (3 columns by 2 rows of 10×20 cells) the
+    /// child sends and places at its cursor without `C=1`, as a shell's
+    /// `kitten icat` does.
+    const SHELL_IMAGE: &[u8] = b"\x1b_Ga=T,f=32,s=25,v=30,t=s,i=1,p=1,q=2;bmFtZQ==\x1b\\";
+
+    /// The outer cells where the emulator's placements show in [`AREA`].
+    fn placed_at(emulator: &mut Emulator) -> Vec<Position> {
+        let mut buf = Buffer::empty(AREA);
+        let (_, frame) = emulator.render_with_graphics(AREA, &mut buf);
+        frame.visible.iter().map(|visible| visible.at).collect()
+    }
+
+    /// Where the emulator's cursor shows in [`AREA`].
+    fn cursor(emulator: &Emulator) -> Option<Position> {
+        emulator.render(AREA, &mut Buffer::empty(AREA))
+    }
+
+    #[rstest::rstest]
+    fn placed_image_moves_the_cursor_past_it() {
+        // Given a pane in kitty.
+        let (mut emulator, _) = kitty_emulator();
+
+        // When the child places a 3×2-cell image at the top left.
+        emulator.feed(SHELL_IMAGE);
+
+        // Then the cursor is on the image's last row, right of it.
+        assert_eq!(
+            cursor(&emulator),
+            Some(Position::new(3, 1)),
+            "the cursor after a placed image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn image_placed_with_c1_leaves_the_cursor() {
+        // Given a pane in kitty.
+        let (mut emulator, _) = kitty_emulator();
+
+        // When the child places an image asking the cursor not to move.
+        emulator.feed(PLACED_IMAGE);
+
+        // Then the cursor stays at the top left.
+        assert_eq!(
+            cursor(&emulator),
+            Some(Position::new(0, 0)),
+            "the cursor after a C=1 image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn png_image_moves_the_cursor_by_its_declared_size() {
+        // Given a pane in kitty.
+        let (mut emulator, _) = kitty_emulator();
+
+        // When the child places a PNG it declared as 25×30 pixels.
+        emulator.feed(b"\x1b_Ga=T,f=100,s=25,v=30,i=1,p=1,q=2;iVBORw0KGgo=\x1b\\");
+
+        // Then the cursor is on the image's last row, right of it.
+        assert_eq!(
+            cursor(&emulator),
+            Some(Position::new(3, 1)),
+            "the cursor after a PNG image"
+        );
+    }
+
+    #[rstest::rstest]
+    fn image_on_the_bottom_line_scrolls_the_screen_to_fit() {
+        // Given a pane in kitty whose cursor is on its bottom row.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[5;1H");
+
+        // When the child places a 2-row image there.
+        emulator.feed(SHELL_IMAGE);
+
+        // Then the screen scrolled one line and the image shows from row 3.
+        assert_eq!(
+            placed_at(&mut emulator),
+            vec![Position::new(0, 3)],
+            "the image after the screen scrolled to fit it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shell_image_scrolls_up_with_the_text() {
+        // Given a pane in kitty with an image on row 2.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[3;1H");
+        emulator.feed(SHELL_IMAGE);
+
+        // When two lines scroll in at the bottom.
+        emulator.feed(b"\x1b[5;1H\n\n");
+
+        // Then the image shows on row 0.
+        assert_eq!(
+            placed_at(&mut emulator),
+            vec![Position::new(0, 0)],
+            "the image after two lines scrolled"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shell_image_shows_while_the_view_is_scrolled_back() {
+        // Given a pane in kitty whose top-row image scrolled six lines off
+        // the screen.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(SHELL_IMAGE);
+        emulator.feed(b"\x1b[5;1H\n\n\n\n\n\n");
+
+        // When the wheel scrolls the view six lines back.
+        emulator.wheel(wheel(MouseEventKind::ScrollUp), AREA, None);
+        emulator.wheel(wheel(MouseEventKind::ScrollUp), AREA, None);
+
+        // Then the image shows on the top row again.
+        assert_eq!(
+            placed_at(&mut emulator),
+            vec![Position::new(0, 0)],
+            "the image in the scrolled-back view"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shell_image_past_the_history_is_freed() {
+        // Given a pane in kitty with an image whose transmit went out.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(SHELL_IMAGE);
+        let outer = emulator.live_images();
+        emulator.take_graphics_output();
+
+        // When more lines than the history holds scroll in at once.
+        emulator.feed(&b"\n".repeat(10_100));
+
+        // Then kitty is told to free the image.
+        let expected = outer
+            .iter()
+            .map(|outer| format!("\x1b_Ga=d,d=I,i={outer},q=2\x1b\\"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(
+            String::from_utf8_lossy(&emulator.take_graphics_output()),
+            expected,
+            "the free for an image past the history"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shell_image_survives_a_full_history() {
+        // Given a pane in kitty whose history is full, with an image on
+        // row 2.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(&b"\n".repeat(10_100));
+        emulator.feed(b"\x1b[3;1H");
+        emulator.feed(SHELL_IMAGE);
+
+        // When two lines scroll in at the bottom, one feed each.
+        emulator.feed(b"\x1b[5;1H\n");
+        emulator.feed(b"\n");
+
+        // Then the image shows on row 0.
+        assert_eq!(
+            placed_at(&mut emulator),
+            vec![Position::new(0, 0)],
+            "the image after two lines scrolled into a full history"
+        );
+    }
+
+    #[rstest::rstest]
+    fn alternate_screen_image_stays_put_while_its_text_scrolls() {
+        // Given a pane in kitty with an image on the alternate screen's top
+        // row, placed as terminal-browser places them.
+        let (mut emulator, _) = kitty_emulator();
+        emulator.feed(b"\x1b[?1049h");
+        emulator.feed(PLACED_IMAGE);
+
+        // When two lines scroll in at the alternate screen's bottom.
+        emulator.feed(b"\x1b[5;1H\n\n");
+
+        // Then the image still shows on the top row.
+        assert_eq!(
+            placed_at(&mut emulator),
+            vec![Position::new(0, 0)],
+            "the alternate screen's image after its text scrolled"
         );
     }
 
