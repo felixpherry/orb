@@ -90,7 +90,7 @@ SUBCOMMAND = re.compile(r"^(claude|zmx|git|pi) ([a-z][a-z-]+)")
 
 def in_code(*rg_args):
     result = subprocess.run(
-        ["rg", "-q", *rg_args, "--", *CODE_DIRS], cwd=ROOT, capture_output=True
+        ["rg", "-q", *rg_args, "--", *CODE_DIRS, "install.sh"], cwd=ROOT, capture_output=True
     )
     if result.returncode > 1:
         sys.exit(f"lint-rules: rg failed: {result.stderr.decode().strip()}")
