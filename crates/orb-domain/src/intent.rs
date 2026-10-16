@@ -155,7 +155,8 @@ pub enum Intent {
     Rename,
     /// Move the keys to the sidebar's input box to search agent titles.
     Search,
-    /// Un-settle the selected session, or ask to settle it.
+    /// Un-settle the selected session, or ask to settle it; in a pane, ask
+    /// to settle the shown session.
     ToggleSettle,
     /// Ask to delete the selected session.
     Delete,
@@ -246,8 +247,9 @@ impl fmt::Display for Intent {
             Self::MoveFocus(NavDirection::Right) => "focus right",
             Self::PickerNext | Self::PickerWheelNext => "next item",
             Self::PickerPrev | Self::PickerWheelPrev => "previous item",
-            Self::ToggleSidebar | Self::LeavePane => "sidebar",
-            Self::FocusPanes => "panes",
+            Self::ToggleSidebar => "toggle sidebar",
+            Self::LeavePane => "go to sidebar",
+            Self::FocusPanes => "go to panes",
             Self::StackPane => "stack",
             Self::MoveFocus(NavDirection::Left) => "focus left",
             Self::MoveFocus(NavDirection::Up) => "focus up",
@@ -275,7 +277,7 @@ impl fmt::Display for Intent {
             Self::CloseTab => "close tab",
             Self::RenameTab => "rename tab",
             Self::RenamePane => "rename pane",
-            Self::GoToTab(_) => "tab",
+            Self::GoToTab(n) => return write!(f, "tab {n}"),
             Self::NextSwapLayout => "next layout",
             Self::PreviousSwapLayout => "previous layout",
             Self::MoveTabLeft => "move tab left",
@@ -293,7 +295,7 @@ impl fmt::Display for Intent {
             Self::NewColony => "new colony",
             Self::OpenSessionPicker => "sessions",
             Self::OpenColonists | Self::ToggleColonists => "colonists",
-            Self::OpenWorktreePicker => "worktrees",
+            Self::OpenWorktreePicker => "all worktrees",
             Self::OpenProjects => "projects",
             Self::OpenWorlds => "worlds",
             Self::OpenSearch => "grep",
@@ -310,7 +312,7 @@ impl fmt::Display for Intent {
             Self::Unfold => "open",
             Self::Fold => "close",
             Self::AddProject => "add project",
-            Self::ChangeWorkspace => "workspace",
+            Self::ChangeWorkspace => "session's worktree",
             Self::SwitchBranch => "branch",
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
@@ -352,7 +354,6 @@ mod tests {
     #[case(Intent::CloseTab, "close tab")]
     #[case(Intent::RenameTab, "rename tab")]
     #[case(Intent::RenamePane, "rename pane")]
-    #[case(Intent::GoToTab(3), "tab")]
     #[case(Intent::NextSwapLayout, "next layout")]
     #[case(Intent::PreviousSwapLayout, "previous layout")]
     #[case(Intent::MoveTabLeft, "move tab left")]
@@ -381,13 +382,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn open_worktree_picker_displays_as_worktrees() {
-        // Given / When / Then: which-key labels OpenWorktreePicker "worktrees".
-        assert_eq!(
-            Intent::OpenWorktreePicker.to_string(),
-            "worktrees",
-            "which-key label"
-        );
+    #[case(Intent::ToggleSidebar, "toggle sidebar")]
+    #[case(Intent::LeavePane, "go to sidebar")]
+    #[case(Intent::FocusPanes, "go to panes")]
+    #[case(Intent::GoToTab(1), "tab 1")]
+    #[case(Intent::GoToTab(9), "tab 9")]
+    #[case(Intent::ChangeWorkspace, "session's worktree")]
+    #[case(Intent::OpenWorktreePicker, "all worktrees")]
+    fn navigation_intents_display_what_they_do(#[case] intent: Intent, #[case] expected: &str) {
+        // Given / When / Then: which-key names where the intent goes or what
+        // it acts on.
+        assert_eq!(intent.to_string(), expected, "which-key label");
     }
 
     #[rstest::rstest]

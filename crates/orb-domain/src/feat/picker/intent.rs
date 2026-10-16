@@ -8,7 +8,7 @@ use crate::command::{SearchCommand, SessionsCommand, Workspace, WorktreesCommand
 use crate::feat::git::intent::{
     change_workspace, pick_branch, pick_move_workspace, pick_new_workspace,
 };
-use crate::feat::pane::intent::show_pane;
+use crate::feat::pane::intent::{leave_pane, show_pane};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{
     PickTarget, PickerKind, PickerState, SessionFilter, session_items, worktree_items,
@@ -487,7 +487,8 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
             }
         }
         Some(&PickerKind::SettleSession { session }) => {
-            match close_picker(state).as_ref().and_then(PickerState::selected) {
+            let from_pane = returns_to_pane(state);
+            let commands = match close_picker(state).as_ref().and_then(PickerState::selected) {
                 Some(PickerItem::Confirm(true) | PickerItem::Covers { colonists: false }) => {
                     settle_session(state, session, false)
                 }
@@ -495,6 +496,13 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
                     settle_session(state, session, true)
                 }
                 _ => vec![],
+            };
+            // A settle asked for from a pane leaves the keys in the sidebar,
+            // as a settle from the sidebar does.
+            if from_pane && !commands.is_empty() {
+                commands.into_iter().chain(leave_pane(state)).collect()
+            } else {
+                commands
             }
         }
         Some(&PickerKind::DeleteSession { session, .. }) => {
@@ -710,6 +718,11 @@ fn preview_command(state: &mut AppState) -> Vec<Command> {
             vec![]
         }
     }
+}
+
+/// Whether the open picker gives the keys back to a pane when it closes.
+fn returns_to_pane(state: &AppState) -> bool {
+    state.picker.as_ref().map(PickerState::return_to) == Some(Focus::Pane)
 }
 
 /// Closes the picker and gives the keys back to where it was opened from.

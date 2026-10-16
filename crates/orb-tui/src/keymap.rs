@@ -7,10 +7,11 @@
 //! program, and Ctrl+[ must never match a plain Esc. `<C-g>` is the
 //! which-key leader in both; its popup lists only the keys that do something
 //! for the selection (`<C-g> w`/`<C-g> b` not on Incognito sessions or
-//! colonies, `<C-g> p`, `<C-g> <C-g>` and `<C-g> h` only in a pane,
+//! colonies, `<C-g> p`, `<C-g> <C-g>`, `<C-g> h` and `<C-g> s` only in a pane,
 //! `<C-g> t` only with a session selected and its `b` only in a pane, `<C-g>
 //! f` and `<C-g> l` only in the sidebar); `<C-g> h` moves the keys to the
-//! sidebar, `<C-g> l` into the panes, `<C-g> e` hides or shows the sidebar,
+//! sidebar, `<C-g> l` into the panes, `<C-g> s` settles the shown session
+//! after the sidebar's settle confirm, `<C-g> e` hides or shows the sidebar,
 //! `<C-g> q` quits, `<C-g> c` starts a colony and `<C-g> C` opens the
 //! worlds screen. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
@@ -261,6 +262,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         |s| s.side == Side::Pane,
         &[
             ("<leader>h", Intent::LeavePane, Navigation),
+            ("<leader>s", Intent::ToggleSettle, Sessions),
             ("<leader>pd", Intent::SplitPane(Split::Down), Navigation),
             ("<leader>pr", Intent::SplitPane(Split::Right), Navigation),
             ("<leader>ps", Intent::StackPane, Navigation),
@@ -1728,8 +1730,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_s_is_unbound(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
-        // Given `<C-g>` pressed in `scope`.
+    fn leader_s_is_unbound_in_the_sidebar() {
+        // Given `<C-g>` pressed in the sidebar.
+        let scope = Scope::SIDEBAR;
         let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, LEADER);
 
@@ -2004,6 +2007,8 @@ mod tests {
     #[case(Scope::SIDEBAR, "q", Intent::Quit)]
     #[case(Scope::SIDEBAR_EMPTY, "q", Intent::Quit)]
     #[case(Scope::PANE, "h", Intent::LeavePane)]
+    #[case(Scope::PANE, "s", Intent::ToggleSettle)]
+    #[case(Scope::PANE_COLONY, "s", Intent::ToggleSettle)]
     #[case(Scope::PANE_INCOGNITO, "h", Intent::LeavePane)]
     #[case(Scope::SIDEBAR, "l", Intent::FocusPanes)]
     #[case(Scope::SIDEBAR_EMPTY, "l", Intent::FocusPanes)]
@@ -2043,13 +2048,13 @@ mod tests {
     #[case(Scope::SIDEBAR, "/ C P Space W b c e f i l n q t w")]
     #[case(Scope::SIDEBAR_EMPTY, "/ C P Space W c e f i l n q")]
     #[case(Scope::SIDEBAR_INCOGNITO, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::PANE, "/ <C-g> C P Space W b c e h i m n p q r t w")]
-    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::PANE, "/ <C-g> C P Space W b c e h i m n p q r s t w")]
+    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W c e h i m n p q r s t")]
     #[case(Scope::SIDEBAR_AGENT, "/ C P Space W b c e f i l n q t w")]
     #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ C P Space W c e f i l n q t")]
     #[case(Scope::SIDEBAR_COLONY, ", / C P Space W c e f i l n q t")]
     #[case(Scope::SIDEBAR_AGENT_COLONY, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W c e h i m n p q r t")]
+    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W c e h i m n p q r s t")]
     #[case(Scope::SIDEBAR_COLONISTS, ", / C P Space W c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.

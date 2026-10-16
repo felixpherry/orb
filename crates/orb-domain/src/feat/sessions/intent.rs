@@ -78,8 +78,16 @@ pub(crate) fn toggle_pin(state: &mut AppState) -> Vec<Command> {
 }
 
 /// `s`: un-settles a settled session at once, or opens the settle confirm
-/// for an unsettled one.
+/// for an unsettled one. `<C-g> s` in a pane first puts the cursor on the
+/// shown session's card, so the confirm asks about it; with nothing shown it
+/// does nothing.
 pub(crate) fn toggle_settle(state: &mut AppState) -> Vec<Command> {
+    if state.focus == Focus::Pane {
+        let Some(shown) = state.shown_session() else {
+            return vec![];
+        };
+        state.sessions.cursor = Some(SidebarItem::Session(shown));
+    }
     match (
         validate_toggle_settle(state),
         state.sessions.selected_session(),
@@ -443,7 +451,7 @@ mod tests {
         agent, at, colony_with_colonists, incognito, on_agent_in_another_tab, settle, state_at,
         state_with, stopped,
     };
-    use crate::{AppState, Command, Intent, IntentHandler};
+    use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
     #[rstest::rstest]
     fn l_on_the_shelf_opens_it() {
@@ -639,6 +647,109 @@ mod tests {
             picker_rows(&state),
             [PickerItem::Confirm(false), PickerItem::Confirm(true)],
             "s without colonists should offer No and Yes"
+        );
+    }
+
+    /// Sessions 1 and 2 with idle agents 1 and 2, the sidebar cursor on
+    /// session 2, and session 1 attached, active and shown with the keys in
+    /// its pane.
+    fn in_session_1s_pane() -> AppState {
+        let mut state = AppState {
+            focus: Focus::Pane,
+            attached: [SessionId(1)].into(),
+            ..state_with(
+                vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+                2,
+            )
+        };
+        state.sessions.enter(SessionId(1));
+        state
+    }
+
+    #[rstest::rstest]
+    fn settle_key_in_a_pane_opens_the_shown_sessions_confirm() {
+        // Given the keys in session 1's pane and the sidebar cursor on
+        // session 2.
+        let mut state = in_session_1s_pane();
+
+        // When handling ToggleSettle (`<C-g> s`).
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then session 1's settle confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::SettleSession {
+                    session: SessionId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "<C-g> s in a pane should ask to settle the session on screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_key_in_a_pane_moves_the_cursor_to_the_shown_card() {
+        // Given the keys in session 1's pane and the sidebar cursor on
+        // session 2.
+        let mut state = in_session_1s_pane();
+
+        // When handling ToggleSettle (`<C-g> s`).
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the cursor is on session 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(1))),
+            "the confirm's own cursor check needs the cursor on the shown card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_key_in_a_pane_of_a_colony_offers_three_rows() {
+        // Given the keys in colony 1's pane, which has a colonist with its
+        // own.
+        let mut state = AppState {
+            focus: Focus::Pane,
+            attached: [SessionId(1)].into(),
+            ..colony_with_colonists([AgentStatus::Idle; 3])
+        };
+        state.sessions.enter(SessionId(1));
+
+        // When handling ToggleSettle (`<C-g> s`).
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the confirm offers No, Colony only and With colonists.
+        assert_eq!(
+            picker_rows(&state),
+            [
+                PickerItem::Confirm(false),
+                PickerItem::Covers { colonists: false },
+                PickerItem::Covers { colonists: true },
+            ],
+            "<C-g> s on a colony with colonists should offer three rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_key_in_a_pane_with_nothing_shown_opens_nothing() {
+        // Given the keys in a pane with no session shown, and the sidebar
+        // cursor on session 2.
+        let mut state = AppState {
+            focus: Focus::Pane,
+            ..state_with(
+                vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+                2,
+            )
+        };
+
+        // When handling ToggleSettle (`<C-g> s`).
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then no confirm opens.
+        assert!(
+            state.picker.is_none(),
+            "<C-g> s with nothing shown should not ask about the sidebar's session"
         );
     }
 

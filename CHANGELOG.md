@@ -4,6 +4,16 @@ All notable changes to orb are written here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and orb follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `<C-g> s` in a pane settles the session on screen, after the same confirm as the sidebar's `s`.
+
+### Changed
+
+- Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
+
 ## [0.1.0] - 2026-10-16
 
 The first release.

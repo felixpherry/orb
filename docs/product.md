@@ -110,6 +110,7 @@ Full key table:
 | `<C-[>` / `<C-]>` | Jump list back / forward |
 | `<C-g> h` / `<C-g> l` | In a pane, keys to the sidebar (showing it) / in the sidebar, keys into the shown session's panes |
 | `<C-g> e` | Hide/show the sidebar |
+| `<C-g> s` | In a pane, settle the shown session: the cursor moves to its card, then the settle confirm; a settle puts the keys in the sidebar (showing it), `No` leaves them in the pane |
 | `<C-g> q` | Quit orb |
 | `<C-g> p d/r/s/f/x/c/w/e/i` | Pane: split down, split right, stack, zoom, close, rename, show/hide floats, pane to float / float to tab, pin float |
 | `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the pane out to a new tab (in a pane), go to N |
@@ -131,7 +132,7 @@ Full key table:
 - `<C-g> <C-g>` sends Ctrl g to the focused pane, which Claude uses to open the prompt in `$EDITOR`.
 - `<C-[>` never matches a plain Esc: under kitty's disambiguate flag Ctrl+[ arrives apart from Esc. The legacy `<C-]>` byte reads as Ctrl+5 and isn't matched (research §21).
 - In a pane, a key that doesn't continue a pending `<C-g>` sequence is swallowed, and Esc closes the popup.
-- Keys are bound by what's selected, so which-key never lists a key that does nothing there: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony (its card, agent rows or colonists row, or its pane); `+pane` and `<C-g> <C-g>` in panes only; `<C-g> f` in the sidebar only; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, none of them on a colonists row. In a pane they follow the session shown, not the sidebar's cursor.
+- Keys are bound by what's selected, so which-key never lists a key that does nothing there: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony (its card, agent rows or colonists row, or its pane); `+pane`, `<C-g> <C-g>` and `<C-g> s` in panes only; `<C-g> f` in the sidebar only; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, none of them on a colonists row. In a pane they follow the session shown, not the sidebar's cursor.
 - `<C-g> q` quits orb from the sidebar or a pane; every pane keeps running under zmx. There is no `:` command line (dropped in M9; see Backlog).
 - **Look** (LazyVim's default which-key, the helix preset, in tokyonight-moon): a rounded `#589ed7` box on `bg_dark` in the bottom-right corner, sitting on the mode line, as tall as its rows (cut off when the screen is shorter); the pending keys in the top border in orange (`<C-g>` for the leader); one `key ➜ icon desc` row per next key (key cyan and right-aligned, `➜` dim, a Nerd Font icon in its own colour, the description magenta, a group as blue `+name`) in which-key's order (letters and digits before symbols, lowercase before its capital); `esc close  ⌫ back` on the last row.
 
@@ -186,7 +187,7 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 ### Sidebar & settle lifecycle (T3 semantics, MVP subset)
 
 - Sections, in one list across projects: **Pinned** (newest pin first), **Active** (newest of created or un-settled first), **Settled** (collapsible shelf at the bottom, most recently settled first). Only the shelf has a visible header. A selected settled session stays visible while the shelf is collapsed.
-- Manual settle / un-settle / pin (`s`, `p`). `s` asks `Settle <name>?` and `d` asks `Delete <name>?` (`Delete <name> and its folder?` for a colony in a fresh world), with `No` selected; `Esc` or `No` does nothing. Un-settling needs no confirm. A session with unsettled colonists asks `No` · `Colony only` · `With colonists` instead, with `No` selected; `With colonists` covers every unsettled session under it, `Colony only` just the session.
+- Manual settle / un-settle / pin (`s`, `p`). `s`, or `<C-g> s` from a pane on the session it shows, asks `Settle <name>?` and `d` asks `Delete <name>?` (`Delete <name> and its folder?` for a colony in a fresh world), with `No` selected; `Esc` or `No` does nothing. Un-settling needs no confirm. A session with unsettled colonists asks `No` · `Colony only` · `With colonists` instead, with `No` selected; `With colonists` covers every unsettled session under it, `Colony only` just the session.
 - A manual settle is refused with `Can't settle while a session is working` while any agent pane has a turn underway, and removes the pin. Pinning a settled session un-settles it. Settling `With colonists` is refused with `Can't settle while a colonist is working` while any of them has a turn underway, and nothing settles.
 - A settled colonist leaves its colony for the Settled shelf. While a colony is settled, its unsettled colonists show at the top level, and they go back under it when it's un-settled.
 - Activity in an agent pane (a turn running, approval/input requested) **un-settles** its session.

@@ -1010,6 +1010,115 @@ fn settle_confirm_returns_settle_session() {
     );
 }
 
+/// Sessions 1 and 2 with idle agents 1 and 2, session 1 attached, active
+/// and shown with the keys in its pane, the sidebar cursor on session 2,
+/// and `answer` highlighted in the settle confirm `<C-g> s` opened.
+fn settling_from_a_pane(answer: bool) -> AppState {
+    let mut state = AppState {
+        focus: Focus::Pane,
+        attached: [SessionId(1)].into(),
+        ..state_with(
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+            2,
+        )
+    };
+    state.sessions.enter(SessionId(1));
+    IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+    highlight(&mut state, &PickerItem::Confirm(answer));
+    state
+}
+
+#[rstest::rstest]
+fn yes_on_a_settle_asked_from_a_pane_settles_the_shown_session() {
+    // Given Yes highlighted in the confirm `<C-g> s` opened in session 1's
+    // pane.
+    let mut state = settling_from_a_pane(true);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the sessions actor is asked to settle session 1.
+    assert!(
+        commands.contains(&Command::Sessions(SessionsCommand::SettleSession {
+            session: SessionId(1),
+            with_colonists: false,
+        })),
+        "Yes should settle the session that was on screen, got {commands:?}"
+    );
+}
+
+#[rstest::rstest]
+fn yes_on_a_settle_asked_from_a_pane_moves_the_keys_to_the_sidebar() {
+    // Given Yes highlighted in the confirm `<C-g> s` opened in session 1's
+    // pane.
+    let mut state = settling_from_a_pane(true);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the keys are in the sidebar.
+    assert_eq!(
+        state.focus,
+        Focus::Sidebar,
+        "a settle from a pane should leave the keys where a sidebar settle does"
+    );
+}
+
+#[rstest::rstest]
+fn yes_on_a_settle_asked_from_a_pane_leaves_the_cursor_on_the_next_card() {
+    // Given Yes highlighted in the confirm `<C-g> s` opened in session 1's
+    // pane, session 2 listed above it.
+    let mut state = settling_from_a_pane(true);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the cursor is on session 2's card, the card the settle moved to.
+    assert_eq!(
+        state.sessions.cursor,
+        Some(SidebarItem::Session(SessionId(2))),
+        "the keys should land on the card the cursor moved to"
+    );
+}
+
+#[rstest::rstest]
+fn no_on_a_settle_asked_from_a_pane_gives_the_keys_back_to_the_pane() {
+    // Given No highlighted in the confirm `<C-g> s` opened in session 1's
+    // pane.
+    let mut state = settling_from_a_pane(false);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the keys are back in the pane.
+    assert_eq!(
+        state.focus,
+        Focus::Pane,
+        "No changes nothing, so the keys go back where they were"
+    );
+}
+
+#[rstest::rstest]
+fn a_refused_settle_asked_from_a_pane_keeps_the_keys_in_the_pane() {
+    // Given Yes highlighted in the confirm `<C-g> s` opened in session 1's
+    // pane, and a turn that started in it meanwhile.
+    let mut state = settling_from_a_pane(true);
+    poll(
+        &mut state,
+        &[agent(1, AgentStatus::Working), agent(2, AgentStatus::Idle)],
+    );
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the keys stay in the pane.
+    assert_eq!(
+        state.focus,
+        Focus::Pane,
+        "a refused settle changes nothing, so the keys go back to the pane"
+    );
+}
+
 /// Colony 1 with colonist 2 and its colonist 3 (agents `statuses`), all
 /// attached, with `colonists`' answer highlighted in 1's settle confirm.
 fn settling_colony(statuses: [AgentStatus; 3], colonists: bool) -> AppState {

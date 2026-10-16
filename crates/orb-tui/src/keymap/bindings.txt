@@ -6,29 +6,29 @@
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
-<C-g> w -> ChangeWorkspace: workspace
+<C-g> w -> ChangeWorkspace: session's worktree
 <C-u> -> SelectHalfPageUp: half page up
 Enter -> Attach: attach
 G -> SelectLast: bottom
@@ -52,24 +52,24 @@ s -> ToggleSettle: settle
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
@@ -97,24 +97,24 @@ s -> ToggleSettle: settle
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
@@ -141,29 +141,29 @@ s -> ToggleSettle: settle
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
-<C-g> w -> ChangeWorkspace: workspace
+<C-g> w -> ChangeWorkspace: session's worktree
 <C-u> -> SelectHalfPageUp: half page up
 Enter -> Attach: attach
 G -> SelectLast: bottom
@@ -185,24 +185,24 @@ r -> Rename: rename
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
@@ -228,24 +228,24 @@ r -> Rename: rename
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
@@ -271,12 +271,12 @@ r -> Rename: rename
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
@@ -298,12 +298,12 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
@@ -325,12 +325,12 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
@@ -352,12 +352,12 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
 <C-g> i -> NewIncognito: incognito
-<C-g> l -> FocusPanes: panes
+<C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
@@ -378,11 +378,11 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
-<C-g> h -> LeavePane: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
+<C-g> h -> LeavePane: go to sidebar
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
@@ -398,21 +398,22 @@ l -> Unfold: open
 <C-g> p x -> ClosePane: close pane
 <C-g> q -> Quit: quit
 <C-g> r -> EnterPaneMode(Resize): resize mode
+<C-g> s -> ToggleSettle: settle
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t b -> BreakPane: break pane
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
-<C-g> w -> ChangeWorkspace: workspace
+<C-g> w -> ChangeWorkspace: session's worktree
 
 ## pane of an Incognito session
 <C-g> +<leader>
@@ -421,10 +422,10 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
-<C-g> h -> LeavePane: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
+<C-g> h -> LeavePane: go to sidebar
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
@@ -440,16 +441,17 @@ l -> Unfold: open
 <C-g> p x -> ClosePane: close pane
 <C-g> q -> Quit: quit
 <C-g> r -> EnterPaneMode(Resize): resize mode
+<C-g> s -> ToggleSettle: settle
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t b -> BreakPane: break pane
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
@@ -463,10 +465,10 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
-<C-g> h -> LeavePane: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
+<C-g> h -> LeavePane: go to sidebar
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
@@ -482,16 +484,17 @@ l -> Unfold: open
 <C-g> p x -> ClosePane: close pane
 <C-g> q -> Quit: quit
 <C-g> r -> EnterPaneMode(Resize): resize mode
+<C-g> s -> ToggleSettle: settle
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t b -> BreakPane: break pane
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
@@ -504,11 +507,11 @@ l -> Unfold: open
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
-<C-g> W -> OpenWorktreePicker: worktrees
+<C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
-<C-g> e -> ToggleSidebar: sidebar
-<C-g> h -> LeavePane: sidebar
+<C-g> e -> ToggleSidebar: toggle sidebar
+<C-g> h -> LeavePane: go to sidebar
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
@@ -524,18 +527,19 @@ l -> Unfold: open
 <C-g> p x -> ClosePane: close pane
 <C-g> q -> Quit: quit
 <C-g> r -> EnterPaneMode(Resize): resize mode
+<C-g> s -> ToggleSettle: settle
 <C-g> t +tab
-<C-g> t 1 -> GoToTab(1): tab
-<C-g> t 2 -> GoToTab(2): tab
-<C-g> t 3 -> GoToTab(3): tab
-<C-g> t 4 -> GoToTab(4): tab
-<C-g> t 5 -> GoToTab(5): tab
-<C-g> t 6 -> GoToTab(6): tab
-<C-g> t 7 -> GoToTab(7): tab
-<C-g> t 8 -> GoToTab(8): tab
-<C-g> t 9 -> GoToTab(9): tab
+<C-g> t 1 -> GoToTab(1): tab 1
+<C-g> t 2 -> GoToTab(2): tab 2
+<C-g> t 3 -> GoToTab(3): tab 3
+<C-g> t 4 -> GoToTab(4): tab 4
+<C-g> t 5 -> GoToTab(5): tab 5
+<C-g> t 6 -> GoToTab(6): tab 6
+<C-g> t 7 -> GoToTab(7): tab 7
+<C-g> t 8 -> GoToTab(8): tab 8
+<C-g> t 9 -> GoToTab(9): tab 9
 <C-g> t b -> BreakPane: break pane
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
-<C-g> w -> ChangeWorkspace: workspace
+<C-g> w -> ChangeWorkspace: session's worktree

@@ -87,6 +87,7 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-[>` / `<C-]>` | Back / forward through the jump list |
 | `<C-g> h` / `<C-g> l` | Keys from a pane to the sidebar / from the sidebar into the panes |
 | `<C-g> e` | Hide / show the sidebar |
+| `<C-g> s` | Settle the session on screen, after a confirm (in a pane) |
 | `<C-g> q` | Quit orb (every pane keeps running) |
 | `<C-g> p d/r/s/f/x/c` | Pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> p w/e/i` | Floats: show / hide, pane to float or float to tab, pin a float |
