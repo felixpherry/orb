@@ -32,7 +32,7 @@ Every key, the mouse, and the macOS key setup: [docs/keys.md](docs/keys.md).
 ## Credits
 
 - [herdr](https://github.com/herdrdev/herdr): the multiplexer feel, the control API, the layout code and the sounds. The code and sounds taken from it are listed in [NOTICE](NOTICE).
-- jinn: the look and the architecture.
+- [jinn](https://github.com/jayson-lennon/jinn): the look and the architecture.
 - [T3 Code](https://github.com/pingdotgg/t3code): the settle sidebar and the worktree flow.
 - [zellij](https://zellij.dev): the keys and the layouts.
 
