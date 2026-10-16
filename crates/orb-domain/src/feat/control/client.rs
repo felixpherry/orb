@@ -358,15 +358,21 @@ fn number(word: &str) -> Result<i64, ()> {
 /// Slack on top of a call's own limit: two screen-loop asks and some margin.
 const SLACK: Duration = Duration::from_secs(15);
 
-/// How long a call with no limit of its own waits, enough for a session in a
-/// new worktree.
+/// How long `session create` waits: orb's worst case for a session in a new
+/// worktree (default-branch reads, a fetch, the worktree write, a queue wait),
+/// with room to spare.
+const CREATE_LIMIT: Duration = Duration::from_secs(180);
+
+/// How long a call with no limit of its own waits.
 const OTHER_LIMIT: Duration = Duration::from_secs(60);
 
 /// How long to wait for orb's reply to `op`: its own limit plus slack, none
-/// for a wait with no limit, a minute for the rest.
+/// for a wait with no limit, three minutes for a new session, a minute for
+/// the rest.
 fn reply_limit(op: &Op) -> Option<Duration> {
     match op {
         Op::AgentStart { .. } => Some(Timing::REAL.start_limit + SLACK),
+        Op::SessionCreate { .. } => Some(CREATE_LIMIT),
         Op::AgentPrompt {
             wait: true,
             timeout,
@@ -610,6 +616,10 @@ mod tests {
     #[case::start(
         Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![] },
         Some(Duration::from_secs(45)),
+    )]
+    #[case::session_create(
+        Op::SessionCreate { project: None, worktree: true, name: None },
+        Some(Duration::from_secs(180)),
     )]
     #[case::list(Op::SessionList, Some(Duration::from_secs(60)))]
     fn reply_limit_outlasts_the_asked_timeout(#[case] op: Op, #[case] expected: Option<Duration>) {

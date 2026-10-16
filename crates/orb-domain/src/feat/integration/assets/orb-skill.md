@@ -130,7 +130,7 @@ orb session create --project 4 --worktree --name "fix payout"    # a worktree of
 | `agent_blocked` | The agent waits for an approval or an answer. Nothing was typed. | Tell the user. Only if they asked you to handle it, `orb pane read` the dialog and answer with `orb pane keys`. |
 | `prompt_stalled` | The prompt was typed but no work showed within 5 s. | `orb pane read` to see why before trying again. Don't paste the prompt twice. |
 | `no_reply` | The agent hasn't finished a turn yet. | `orb agent wait <pane>`, then ask again. |
-| `timeout` | Your `--timeout` ran out, or `agent start` waited 30 s. | Check with `orb agent get` or `orb pane read`; wait longer or tell the user. |
+| `timeout` | Your `--timeout` ran out, `agent start` waited 30 s, or `session create` waited 3 min. | Check with `orb session list`, `orb agent get` or `orb pane read` before trying again; a session may already be there. |
 | `bad_request` | The request makes no sense, e.g. splitting a floating pane or an unknown key name. | Read the message and fix the command. |
 | `failed` | orb tried and something broke. | Read the message and tell the user. |
 
