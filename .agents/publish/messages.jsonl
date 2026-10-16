@@ -1,0 +1,460 @@
+{"id": "883b2907a1b50afdc9e0ab924616e85b6b6ac03b", "message": "docs: add project notes"}
+{"id": "e7cfd42676cadd1f9211190bc7ee9e82b8a05d69", "message": "chore: bootstrap the workspace with a ratatui app that quits on q"}
+{"id": "562293df7a723cb0f4d9058abf2f4106a830c471", "message": "build(term): add terminal emulator and PTY dependencies"}
+{"id": "7d482f6be4df1f4c6d940bf6e525773360e3bf08", "message": "feat(term): encode keys, paste, mouse and focus for the pane"}
+{"id": "98a748add507d1483bc57f4b164b5ebe1dd328c7", "message": "feat(term): render the emulator grid into a ratatui buffer"}
+{"id": "5d132b2ba4f59ac2dcd4c471d140c0a2728a4e8d", "message": "feat(term): add a PTY pane backed by the emulator\n\nAnswers terminal queries, passes OSC 52 copies through, flushes\nsynchronized updates and skips repeated resizes."}
+{"id": "c6cdebd34fc44b99afdcf9026255ff32e2a34720", "message": "feat(panes): add attach and detach to the domain"}
+{"id": "00b5096cfa88afd9989d4c0d6e6bb0f5feca3807", "message": "feat(panes): run a command in a pane with orb -- <cmd>\n\nNormal mode keys go to orb, attached mode keys go to the pane. The\nouter terminal is restored on exit and on panic."}
+{"id": "fe774f0bce7830661a24910fee13fb5df9387bd1", "message": "docs: update internal notes"}
+{"id": "fa9cda32a896b7a06ab3b06a20574a65ef36c43b", "message": "docs: update internal notes"}
+{"id": "ef083c0ec114c23acdaf7ab1307adc1cb371e521", "message": "feat(sessions): add the sessions domain model\n\nProjects, threads, statuses and selection replace the orb -- <cmd>\nproof of concept."}
+{"id": "7adc434e4d9a1742e5421d63b2f5a73463b921e8", "message": "feat(store): add the SQLite store with versioned migrations"}
+{"id": "cc617d946d3e2d9c3e1b0a4346031ea610a4a565", "message": "feat(harness): start and list Claude Code background sessions\n\nRuns claude --bg and claude agents --json with timeouts, reporting the\nfirst output line as the error reason."}
+{"id": "24575c07d6fad21479013426e67d1df01cf430f2", "message": "feat(sessions): read thread titles from Claude transcripts"}
+{"id": "432258fd814cbf6d28be6a7823c7036cbccfb9e7", "message": "feat(sessions): add the sessions actor that polls and saves threads"}
+{"id": "4cc1b374ca2b1fc0fa9ec86cd96f2bee14bdbbda", "message": "feat(sidebar): draw the thread sidebar, which-key popup and mode line"}
+{"id": "057b88bc3cc416901006beba7925ff8cd84118d8", "message": "docs: update internal notes"}
+{"id": "d6acb3e1542530a16d3936169f530f331db7053e", "message": "docs: update internal notes"}
+{"id": "5b40858f9a1be8ad62358bd4df96395eab971bd5", "message": "feat(ui): decode transcripts into blocks for the preview\n\nFollows the newest branch across rewinds and compaction, and shows a\n/rename title before the AI title."}
+{"id": "793fb3b5e02e9a46398eb820685a836494a2ae0e", "message": "feat(ui): add preview navigation, folding and yank"}
+{"id": "5d7881db12025d841dc2bf27d58ba4d4336058b7", "message": "feat(ui): add the preview actor that rebuilds on transcript change"}
+{"id": "bda9184fa50032fe54398501677e931711b5f81f", "message": "feat(ui): draw the transcript preview with markdown and folds"}
+{"id": "3610dc6fb32995dbde18bc5c96c7f13c018b27ea", "message": "docs(ui): note the cost of decoding untagged transcript content"}
+{"id": "d3d310c38ffaebae1657d8a329b7caa562e29c31", "message": "docs: update internal notes"}
+{"id": "3ec6617df34f2ff104b3f707cbd957be1f7a8bdf", "message": "docs: update internal notes"}
+{"id": "4130eb49d9b627f655e6db31d84d981e9bc989a8", "message": "feat(sessions): store settle and pin state and stop or remove sessions"}
+{"id": "dc21aa875c1d9d769ea02110443708be8c97fbbe", "message": "feat(sessions): add pin, settle, delete and the settled shelf"}
+{"id": "412522bfb3d40425ec28755da0b388cde2dd33fa", "message": "feat(sessions): pin, settle, delete and auto-settle threads\n\nUnpinned threads idle for 3 days settle on their own unless kept\nactive or attached."}
+{"id": "1cd1915898d4a8f66b5e27a08f564b83f7b14b01", "message": "feat(sidebar): draw threads as cards with pin, settle and delete keys"}
+{"id": "adee2c05b9044e5cb798c9939cd9378560960502", "message": "fix(sidebar): space the cards and outline the selected one"}
+{"id": "39495316193f6400047653d8fc651888e9a45a73", "message": "test(sessions): cover attaching to a settled, stopped thread"}
+{"id": "c716db7687fba9b1d45b28d5ec6341667cc4329e", "message": "docs: update internal notes"}
+{"id": "3e386ec590af0e87667cc13bb238c908a673d207", "message": "docs: update internal notes"}
+{"id": "31e92bf800516f801fb6b0d0cfb43b3e5d31f203", "message": "feat(picker): add a fuzzy list picker and directory browsing"}
+{"id": "70c189f7cd2b4a98e225d5786212b10eb9f2318f", "message": "feat(picker): pick a project for new sessions and add directories"}
+{"id": "4aa42bbc294b348614f717605fb433262be85ce7", "message": "feat(sessions): start sessions in the picked project and add projects"}
+{"id": "6a7d1dfd6398c59a8b908c0d33088d2f6513d846", "message": "feat(picker): draw the project and directory picker popup\n\n␣p adds a project from the sidebar or preview."}
+{"id": "7d8fe299a4c32dba53d69d6bd2dc16b7eda1d1b2", "message": "fix(picker): fit the popup to its rows and fill the background"}
+{"id": "d624db33af2c192eda1037657e071936b3fd365d", "message": "docs: update internal notes"}
+{"id": "d1c8a25f9f06d4160866f98f6227e7615478bec3", "message": "docs: update internal notes"}
+{"id": "bb80e24ef0f8464c2a521e7c47f2645523fb0ddc", "message": "feat(worktrees): add a git service for refs, worktrees and branches"}
+{"id": "18b817668c284df26a063e5be4354b859be38b56", "message": "feat(worktrees): move a fresh thread into a new or existing worktree"}
+{"id": "4c60f43e364a2f712e13f7a257484953d9fb51a9", "message": "feat(harness): open Claude's trust prompt for an untrusted workspace"}
+{"id": "5c791bbaf211e8d7cca3cc4986384d54264b1920", "message": "feat(worktrees): add the workspace picker on ␣w"}
+{"id": "eb36de107dabb1da7922f91a28c1580ccfe32c0a", "message": "feat(worktrees): switch a thread's branch from a picker on ␣b\n\nRefused while Claude is working in the same directory."}
+{"id": "0471313b7a31c02ff27166df4e58c42bbd0787d6", "message": "feat(worktrees): rename an orb/<hex> branch after the thread's title"}
+{"id": "7836e54709238769f008d8db531db6803cee2afd", "message": "feat(picker): draw workspace and branch pickers and bind ␣w and ␣b"}
+{"id": "33b624d4c32650d6dfb94f89624ac0341ff760ee", "message": "fix(harness): drop FORCE_COLOR from the child environment\n\nclaude --bg coloured the session id, so every start failed to parse\nand left an orphan background session."}
+{"id": "cbb0dff5c4d5820fa5af26b51001bd69050d9993", "message": "fix(sessions): keep mode-line errors until the next key"}
+{"id": "b7456cc49e3927387eff6671b72fbdaf5e4e7c94", "message": "fix(picker): keep a disabled row's prefix when cutting its path"}
+{"id": "75cb17510cd7dc13e49d1d554d309f23fbda0422", "message": "docs: update internal notes"}
+{"id": "f7205641c278a82ab6dc937299a403c49a86eba7", "message": "fix(harness): offer to trust the refused directory itself\n\nClaude resolves a worktree's trust to its main repo, so trusting the\nworktrees root never helped."}
+{"id": "1d2c24102d01e80fec47078e68984a7bfe15d378", "message": "feat(sessions): store per-project drafts and last-used settings"}
+{"id": "a15c4f41104d5dbbfb4196a73fe4e75ad622ceed", "message": "feat(sessions): add draft intents and model and permission pickers"}
+{"id": "be4585fa40ca68021cceb78d9b172c84ee41eaaf", "message": "feat(sessions): create and start drafts with model and permission flags"}
+{"id": "fe819603ff2c4c9fa57a5717e77c620d3ead9a48", "message": "feat(sidebar): show drafts as cards with an editable form"}
+{"id": "82717a64facc5b272cf69f563e8d208b2d231ba3", "message": "fix(sessions): start a draft on the branch git reports at start"}
+{"id": "8ab0eb2933be43bfe0a920860f6db8b04edef44c", "message": "feat(picker): list current and legacy Claude models by name\n\nThe draft form and card also drop their key hints and branch line."}
+{"id": "8c1030cad9d893f81aeecd3bdef9d2e905114462", "message": "feat(worktrees): handle existing-worktree and non-git drafts\n\nExisting-worktree drafts move between worktrees and the root, and a\nnon-git project offers Initialize Git."}
+{"id": "b5d0b7b4b5d12c779ff38a03d2a12aeb765763fb", "message": "feat(keymap): bind leader keys only where they act on the selection"}
+{"id": "d89e2bc5079dd1a51acf8a52f08b6fd656a55c5e", "message": "feat(ui): show the model's name in the preview header"}
+{"id": "e07df6df7f6dd77431ee5a443ae22ab93b340914", "message": "docs: update internal notes"}
+{"id": "fe67b64d4e30a2ca4a8b013388962dc7d80ddc70", "message": "test(sessions): cover saving a draft and Enter on a draft"}
+{"id": "20241ff840b770549c59310ebbdb10a32ee56723", "message": "feat(panes): open tools in named zellij floating panes"}
+{"id": "c0c820d3abbf12a754ba38eef711d346f95a4c18", "message": "feat(panes): add the open-tool intent for shell, lazygit and nvim"}
+{"id": "301d24375f5a316801a5e6926592fb51c4f16b7f", "message": "feat(panes): bind ␣t, ␣g and ␣v to open shell, lazygit and nvim"}
+{"id": "a83e80c558079d7d91948951a51fcb8f9f14fc22", "message": "fix(panes): run tool panes with orb's own NO_COLOR"}
+{"id": "ecc2419cb58b5d25dc95a6bbe950f6b3ffdb0717", "message": "fix(panes): time out zellij actions after 2 s\n\nA stale session name after a zellij rename no longer freezes orb."}
+{"id": "3040248a2d1390bdf265a1af77da58201001cdd2", "message": "docs: update internal notes"}
+{"id": "b4ba59d1b864c526fab322765db26bbe44d0a2ab", "message": "test(panes): cover zellij failure reasons and Space while attached"}
+{"id": "e66dced7294b8944ab6ddcb69bff45a89c3675bc", "message": "docs: update internal notes"}
+{"id": "df3021d710814a54a6fbff961a1f94b5689e0c90", "message": "docs: update internal notes"}
+{"id": "05d6925090c5f17e6e6725b0445717c2cc759393", "message": "feat(sidebar): add half-page jumps and hide deleted threads at once"}
+{"id": "d8e8eecb7173f8364050b91cebb0e08abe5fef6a", "message": "feat(sidebar): toggle and resize the sidebar and remember its width"}
+{"id": "38353ca88b15458ef48fe210fa95b742153293c6", "message": "feat(panes): move between the attached pane and the sidebar"}
+{"id": "cc2e534cea667412eb8942f815c3a1983258eb5b", "message": "feat(sidebar): filter by project and remove projects"}
+{"id": "c42e199814582be2445ceddd48fb28f9eddc8f60", "message": "feat(notify): announce finished and waiting threads while unfocused"}
+{"id": "106399873db9e08ea91cd60eebe5aea2d1a11c33", "message": "fix(notify): check zellij clients before treating orb as focused\n\nzellij sends no focus-out on a tab switch."}
+{"id": "5b1fcb0ff0c97416d3980289b22fe8c1325bc67c", "message": "feat(notify): post through terminal-notifier with click to focus"}
+{"id": "3d9cda05b9947e9d5599aebf43371a0e40314960", "message": "docs: update internal notes"}
+{"id": "9e45ee0d99207aeb861e2859a2f3f904ab7e08bd", "message": "fix(notify): fall back to osascript when terminal-notifier fails"}
+{"id": "ba0f07e47f5eb25dbc8a8a44db30de85e4062073", "message": "test: cover sidebar jumps, removed projects and repeated waits"}
+{"id": "8ab626ef99e11d554417f7eb33222ab051b0a113", "message": "docs: update internal notes"}
+{"id": "1335d52319de775d09251d5ca6e00f3b732721ae", "message": "docs: update internal notes"}
+{"id": "f8d4ae5056f43388d2c1476ed14e3a9d17645c09", "message": "feat(sidebar): restyle the sidebar as a tree explorer\n\nThreads become three-line tree nodes with status icons and a spinner,\nunder a Sessions input box, replacing the cards."}
+{"id": "3f6f92d036e00b7891f6846e27e5f88c37626541", "message": "fix(sidebar): step the working spinner every 100 ms"}
+{"id": "5163d4984542b584f67e475f88a1eb9c9de519d9", "message": "feat(ui): set the cursor shape for each focus"}
+{"id": "dca1cfd538d5405d57d77e362abed53c45d1030f", "message": "refactor: extract a shared text input from the picker filter"}
+{"id": "03ede1fcb0d7485fd2429eb74f9fd162e5d58f78", "message": "feat(sidebar): rename a thread with r"}
+{"id": "157e8b04a1ea7a3dae26485cda3fc8bda7aeaed2", "message": "feat(picker): restyle every picker as a select float"}
+{"id": "16b6005a87ae76cd1bab3d7304f6f59b095907db", "message": "docs: update internal notes"}
+{"id": "5270e50eeeea65979b3ff18a358937b963d12bdd", "message": "docs: update internal notes"}
+{"id": "8ce453e3101e673f843856634fb16f59df3df510", "message": "Merge branch 'main' into sidebar-ui-refinement"}
+{"id": "1f2fd27eb6c5be0558e287fdd9f71744d7f3b0f5", "message": "feat(sidebar): search session titles with / or i\n\nMatches are fuzzy, highlighted, kept in sidebar order and include\nsettled threads. <C-j>/<C-k> move between them, enter keeps the\ncursor and Esc restores it."}
+{"id": "085d92149aace80c8cf4ecc8074019091572d31e", "message": "docs(sidebar): document search, rename and the cursor in module docs"}
+{"id": "51f6814faf5efe3510a1afe3ce136e78f06ad7bb", "message": "feat(picker): wrap <C-j>/<C-k> from the last item to the first\n\nDisabled rows are skipped; half-page moves still stop at the ends."}
+{"id": "88f8e8c1cfed25e72d5ec403e92639b587688592", "message": "feat(sidebar): wrap j/k from the last row to the first"}
+{"id": "d20da01a47cd90422e4119c975ce6e91adb6b9fb", "message": "docs: update internal notes"}
+{"id": "7218132ac09b8d9217569794ee72ce5f8a1d64cd", "message": "style(picker): fix lint warnings in wrapping selection"}
+{"id": "89dd55ffbe2eeeba328b0d9872add45344113077", "message": "docs: update internal notes"}
+{"id": "eb0bd4683df21b7a378b46b2dda6aab999c31ff3", "message": "Merge branch 'main' into sidebar-ui-refinement"}
+{"id": "5d763a75af7649570e2155eace2ca129ad9a1541", "message": "test(sidebar): cover the cursor, rename titles and search moves"}
+{"id": "f25f5368cac551121ac621737e3f9dfed99686b6", "message": "feat(sidebar): wrap search match moves at the ends"}
+{"id": "5255736699d21eb87f8b3b12a02d2cf720d31ed2", "message": "feat(sidebar): show an i badge while the settled shelf is open"}
+{"id": "e93dc19933099b81fbeab9c1c701bebfeee57fc5", "message": "docs: update internal notes"}
+{"id": "15f1434f4b287b00a2a7c45fb18d10eb1583511b", "message": "feat(ui): remove the transcript preview from the right side\n\nThe tui-markdown dependency goes with it. The right side shows a\nnew-session hint until the dashboard replaces it."}
+{"id": "ef5dde77e7fa463012e73a81621e0a7b719fb964", "message": "feat(ui): add the dashboard menu and its keys"}
+{"id": "070995d916732c2cdd2633cfb2dc12e9e09f26e5", "message": "feat(ui): draw the dashboard on the right side\n\nAn ORB banner, a context line, the menu for the selection and\nfooter counts replace the hint and the draft form."}
+{"id": "18b3a96690fa9318510e938033692bdf105d9a73", "message": "docs: update internal notes"}
+{"id": "a16f88e92d9b2f39fa05d2678de7ccb4e83674ba", "message": "feat(ui): count threads by status and turn the start spinner"}
+{"id": "ce3c574ec6b244bf63ee02af0312ec9dcf44abbf", "message": "feat(ui): replace the mode line with a lualine-style status line\n\nMode, branch, project and errors sit on the left; activity, counts,\nposition and a local clock on the right, which is never cut."}
+{"id": "1c45eb0035de34869776de8d514163ea2b474075", "message": "docs: update internal notes"}
+{"id": "7b1b43eb02d9449ee79af92347a840fa62e47730", "message": "test(ui): cover mode names, the DST clock and narrow status lines"}
+{"id": "9ef13df6d0fa01f24287537f08afa4b0bab438ae", "message": "chore(keymap): prototype three which-key popup looks"}
+{"id": "c517e070a4efd8172994a2db7af72d603b0777b3", "message": "chore(keymap): settle on the helix-style which-key look"}
+{"id": "ea271c791ef3a34ccd29facc2f543a6487a58e65", "message": "feat(keymap): draw the which-key popup in a helix-style corner box\n\norb now draws the popup itself in place of ratatui-which-key's\nwidget, and the prototype variants are removed."}
+{"id": "7d6ccab218121d07e201c6aea55117801f8b6ea5", "message": "docs: update internal notes"}
+{"id": "599f39b81aeedcc49a7542c6a2274c25cfb0ac5a", "message": "docs: update internal notes"}
+{"id": "9cf3166a7d491448aa34c9929fbcb6ec20cc8b39", "message": "Merge branch 'main' into statusline-lualine"}
+{"id": "38cedd5fe0ce3aa5cd67b01a65c905edc075ba68", "message": "Merge branch 'main' into preview-removal-revamp"}
+{"id": "9887fc817efa05c8846b1b5a8e3fa520077f995b", "message": "docs: update internal notes"}
+{"id": "1e3709b1fc9d4b66ceb95e5884e41c2e016e3ded", "message": "docs: update internal notes"}
+{"id": "cb710feba0541fb10cfc96af5502e57d29c1629a", "message": "docs: update internal notes"}
+{"id": "807510122144230cd8799e141a9b73d574544d60", "message": "Merge branch 'main' into preview-removal-revamp"}
+{"id": "3ee1a093c3fc6465817eda9989cad386fe5f3ce3", "message": "feat(panes): track a set of attached threads and detach with <C-\\>\n\nAttach, detach, settle and delete keep the set; the poll runs fast\nwhile any thread is attached."}
+{"id": "af96f1a64a21d8cec80f397b512a44e668b18f0a", "message": "feat(panes): keep one attach pane per attached thread\n\nSelecting another thread no longer closes the previous pane; panes\nthat exit or leave the attached set are dropped."}
+{"id": "c633c6d1988f86e8c349f6bedf966affad843f30", "message": "feat(sidebar): show a filled circle on attached idle threads"}
+{"id": "5df9936235c8de3552b55a6ac5b24e9b21ccb545", "message": "docs: update internal notes"}
+{"id": "288c288948dea3f4f47ee542a11c6a619e0a197c", "message": "docs: update internal notes"}
+{"id": "ddb2e3c2455e4419345e33b5796937ac0d9d3ac2", "message": "docs: add a quickstart, demo video, features and keys to the README"}
+{"id": "f50acd90b930b08c58ec478a26b6b358f9038101", "message": "feat(sessions): confirm settle, delete and discard with No/Yes\n\nYes re-checks the target first. Settling a working thread is refused\nwith a message on the mode line."}
+{"id": "5f342cf2ff7899742a682193d3c7800e4bca9a5e", "message": "feat(keymap): bind s to settle and d to delete in place of ss/xx\n\nThe double-press banner is removed."}
+{"id": "4c33bea7f61c49094481a17645c227b0f79a77c1", "message": "docs: update internal notes"}
+{"id": "05eba043b712cd5dec97d1efb0a30e0022b37e39", "message": "style(sessions): fix lint warnings in the settle and delete tests"}
+{"id": "e6dc58bf9750ec01e9e1467ceb7a7d4c753f9ac4", "message": "docs: update internal notes"}
+{"id": "5043a015d0da8a4697e1ce4ce9aaef40bc8b83b4", "message": "docs: update the README keys to s settle and d delete"}
+{"id": "223701231bf061a99da0b2cd981492c812aef962", "message": "feat(sidebar): pin the settled header and show long input's end\n\nThe Settled header stays on the bottom row while it is below the\nview, and a search with settled matches opens the folder."}
+{"id": "8b40ab284d00d985bdd42791a73ca75cb9f503f2", "message": "docs: update internal notes"}
+{"id": "ff9a9f6e942f57f8a716ba4c06adc70bd3b5ed56", "message": "feat(sessions): store groups and list them in the sidebar\n\nAdds store migration v8."}
+{"id": "5a1600826ff9b6593f2a5b0c5f9fdf8f78a56038", "message": "feat(sidebar): draw group cards and fold groups with l, h and enter\n\nThe mode line shows <project>/<slug> and the dashboard gets a menu\nfor group rows."}
+{"id": "9f65b745ebdf6fca6d722fd98a4e17c983736303", "message": "feat(sessions): create Feature, Research and Learn groups\n\n␣gf, ␣gr and ␣gl open a name box, seed the folder template and start\na draft in the group's worktree or folder. lazygit moves to ␣gg."}
+{"id": "82cc797117f8de71a1fbf3b54540d7e9eaf1204e", "message": "feat(sessions): pin, settle and delete a group as a whole\n\nn starts a sibling thread in the group directory. Groups settle and\nun-settle with their threads; grouped threads never settle alone."}
+{"id": "c7eab9270665f71548fc63d21d0cafafd96ed900", "message": "docs: document groups in the README"}
+{"id": "fbb6ecf9146e52c695ef6352539f052d89b99057", "message": "feat(sessions): remove a group's folder or worktree when deleting it\n\nThe branch is safe-deleted and kept while unmerged; the confirm\nnames what goes."}
+{"id": "9b0ce19982226299f275683c9c3cdbb74a059c48", "message": "feat(sessions): switch a Feature group's branch with ␣b\n\nThe name box now stays open until the group is made, and the\nproject picker lists Research and Learn last."}
+{"id": "dfe57e6eae828c1335f65f6d4d2c373948bf17df", "message": "feat(sessions): set group defaults with ␣m and ␣a on a group card\n\nDeleting a group with an unmerged branch is refused up front, and a\nstart waiting for trust retries on every poll."}
+{"id": "9b6b6f27014454c3dae975d42ab0bb2ec43bd456", "message": "docs: update internal notes"}
+{"id": "c1279bfafbb112dfde76ae84ec931e1c6b9ca1f6", "message": "docs: update internal notes"}
+{"id": "7548464fa96648f41f02a6c7312a8e5b756f3ac3", "message": "feat(panes): resize the attached pane with <C-Right> and <C-Left>"}
+{"id": "07432db55fe2a6d46d9eba466f6c1c92f54e1aec", "message": "feat(sessions): rework the Research template around a provenance log\n\nAn orchestrator and subagents record evidence, claims and gaps in\nstate.md, take critic verdicts, and pause for user data."}
+{"id": "0484e3c53bb282bb7e345877ed02e62be056ef22", "message": "feat(sessions): list research data sources once in SOURCES.md"}
+{"id": "01c4a1c6683e627c3c61d255a34eedb1002bddfe", "message": "Merge branch 'main' into attached-resize"}
+{"id": "27644b25dfcee29952c32752a197b49c71cb8992", "message": "Merge branch 'main' into jump-list"}
+{"id": "d50f4447ff0b34c7b32bb89032f7cf00f2cac6bc", "message": "feat(keymap): add an in-memory jump list\n\nEntering a pane, gg/G, search enter and ␣n record a jump; the list\nholds 20 entries without duplicates."}
+{"id": "f360d06c39ddf51689de3039a1601cf64546b914", "message": "feat(store): save the jump list across restarts\n\nAdds store migration v9; rows that no longer exist are dropped on\nrestore."}
+{"id": "887c62123f76b403bc1387ed80c596f8c5bfbdf2", "message": "feat(keymap): bind <C-o> and <C-i> to jump back and forward\n\nOnly an exact Ctrl matches, so Tab and ctrl+shift+o still reach\nthe agent in the attached pane."}
+{"id": "dc6e701918a2e09245fd88a0024152c5ff8f7fca", "message": "docs: document <C-o>/<C-i> jumps in the README"}
+{"id": "c5fc6281f899b3aff99ebd5ef4f5a674e83705a6", "message": "fix(keymap): keep jumping forward after re-entering a landed pane\n\nEntering the pane of the row the last jump landed on records\nnothing, so <C-o> then <C-i> still goes forward."}
+{"id": "0398b877eb25b9bd0346a51a82b3f2be6550f32a", "message": "docs: update internal notes"}
+{"id": "5f7cec617dce6bcf74fe04324d9e083c53abf826", "message": "feat(keymap): toggle the sidebar with <C-b> in the attached pane"}
+{"id": "e3981e6149a28faf03ef06d34ef7402a359f5edf", "message": "docs: update internal notes"}
+{"id": "939112caf9a3c6434839d36a38ff8358dfdab0c8", "message": "feat(sessions): replace the Research template with the research kit\n\nThe kit adds three subagents, conventions, a report template and\nSOURCES.md next to the orchestrator AGENTS.md."}
+{"id": "150c6de628129e49d3a33d464e9ea62c8c9ab5e5", "message": "feat(sessions): seed every research kit file into new Research groups"}
+{"id": "d5f3831bc31d786c32bf466823624f102adebf1e", "message": "docs: describe the research kit in the README"}
+{"id": "3361d89b1554a4b203686133309d79d789aacad3", "message": "docs: update internal notes"}
+{"id": "6b0af3972224b82a82ed79fbdf075251fe443891", "message": "Merge branch 'main' into fix-untrusted-flicker"}
+{"id": "cdfb965a18167f37cc7ee8d7cd0e3550289a7eba", "message": "feat(harness): add a service that marks a workspace trusted\n\nIt writes the trust entry into Claude Code's config, keeping every\nother key and the file's format; a worktree resolves to its repo."}
+{"id": "7fc7ad5d41846cc2f4ae6ec86dbd95d417b11680", "message": "feat(harness): trust a refused workspace and retry the start once\n\nA failed save removes a newly made worktree and shows an error;\ndeclining fails the start as not trusted."}
+{"id": "95697e50312195192563c62285e2a492c96c6666", "message": "feat(harness): ask \"Trust <path>?\" in a No/Yes confirm\n\nThe confirm replaces the interactive Claude Code trust pane."}
+{"id": "44333aab38ea92abd1fae8bb0e89a774fb97a652", "message": "docs: update internal notes"}
+{"id": "e788aa5c11d96d6b9bcbe7564f2085fc0183b8c9", "message": "test(harness): cover confirming trust with every row filtered out"}
+{"id": "b6fe8ec7c4a8d0d4ec2c7a29544b4f8438bdfd97", "message": "Merge branch 'main' into ctrl-b-sidebar-toggle"}
+{"id": "3779a97c544dd69b2df52249554d6a01b5111152", "message": "fix(keymap): keep the keys in the pane when <C-b> shows the sidebar"}
+{"id": "82c573186c675c982e7c83e2a38788ed2d55f959", "message": "feat(sessions): add an Incognito project rooted at /tmp/orb-incognito\n\nIt is added at every start and kept out of the new-session picker;\nits folder is remade before each Incognito draft starts."}
+{"id": "ad8c2a88f1cb3ae9e1d6ac0d87300be1edcd5e8a", "message": "feat(sessions): start an Incognito draft at once with ␣i"}
+{"id": "17141aa465c4a7b3586be4fd3ff458c949d11345", "message": "feat(keymap): leave worktree and branch keys off Incognito rows"}
+{"id": "ce2f926699c647429ed4fe9d44e5446243450be7", "message": "refactor: move the time-limited child runner into a shared module"}
+{"id": "b2b808bab0845ad83f1df15a61bfd67bd3cf69e4", "message": "Merge branch 'main' into fix-git-fetch-failure"}
+{"id": "2b13dff7e909abc99ac30a2d93409b4725e3f403", "message": "fix(worktrees): time out git fetch after 15 s"}
+{"id": "2215a814c99d5816c11fa849634a993f275fe7f6", "message": "feat(ui): show \"fetching origin/<branch>…\" while a start fetches"}
+{"id": "b7749af8c3672744a1e8fe1c777d33661ac93b74", "message": "docs: update internal notes"}
+{"id": "64050dd53f209c83428c089dfb9310eaa59e44f5", "message": "docs: update internal notes"}
+{"id": "7dfe75ece405b6b8a9d4f8239dffec6d1c8f64ab", "message": "Merge branch 'main' into incognito"}
+{"id": "9dd82282844c2df0cb5b8cbc96d0fb2817ea675b", "message": "docs: document Incognito in the README"}
+{"id": "bb57a4318d7bee2ba1e9d5433c8ca4f4f9891fb8", "message": "docs: name the realpath that incognito trust is written for"}
+{"id": "9447988ee412b4c4cadfcd6814ab3cb3eda5f00a", "message": "feat(sessions): open the incognito draft and start it with enter\n\nIncognito now behaves like any other draft instead of starting at once."}
+{"id": "9834780051c06e8478633e088806f2548f96ebab", "message": "docs: update internal notes"}
+{"id": "e845f34d1aa8568e4e8c6d774c2b1706fac352dd", "message": "docs: re-record the demo and document groups and incognito"}
+{"id": "a8d69ea6163cdb88c6ae6f5f9c3265d5e4e97ea6", "message": "feat(picker): add a session picker over threads\n\nRows are newest chat first and filtered by project; <C-s> shows or\nhides settled threads, and a pick jumps into the thread."}
+{"id": "57a17d66f16530d8675193ea37b36d69e7fb0466", "message": "feat(keymap): open the session picker with ␣␣ and <C-Space>\n\n<C-s> in the open picker toggles settled threads."}
+{"id": "48c0eb2e18259c89c354cd77591a04312db2e935", "message": "feat(picker): preview the selected thread's latest exchanges\n\nThe transcript tail is re-read when the selection moves or the\ntranscript grows."}
+{"id": "afd5870e6dfdb51b84c28d89b8b52be738b1cebf", "message": "feat(picker): draw the session picker as a list beside its preview\n\nThe preview stacks below the list under 120 columns; other pickers\nkeep the select look."}
+{"id": "8756818ba24fe08d522404edbdb20b2ecdfb7f52", "message": "docs: document the session picker in the README"}
+{"id": "5a394f1090a5adba66f6ec43091aa734584b82e8", "message": "docs: update internal notes"}
+{"id": "e4f57492a4815cb943ca58b2c5fc9bc7a5984437", "message": "docs: update internal notes"}
+{"id": "026eb29485cbc502eb43dca105bac3c226b24e03", "message": "feat(sidebar): select and attach rows with the mouse\n\nA click focuses and selects, a double-click attaches, and the wheel\nmoves the selection; the attached pane still gets its own mouse events."}
+{"id": "b4d49b7fc01e674c94db8644625bcfc53f103760", "message": "feat(picker): click and scroll through picker rows\n\nA click outside the popup closes it, a double-click picks a row, and\nthe wheel moves the selection without wrapping."}
+{"id": "bed07972484f4a51a354324e6d880545f0a9bad1", "message": "feat(picker): place the text cursor where an input is clicked"}
+{"id": "a3b838daf2639945a5f3cb596a925c67bd71a87f", "message": "docs: document mouse support in the README"}
+{"id": "76a0b687f441982bdb337339c442b3e39a702923", "message": "fix(picker): move the selection only when the wheel is over the list"}
+{"id": "17d14d2703b63d6bbac5b7ba5567678f5c6aa7bc", "message": "docs: update internal notes"}
+{"id": "ddee988c74694c94349d1be1039e0540ea05abe5", "message": "feat(worktrees): teach the git service to inspect and prune worktrees\n\nCheck out an existing branch, prune missing worktrees, read branch,\nchange count and last commit, and measure size on disk."}
+{"id": "a56230899ea8afeb30dae2074ea56e827df20cdd", "message": "feat(worktrees): sweep unused orb worktrees at start and hourly\n\nWorktrees nothing uses are removed, settled ones after seven days;\nattached, busy, draft and dirty ones stay, and branches are kept."}
+{"id": "aabba36186fead3e9e50371ff77046b1e6a63b18", "message": "feat(worktrees): restore a thread's missing worktree on attach\n\nThe branch is recreated from the fetched default branch when it is\ngone too."}
+{"id": "a06df42132fc30eda5b2e519126af8199043bdec", "message": "feat(worktrees): add the ␣sw worktree picker\n\n<C-x> asks before force-deleting a worktree and refuses one that is\nattached or mid-turn."}
+{"id": "c78144aec394b971f2fe890d9d4c5c3fa4700759", "message": "docs: document the worktree picker and pruning in the README"}
+{"id": "1ce2dd8f9a9e736a5348274af88dfcd6031df1f8", "message": "fix(worktrees): stack the delete confirm on top of the worktree list"}
+{"id": "41621a2d7d11a795706492f35453b7c577fc6209", "message": "fix(worktrees): list active worktrees before settled and unused ones"}
+{"id": "af63cda1730b432554b82539115ae99454b2531d", "message": "docs: update internal notes"}
+{"id": "05aeeae6ad105ae9629b63c21a0ae360b6f87c91", "message": "feat(picker): list the current thread in the session picker"}
+{"id": "c7fe1764e97dfd0d79dd98ed28dec4003af2449e", "message": "feat(search): add a trigram full-text index over transcripts\n\nThe index lives in its own SQLite file and is rebuilt when missing or\noutdated; queries need 3 or more characters and stop at 200 hits."}
+{"id": "88b9a9e46437faf04a92a031e5d09af52f20dd47", "message": "feat(search): index transcripts in a background search actor\n\nBackfills newest chat first and catches a transcript up before each\nquery."}
+{"id": "25784c29134bd18caee1f1a224352e4ad68122f7", "message": "feat(search): search transcripts from ␣sg\n\nResults update as you type and ⏎ jumps to the hit's thread."}
+{"id": "498b9670fb2552c04d56b8affb410c8da55c5f8b", "message": "feat(search): preview the hit's exchange with matches highlighted"}
+{"id": "8908148996744eefbafb9f15be4c789d751b4187", "message": "docs: document transcript search in the README"}
+{"id": "df21a3ed453fa4bae55c928d25f5887eb160398f", "message": "docs: update internal notes"}
+{"id": "b09ca16a85251a9dea98adfde533a6c5b93392bf", "message": "docs: update internal notes"}
+{"id": "c5f1479aba207abb4fc9a775ed36fe10c0eacd20", "message": "refactor(harness): put Claude Code behind a harness trait\n\nEvery thread, draft and group stores its harness (store v10, backfilled\nto claude), and start, stop, listing and transcripts route through it."}
+{"id": "b6c69a8e4bfe1dd44912fcc0d69fac2ed0129076", "message": "feat(harness): add pi as a second harness hosted under dtach\n\nReads pi session files for titles and status, lists models by\nprovider, and reports when pi or dtach is missing."}
+{"id": "504161bfc841ac8ff8b0140b3ae8792eeaa8bb15", "message": "feat(harness): pick a session's harness with ␣h\n\nNew drafts default to the project's last harness, and the permission\npicker is hidden for a harness with no permission modes."}
+{"id": "1e577ebaa705c87862863177a3649a71548c0526", "message": "feat(sessions): give each group a draft with its own settings\n\nn opens the group's draft instead of starting a sibling, and d\ndiscards it once the group has a thread."}
+{"id": "d99c9088c218a34f2859e3d4fc0d70bc150efd46", "message": "docs: document pi support in the README"}
+{"id": "abdfda928b36b4afef3a661130b190dfcaf5ce8c", "message": "docs: update internal notes"}
+{"id": "e1f60e2e84e9d33f94f96fa74c53975fe8cf76dc", "message": "fix(harness): give pi its own mark in every list\n\nA draft whose project folder is gone is now refused before any harness\nstarts."}
+{"id": "217f137d0752439bf013117c2e034267cc54f1ce", "message": "fix(harness): replay pi's terminal modes into a new attach\n\ndtach never replays mode switches, so focus reports, bracketed paste\nand mouse events were lost."}
+{"id": "a51e2edbd45bdf471b4161593c8d22e8f5d81784", "message": "docs: update internal notes"}
+{"id": "499008bb463a48d0da8e8b9ecb37f7a9d3c6998c", "message": "feat(harness): host pi under zmx instead of dtach\n\nThe first attach starts pi, and settle and delete stop it with zmx\nkill."}
+{"id": "43ddc0c6be8df07bded9ecf7041587aea5a9240b", "message": "refactor(harness): remove the dtach attach modes and resize nudge\n\nA pane whose program exits within a second of starting now reports\nsession exited at start."}
+{"id": "250e0b537a19ccb567bad672c82aa5d9b2cae670", "message": "docs: describe pi hosting under zmx in the README"}
+{"id": "692876da6a9bbe92b5f9f315efa9043df7357d6d", "message": "docs: update internal notes"}
+{"id": "9daf3045ccb5ba685762df863048927e7a36213a", "message": "docs: update internal notes"}
+{"id": "64b378f2e4bf4d24142c58d312e4522ce8504bf1", "message": "feat(notify): add a Linux desktop notifier over XDG\n\nBlocked threads are sent as critical, and only the latest\nnotification's click focuses orb."}
+{"id": "915ba7afe59bf2729c01cc403f1686e3206d9527", "message": "feat(notify): choose the desktop notifier by platform\n\nterminal-notifier or osascript on macOS, XDG on Linux, none elsewhere."}
+{"id": "8fca0c88668fb9d6bb066d57071347f3cfdb9e05", "message": "docs(notify): document Linux notifications"}
+{"id": "517a06da2a8b7dc27fc8c3ac3dfcdc991ea14ed3", "message": "style: fix lint warnings in the picker and sessions actor tests"}
+{"id": "8ee2e7e842204a55e22212a0e55a2ea8626907bc", "message": "docs: update internal notes"}
+{"id": "a543297f1d649f8aa2013ff4c1ccf18c5f937669", "message": "feat(sessions): add pi agents to the Research kit\n\nPi twins of the investigator, falsifier and simulator agents are\nseeded beside the Claude Code ones."}
+{"id": "dbdcc8e419225bb17938a152ec9edfe1ab996f07", "message": "docs: document the pi Research kit in the README"}
+{"id": "3803a18f03a4fd689a89a14b09d351820bde09bb", "message": "docs: update internal notes"}
+{"id": "106bf17aeee0ece84031ac5e2c6c232ae8c04307", "message": "feat(sessions): replace the Learn template with a practice kit\n\nAn orchestrator, a saboteur subagent that plants bugs on a fresh\nbranch, tutor and challenge guides, and an epub ingest script."}
+{"id": "90813b4baaceb141bfa53bb90ba91f3e259029a5", "message": "feat(sessions): let the Learn kit spawn its saboteur on pi"}
+{"id": "e83402b2080127ae1e9c60a715637d9109eb90a0", "message": "feat(sessions): add a pi twin of the Learn kit saboteur"}
+{"id": "032760831ce1533dbc3ddd916b2ef3ab23d4d6b0", "message": "chore: ignore nested worktree checkouts"}
+{"id": "7d081fb1c15f12f3ebed19e836d92d9cb9da70ce", "message": "refactor(sessions): move the Learn kit guides to .learn\n\npi threads read them too."}
+{"id": "5a1bcc4dbdbd81e7253ee188e04021ba3281f150", "message": "refactor(sessions): move the Research kit conventions to .research\n\nBoth kits' AGENTS.md now name no harness."}
+{"id": "390a36b500529458a3b5700a2ea9d9d980ac3073", "message": "feat(zmx): run every pane as a zmx attach client\n\nEach pane gets ORB_PANE_ID; live panes reattach at start and a dead\nclient respawns once."}
+{"id": "b5fe3e194c9a5da8ca63919b7b774c1ad080f192", "message": "feat(layout): show each session as tabs of split panes\n\nThe layout tree is ported from herdr (see NOTICE); direct keys focus,\nsplit, close, resize and switch tabs."}
+{"id": "3ed9e9ee2d96a04a40fe95209f75bb4fe8a59830", "message": "feat(store): migrate threads and groups into sessions in store v11\n\nThe v10 database is backed up first, and layouts are saved per\nsession."}
+{"id": "a012b428a4fb3a06cfe0d37ea11755dc333b6eda", "message": "feat(integration): add orb integration install for Claude and pi\n\nA Claude hook and a pi extension report each pane's conversation, so\norb can bind threads to panes."}
+{"id": "6b768e5eac38357def9bbf81d88373067a663d17", "message": "feat(harness): give every agent pane a live status\n\nAuto-settle moves to the session and never settles the selected one."}
+{"id": "5a2fc78b9260b085563d9cb5e0293645e777a699", "message": "feat(sidebar): make the sidebar a list of session cards\n\nOne row per agent pane and a one-line Settled shelf; group cards and\nthe dashboard menu are gone."}
+{"id": "c8279809a951a0826ce7835535e5d720cfe0389d", "message": "feat(sessions): start a session from a project, workspace and branch\n\nIt opens with one shell pane. Drafts, groups, the model and permission\npickers and background Claude hosting are removed."}
+{"id": "e882fccada36f8824558cadcb900c31e7e264ee9", "message": "feat(keymap): make <C-g> the which-key leader everywhere\n\nAdds the +pane, +tab and +new groups; <C-g> <C-g> sends Ctrl-g. The\nSpace leader and the old Ctrl keys are gone."}
+{"id": "140254cfa2d62d7d3b1b3e2c363571a394f338be", "message": "feat(sessions): resume agents in their panes after a restart\n\nEach pane's resume command is typed into its fresh shell, and every\nunsettled session attaches at start."}
+{"id": "e102916194e8ac68039d6d2b35e10979cb6f2935", "message": "feat(term): add scrollback, mouse selection and OSC 52 copy\n\nPanes keep 10 000 lines of history; a drag selects text in panes whose\nprogram does not read the mouse."}
+{"id": "2881e4c225256e5d8ef71bf204e1108023822691", "message": "refactor: remove the zellij backend and frozen thread fields"}
+{"id": "ee5ed6b3bd10538a2178506d7fdb5b46dc6fc412", "message": "fix(harness): stop only live migrated background sessions at start"}
+{"id": "7c3ef04c939455c70ff342711c4aeea00628d0d9", "message": "fix(store): migrate each group to one session with a tab per thread"}
+{"id": "0070f45eee4ab78f2b923cb6cc0326fe79a803b9", "message": "feat(layout): re-tile a tab from a template by pane count\n\nColumns get equal widths and rows equal heights, and closing a pane\nre-tiles the tab it leaves."}
+{"id": "af0784339de8b98d4f26c3828ebafee40b7147f0", "message": "feat(layout): even out a run of panes on a manual split"}
+{"id": "5ac616dd3f328d1517c4cccb372404edc4d1fdb4", "message": "feat(layout): stack the right column from 11 tiled panes"}
+{"id": "eb63d41b8f1cb16702c8d803ca254614202b1180", "message": "feat(sidebar): list each agent as its own row under its card\n\nEnter shows its tab, r names the pane, and d closes it after a\nconfirm."}
+{"id": "67ad26f7ce27897cfa4303271782bc16ab199c5f", "message": "test(layout): cover every pane count and close in the tiling template"}
+{"id": "86f8121544e02736f260c2f911bba0999c0000a7", "message": "feat(sidebar): let sidebar search step onto agent rows"}
+{"id": "3af257724f5f60b675f916688fe6e4fa367ed36d", "message": "fix(zmx): attach panes when orb runs inside another orb pane\n\nZMX_SESSION and ZMX_SESSION_PREFIX are dropped from the child\nenvironment so the enclosing zmx client is left alone."}
+{"id": "e0f1b01d891051c1f8c3f5ecc8e7b02dea82a31c", "message": "feat(store): refuse to start while another orb holds the store\n\nA second orb on the same store would stop the first one's panes."}
+{"id": "97b34ddc20532915945fe0b3d6970f4390d21745", "message": "feat(panes): draw each pane in a titled rounded frame\n\nPrograms are sized to the inside of the frame; a stack becomes a list\nbeside its shown pane."}
+{"id": "afcc8b4b449630158c87978e86a7edd1339a6204", "message": "feat(tabs): draw a chevron tab bar with overflow chips"}
+{"id": "c3d97ca30e421f395d6860c01ca42ba044778b36", "message": "feat(layout): finish the stack list look"}
+{"id": "ebd008dd1444c56a0534fd71e91d8ae4499993aa", "message": "docs: update internal notes"}
+{"id": "db26fdc10ef1ae785535840b41e8ca417df2ea67", "message": "style: fix lint warnings in the pane frames and tab bar"}
+{"id": "e6fb6fb08f992ce0ae04fed0b6ed61b3afe96a91", "message": "feat(keymap): move focus across tabs and between sidebar and panes\n\nCmd h/l crosses tabs with wrap, <C-S-h>/<C-S-l>/<C-g> e move the keys,\nCmd 1-9 show tabs, and <C-g> q quits."}
+{"id": "bbaa4e1c6ad47de1741770c1690e3215f29a0d77", "message": "feat(layout): turn a tab of 11 or more panes into one stack\n\n<C-g> p s stacks a new shell with the focused pane."}
+{"id": "906ad9f0da3d043d98068a8b9557ec07e8b8ec04", "message": "feat(tabs): click and scroll the tab bar"}
+{"id": "f5f14b9ae5c80027adfe446cd1ea595b9985dc40", "message": "docs(panes): fix a stale comment on leaving a pane"}
+{"id": "1c184d4021d72fc836a84c9645dabb1ad0cd1e63", "message": "feat(keymap): toggle the sidebar with <C-g> e\n\nThe stack list is centred, and the wheel over it steps the shown pane\nwithout moving the keys."}
+{"id": "036f7c323649100bb1b2ac3c12f2dc48e0cb9667", "message": "feat(sidebar): fold and unfold a card's agent rows with l and h\n\nEvery card starts open. Search lists a folded card as open, and a cursor\nleft on a hidden agent row unfolds it."}
+{"id": "0e9bf4bf8c4eddcde590e9dc1433902143cdf877", "message": "docs: describe card folding and <C-g> e in the README"}
+{"id": "3fa6532393574ff6a206591151c88ded04f96bb4", "message": "feat(tabs): break the focused pane out to a new tab with <C-g> t b\n\nAgent rows hang one level under the card's last line again, and the\nstack list's > marker sits outside its left bar."}
+{"id": "dc4c66d639c7101abd9ce31d5cdb347b96998443", "message": "style(keymap): rewrap the keymap module docs"}
+{"id": "2faf4bdda9a8547d30be75cf81771d0242efaee0", "message": "feat(sidebar): show kind and per-agent status icons on cards\n\nA Research or Learn card shows its kind icon before the project. Every\ncard with agents shows one status icon per agent before its chevron."}
+{"id": "163c10ea9c636e1e3682ad2935f3cc9f65cdb8fc", "message": "docs: re-record the demo and keep its recording kit in docs/demo/kit\n\nThe kit records with VHS against a throwaway home: dummy repos, a seeded\nstore, stand-in claude and pi, and a pty wrapper for keys VHS can't\nsend."}
+{"id": "cec7f3ac2ba3cada4aaff7d8c2283003fc5f9def", "message": "feat(sessions): open a shell tab when a session's last pane closes\n\nThe session stays open in its directory instead of being settled."}
+{"id": "9d1ac57dee2a3d859db9e85e28b6fdff0085bf7c", "message": "feat(worktrees): refresh an open worktree picker after each rescan\n\nThe typed text and the selected worktree are kept."}
+{"id": "8a1dc81e39aecece55235f75bcf195f2d1619f80", "message": "fix(sidebar): make the mouse wheel only scroll the sidebar view\n\nIt works wherever the keys are. The view returns to the selection when\nthe selection moves or the keys enter the sidebar."}
+{"id": "4e0ced5d9003b7724e55b235d0027196e86331ae", "message": "docs: update internal notes"}
+{"id": "2227004f90257058a4304ecc61a43658a7f95e8c", "message": "feat(layout): allow several stacks per tab\n\nEach stack has its own list, width, shown pane and wheel scrolling.\n<C-g> p s on a pane outside every stack starts a new one."}
+{"id": "73005038b358119b75aab5856b763fc0293b946b", "message": "feat(ui): show a notice after copying a mouse selection\n\nThe mode line shows \"Text copied to system clipboard\" in blue for 2 s."}
+{"id": "13ee98cf7634aa357f585d1d377195b559b432a2", "message": "Merge branch 'main' into stacked-resize"}
+{"id": "484fd55c92fccac97d002df42461c489e2dbf585", "message": "feat(layout): stack a split when Cmd + can't grow the pane further\n\nCmd + grows the focused pane until a pane would fall under 5x5 or past\nthe ratio bound, then stacks its split; with no split left it zooms the\ntab."}
+{"id": "3a26211677511a17b61d9539b077b63a802f23a3", "message": "feat(layout): undo Cmd + with Cmd - and Cmd - with Cmd +\n\nCmd - leaves a zoom first, then steps back to the original tree. The\nhistory is dropped once the tree changes any other way."}
+{"id": "6df2e676db8a4893901ef0beb53fac9e017d0c23", "message": "docs: update internal notes"}
+{"id": "871b3ae3e717e98e38771a9825109c485694dbb3", "message": "test(layout): cover centred stack lists and re-tiling a Cmd + stack"}
+{"id": "2f86d9a5e5da6aedbcdaa3a27ede120f9b63dc6b", "message": "feat(keymap): add a script that writes orb's kitty key maps\n\nscripts/kitty-keys.sh sends Cmd keys as Super on macOS; on Linux, Alt\nstands in for Cmd while orb is focused. The README points to it."}
+{"id": "bdacb755159be0546dd730fab42cc85ce91b9cd8", "message": "docs: update internal notes"}
+{"id": "5965fceba4ca38733ab099915ae1ba2eb2612f17", "message": "feat(layout): give each tab a swap layout and a changed-by-hand mark\n\nAdds and closes re-tile only untouched tabs; a marked tab places a new\npane beside the focus. A split splits a whole stack."}
+{"id": "6e1161df10366a4520752798b095bca2fc6d3303", "message": "feat(layout): step through swap layouts with Cmd ] and Cmd [\n\nThese keys no longer cycle tabs."}
+{"id": "d65882e01d92f30d245f1fd2d8c2b2dd5eafd527", "message": "feat(store): save each tab's swap layout and changed-by-hand mark\n\nSchema v12 adds two tabs columns; old rows load as vertical and\nunmarked."}
+{"id": "242483ca5af9256ba1aed13000412e181821b2b2", "message": "feat(tabs): show the swap layout name at the end of the tab bar\n\nA right-aligned Cmd <[]> hint and the name, lit while untouched and dim\nonce changed by hand; hidden on a 1-pane tab or when out of room."}
+{"id": "c54d86cb153c655e79beff41cd2fe47bb49f1258", "message": "docs: update internal notes"}
+{"id": "1b0ffdaaeec0dcf2ed5ddfa03bb8acebfdf0cce4", "message": "test(layout): cover swap layout cycling past stacked"}
+{"id": "9471d4390056287d21b35fdd099ce0a5f314ca5c", "message": "docs: update internal notes"}
+{"id": "0e817e4620925fee8b389a0c5eb3a656c5656371", "message": "feat(ui): add a message box at the top right under the tab bar\n\nCyan Messages or red Error, 40 columns up to 40% wide, with long lines\ncut by an ellipsis."}
+{"id": "a1293348f78148d28e8e58c537c75e596d75ec48", "message": "feat(sessions): ask for a name after picking a project with <C-g> n\n\nEnter goes on to the workspace picker or makes the session, which keeps\nthe name; Esc cancels."}
+{"id": "c308206431621e490b73b685ebf64a1907ae556d", "message": "feat(worktrees): name a session's new worktree branch after the session\n\nThe branch is orb/<name-slug>, or orb/<hex> when that branch exists or\nthe name has no slug, also when a named session moves to a new worktree."}
+{"id": "be36b98314daa7ccf7d8436cff2f1d6488145ca5", "message": "feat(layout): resize splits by 5% with Cmd + and Cmd -\n\nThe step is 5% of the tab width or height, at least one cell. The\nsidebar keeps its 4-column step."}
+{"id": "a7f9c736b42e9a779d42549629c5f9387c8c30ea", "message": "docs: update internal notes"}
+{"id": "9bcae6154e4fa0c72ebb925d2d747a75d6324912", "message": "feat(layout): grow Cmd + by 30% towards a lined-up side\n\nCmd + grows 30% towards the first lined-up side, else stacks with it,\nelse grows 5% any way, else zooms. Cmd - unstacks one pane, then\nshrinks."}
+{"id": "1f642d60e810193fc26b3ef6feffb83a6e24bf51", "message": "docs: reword code comments to describe orb's own behaviour"}
+{"id": "b252ccd090a5c070a7ab973a96a3bf1633896524", "message": "style: rewrap the reworded comments"}
+{"id": "36e00110b675ecb3310cee78006d35ca821e8840", "message": "feat(worktrees): prune worktrees 3 days after their last settle, not 7"}
+{"id": "1a1913d7791332ae6afd0071d0b3280b8876cbcf", "message": "docs: update internal notes"}
+{"id": "448e48775228b55d55557771eee585be67f90c59", "message": "Merge branch 'main' into toast-notif"}
+{"id": "3a8f7a8ea9ec5cd8d3f4f0f76e8af783b6de2c2d", "message": "feat(ui): move errors and notices from the mode line to the message box\n\nA message pops only when its text is new and hides after 5 s for an\nerror or 3 s for a notice."}
+{"id": "40f6f7c9711d7bf9843445c35e1fc2188e14aaf0", "message": "docs: update internal notes"}
+{"id": "b534578ffc8c22b2b0e4e26f9a4fd011248825d5", "message": "docs: update internal notes"}
+{"id": "168d5a47da869fdf5d8d0a9307fe6f894707762c", "message": "feat(ui): show \"Added project <name>\" after adding a project\n\nA cyan notice for 3 s, cleared by any key or by a failed add."}
+{"id": "5b9b62962ee473d15c9ffba2eac331c7ecd93646", "message": "feat(panes): add a resize mode on <C-g> r\n\nh/j/k/l and arrows push a border out 5% (or pull the opposite one in at\nthe edge), H/J/K/L pull it in. RESIZE shows on the mode line."}
+{"id": "268c31c1e8aa63827455b7c11f6cee3a496f9133", "message": "feat(panes): add a move mode on <C-g> m\n\nh/j/k/l and arrows swap the pane with its neighbour, n/Tab and p with\nthe next or previous pane. MOVE shows on the mode line."}
+{"id": "6e079a309bc2287c68df07d7bc3132e7bdf8d86d", "message": "feat(keymap): list resize and move mode keys while the mode is on\n\nThe key box replaces the which-key popup. Entering a pane or a mouse\naction that runs intents ends the mode."}
+{"id": "211b3b1597e802b85db7b930bc0180d138d6c7d5", "message": "docs: update internal notes"}
+{"id": "12b97916db9712b42c8cc6f7f3af2f46844e9ada", "message": "docs: update internal notes"}
+{"id": "e24a2d1c029f44d7ed08ca5dbb874dfffe040b4d", "message": "feat(picker): open the worktree and session pickers in a list mode\n\nj/k/gg/G/d act on rows. / starts a search (INSERT on the mode line), and\nEsc returns to the list keeping the text."}
+{"id": "2f5c83291846249dad64f02d3cb75bf79ce0f92f", "message": "feat(picker): add a projects screen on <C-g> P\n\nd removes a project after a confirm, a adds one through the directory\npicker and Enter opens the New session box. <C-g> a is unbound."}
+{"id": "19aa33c643a3e72071f6e59c3a5099ab3c24bc6f", "message": "feat(worktrees): delete a worktree picker row with d instead of <C-x>"}
+{"id": "b42f952904d57b9c3cf077ff868d0b881a6e3cfa", "message": "feat(picker): filter the session picker with a/b/w/i/s, delete with d\n\nThe same filter key again shows all, and the title names the filter. d\ndeletes the highlighted session after a confirm."}
+{"id": "95ed8f8400282d1fa10beb36e5241fda61b2bfdf", "message": "docs: update internal notes"}
+{"id": "ec13823bcc188e19601a13bc7728698811058f29", "message": "docs: update internal notes"}
+{"id": "0ffa116f2f6e5c3f4f69fc6c436b898a5d69ef9e", "message": "feat(panes): add floating panes toggled with Cmd f\n\nCmd f shows or hides the session's floats, opening a shell float if\nthere is none. Cmd n opens another float, Cmd h/j/k/l moves between\nthem."}
+{"id": "7f78194c7342b75bd293e3c82dc5b7503bc531d6", "message": "feat(panes): save floats and add keys to pin and embed them\n\nFloats come back hidden after a restart. <C-g> p e turns a pane into a\nfloat and back, <C-g> p i pins a float, <C-g> p w shows or hides floats."}
+{"id": "7fda0ab68c4977ec6195e872a27452b41fc300f1", "message": "feat(panes): move and resize the focused float with the resize keys\n\nResize mode, move mode and Cmd +/- step the float by 5% of the body.\nMove mode n/p changes which float is on top."}
+{"id": "13e74039c982e8cf5a9672f1b6fdcc851b71df88", "message": "feat(layout): cycle floats through staggered, enlarged and spread\n\nCmd [ and Cmd ] change the float layout while a float has the keys, and\nthe tab bar names it. Adding or closing a float re-lays the rest."}
+{"id": "3bddf2187d488e2c5563b1d1ce5b7f1c13fb63dc", "message": "feat(panes): drag floats by their border and click to raise them\n\nA click on a tiled pane hides the floats. Where floats overlap, the\ntopmost pane takes clicks and the wheel."}
+{"id": "38e483b22c3ca8cdf61067bde2ea64558544051c", "message": "docs: update internal notes"}
+{"id": "57e8fd57ec3a1695a383c4e775baded60525d38e", "message": "docs: update internal notes"}
+{"id": "378bd6c2ed63194be89eeb785a03497b93b8290e", "message": "Merge branch 'main' into picker-list-mode"}
+{"id": "eede8517a0ba4e7c06567b541c12a7c9d637cdfa", "message": "feat(picker): show each list picker's keys under its boxes\n\nListing names its keys; searching shows only Enter and Esc. The search\nbox shows a dim / until a search starts."}
+{"id": "91743c054c863d26493db35a70b1d848f596ae01", "message": "docs: update internal notes"}
+{"id": "12201d1696c33b52656521a5e62b45fcbac18e91", "message": "fix(ui): draw each frame inside a synchronized update\n\nThe terminal shows only finished frames, so the cursor never slides\nacross cells being written."}
+{"id": "96bf5f5873dc688db6c9392080e52ef3a5828969", "message": "fix(ui): park a hidden cursor where it last showed before each frame\n\nStops a terminal's cursor trail from sliding when the cursor hides."}
+{"id": "27894217b9a8f716f6df310f7f3ee8e3cf89ab43", "message": "feat(harness): title an agent started with a slash command by its text\n\nUntil Claude writes its own title, the first line typed after the\ncommand is the agent's title."}
+{"id": "24065a28803446e28e6730cc69a6495f7ba68380", "message": "feat(picker): list one session picker row per agent\n\nRows read project/session/agent and filter by each agent's status. Enter\njumps into that agent's pane and d closes only that agent."}
+{"id": "3402bc4aeb45ca30b4d9b32d2b699ee3da17366b", "message": "feat(keymap): add session picker picks to the jump list\n\n<C-[> and <C-]> reach every picked session, even across a chain of\npicks."}
+{"id": "5e81fa4377ac797edbdea215861cf7f311693951", "message": "test(harness): cover slash-command titles against renames"}
+{"id": "478aa4096f4d78a0cfe8c738b48d7c5b6f09780f", "message": "feat(keymap): make every agent its own jump target\n\n<C-[> and <C-]> walk the agents you entered, picked or moved focus\nbetween, landing in that agent's pane. Agent jumps survive a restart."}
+{"id": "c9a9accf104c0b889701667781d9ecbcb6008363", "message": "docs: update internal notes"}
+{"id": "629e4be7b494c220003785838cb767f294324a9b", "message": "feat(sidebar): show the last entered session on the right side\n\nMoving the sidebar cursor no longer swaps it. Settling or deleting it\nclears it, and leaving a pane puts the cursor back on its row."}
+{"id": "e72f76380f00958407b76a4c3085738d03b6ceda", "message": "docs: update internal notes"}
+{"id": "84217106290f8c03bdfd7b34d25325d3b765e386", "message": "Merge branch 'main' into agent-picker-titles"}
+{"id": "2d1b454f86b799c1871e181923de6749e009bf9a", "message": "feat(sidebar): mark the active row and follow it in the status line\n\nThe active row gets a blue bar and a bold first line. The status line\nshows the active session's branch and project, without the row position."}
+{"id": "46c82e632d4c678f3e488b23cbfc1a5f3761bda8", "message": "test(sidebar): cover switching and deleting the active session"}
+{"id": "1a6728a3bbf1a49febb950ac5d4e0b1604ec43b7", "message": "fix(sessions): never kill or prune what orb couldn't read or check\n\nThis holds at start and when a pane's client exits. A renamed worktree\nbranch now follows its session, so restores land on the right branch."}
+{"id": "619e956a67adb06c1c1b83f7ecd702a757d84cec", "message": "docs: update internal notes"}
+{"id": "e8fc7caf527736982127162f30910845b1873737", "message": "docs: update internal notes"}
+{"id": "728ede16228358b28e35f24ad26c268923300197", "message": "build(lint): check that code names cited in AGENTS.md exist\n\njust lint runs scripts/lint-rules.py, which also rejects a bus in the\narchitecture section and has a --self-test."}
+{"id": "2be25d04104441c9ca52ba93690661145ba067fe", "message": "build(lint): drop the pending-approval exceptions from the name check"}
+{"id": "9c46efada1dbb8c87828f753c4c11a3c02c4892f", "message": "docs: update internal notes"}
+{"id": "c045a4661fbc0225ef15380058fb6b2685c6b70f", "message": "feat(log): log starts, kills, removals and errors to ~/.orb/orb.log\n\nThe start screen names a session that exited at start. The lint rules\nnow reject dropping a kill or removal result."}
+{"id": "539eb7f1c395a55010ea8a2c51c557fcafb62e52", "message": "docs: update internal notes"}
+{"id": "ba9183059411c220b4f0fb71efb9e3fbd74c1cea", "message": "fix(log): write the log without terminal colour codes\n\nStart-up search indexing also skips transcripts whose file was deleted\ninstead of logging an error for each."}
+{"id": "4ee7f81bf2dd35d0484b56554848b56b3419aaad", "message": "docs: update internal notes"}
+{"id": "bbdba048535f4142c5ec69c44a1a3e978f1df122", "message": "feat(log): end orb cleanly on a crash and log its cause and backtrace\n\nA crash while drawing one pane only stops showing that pane."}
+{"id": "fddb6f955bb792849008c5e63819ecf10ffb5817", "message": "docs: update internal notes"}
+{"id": "050c9b0e1088bad43119cef14638bed56326a18c", "message": "feat(store): back up saved data before every upgrade\n\norb keeps the three newest copies and refuses a newer database, naming\nthe copy to put back. A test build upgrades only with --upgrade-data."}
+{"id": "13cf10c646931fa88dfc9091c23b0de70c1627e3", "message": "docs: update internal notes"}
+{"id": "fef2d2326d3b3409bb244b2e1ecee46cffaf3396", "message": "test(panes): add safety nets for lost panes and mixed-up ids\n\nThe lint rules check that every zmx list call site is reviewed. A pane\nthat stopped showing after an error is now killed when closed."}
+{"id": "ee42a56dd79b07942ce3994e6f47c5393e75da67", "message": "docs: update internal notes"}
+{"id": "c24dd1c003fd8baa7a839abbcd02a8d5eb0fbc3a", "message": "docs: update internal notes"}
+{"id": "0170f59a0203a52fa11b3fbd62b3608142f70433", "message": "fix: time-limit git calls so a stuck git no longer freezes orb\n\nEach git call gives up after a few seconds (a minute for changes) and a\nworktree size read after 10 s. orb stops asking Claude what it runs\nwhile no Claude pane is open."}
+{"id": "3dc97a42543869f3eb720762466f6444effe7a8e", "message": "docs: update internal notes"}
+{"id": "f49c1f378b1f7736389e07883d6e46a4474eb12f", "message": "perf: notice finished commands sooner and read branches in parallel\n\nA quick zmx or git command is noticed in a millisecond or two instead of\n10 ms. The branch picker's four git reads run at once, and the session\npicker re-reads a growing transcript at most once a second."}
+{"id": "80007789cbbd0e3b11836837303918a81a7d1598", "message": "docs: update internal notes"}
+{"id": "867c879636d65fd1c7d9fc5abce093c6af05a1ee", "message": "perf(panes): draw the screen at start before reconnecting open panes\n\nPanes of open sessions reconnect a moment later instead of leaving a\nblank screen until all of them are back."}
+{"id": "90fa29b1cf78001a97aaec1dfa21b1ed0e78dffd", "message": "docs: update internal notes"}
+{"id": "7897470cc501c3be54b5764910f707a11fa895e9", "message": "fix: finish pending saves on quit and quit cleanly on signals\n\nQuitting waits up to 2 s for writes already on their way. SIGTERM,\nSIGINT and SIGHUP now quit like <C-g> q, leaving a working terminal and\nletting the next orb start."}
+{"id": "d5ff9b5d6ad888a425a95978cd87dd46e55274d8", "message": "docs: update internal notes"}
+{"id": "69056838f554a777126ad8307177ae3025086286", "message": "fix(sessions): drop the 3-day idle settle and keep killed panes dead\n\nA pane orb kills on settle, delete or a workspace move can no longer\ncome back as a bare shell."}
+{"id": "510b47104be3a68cb1a5966957fbdae3af29dbbc", "message": "docs: update internal notes"}
+{"id": "bf703500fdc7eaaebf7141d1694fc4f0191ecee5", "message": "fix(sidebar): remove an agent row as soon as its pane closes\n\nSidebar search finds an agent row by its pane's name, and a closed\npane's report file is deleted with it."}
+{"id": "03c760b90cfb295260e15e7fd7adb2da2ea76165", "message": "docs: update internal notes"}
+{"id": "5f74c507b931179233b0e5c88a638f8b2f42144b", "message": "fix(sessions): restore a new session's first tab with its start layout\n\nAlso drop the start-up check for old background Claude sessions."}
+{"id": "b014e57c5c08f862a203dacf6b96eac6425c94dc", "message": "docs: update internal notes"}
+{"id": "faa72fe0ddf7ad9e580a18d210bb4ddcbfa61361", "message": "refactor(store): drop tables and columns from before sessions existed\n\nThe migration copies the data aside first and keeps every session, tab,\nwindow, agent and jump."}
+{"id": "2eb6c6d5cb78b610a12335b72b617561e5449366", "message": "docs: update internal notes"}
+{"id": "839473c653fd55120f7b939dfd508eab2622aa5f", "message": "refactor: give each actor one command enum and forward it in one call\n\nNo behaviour change."}
+{"id": "66f4e7e3a1acc9b6e73e75ef110b0f9096459949", "message": "docs: update internal notes"}
+{"id": "d2ae551fbfab43c15808677133ebe1475f5863d2", "message": "perf(sessions): run worktree creation and status checks off the queue\n\nSplits, tabs and floats no longer wait for them. Adding a project and\nswitching branch no longer hold the shared state while git or the store\nruns."}
+{"id": "590df7552c86e6945d8ec50426f759f405d9a515", "message": "docs: update internal notes"}
+{"id": "62a90a6d7ba2705ef3ff2c624fbcde8195ea293b", "message": "refactor: report actor results to the loop as typed outcomes\n\nOne place applies them. A finished restore, move, branch switch or new\nsession now opens while its session is still active, even if the cursor\nmoved."}
+{"id": "238b1c3818c40f01391fa7005163276574d897d3", "message": "docs: update internal notes"}
+{"id": "e6bf9d4fb5f303a264f68f7d716b09e5dc9338e7", "message": "docs: update internal notes"}
+{"id": "f16bc9c01a88ab4acf573daf1af9792384e664fd", "message": "docs: update internal notes"}
+{"id": "f453f2a6b3f9b2258782123238e952edcbacd67f", "message": "fix(sessions): queue a restore behind a session that is still starting\n\nThe restore could end that start early."}
+{"id": "369afb3e3e2c3fd21124b53d35c73ae9ff0cab25", "message": "fix(layout): move up from below a stack onto the pane the stack shows\n\nMove mode swaps with that same pane, and the three ways to close a pane\nshare one rule."}
+{"id": "5e80a08c5527add661db7a443f8d9a97f09edbd2", "message": "docs: update internal notes"}
+{"id": "0d613c1fb1541fffa68e9e11d785144917f15f79", "message": "refactor: split the largest files by topic and cap files at 2,000 lines\n\nTests move into files beside the code they cover, and just lint-filelen\nfails a file whose non-test part passes 2,000 lines. No behaviour\nchange."}
+{"id": "275c3ea40e44ef296c47afd7913fadb6fb925b60", "message": "docs: update internal notes"}
+{"id": "a77f928e143c6bac676131e7a53a1d0c955a3976", "message": "refactor: say agent wherever the code means an agent\n\nAn untitled agent reads \"New agent\" and delete-worktree refusals say \"an\nagent in it\". Saved data keeps its old names."}
+{"id": "28e2b1c3742fdc093783d125fa8d19f2f452b739", "message": "docs: update internal notes"}
+{"id": "2698f3190d3223c8b903edc7b8667567287d57af", "message": "fix(log): log six kinds of failure that used to be dropped"}
+{"id": "c5ba86ffc99363f506f1fa0419f8003371b57b38", "message": "docs: update internal notes"}
+{"id": "b99ea44091f3ee26a3f236ef1583cc0b3ba965f7", "message": "fix(log): skip branch reads outside git and log repeat failures once\n\nAlso land on the shown pane when moving up into a stack with no rows."}
+{"id": "ef38b3edfc2cd76eda82bd9d1a40cfdec7129191", "message": "refactor: move helpers into their features and name picker keys\n\nStep directions get their own names too. A command that can't reach its\nactor logs its kind and reason, not its payload."}
+{"id": "c2b0be4de842b41ac3637c5f3d485a6d11eaf18f", "message": "feat(control): serve a control socket and list sessions, tabs, panes\n\nA running orb listens on ~/.orb/orb.sock. `orb session|tab|pane|agent\nlist` print JSON, or \"orb is not running\" when nothing answers."}
+{"id": "0201dfb964aa0a493eab9a25edcd8753fa6b1e31", "message": "feat(control): let agents change panes, tabs and sessions\n\nSplit, stack or float a pane, open or close a tab, start a session, and\nclose, rename, settle or focus a named pane or session. Only focus moves\nthe keys; a settled session refuses every change."}
+{"id": "a64394764162f4c276cbfbfb80b84de0536a53a9", "message": "feat(control): add orb pane send, keys, run and read\n\nA run into a pane that hasn't printed yet waits for its first output. A\nsettled session refuses all four."}
+{"id": "9e7f6a00a7ad12da3b15be7b63361a5f3bebba6e", "message": "feat(control): add orb agent start, prompt, wait, get and reply\n\nstart waits until orb sees the agent. A pane with a live agent refuses a\nsecond start, and an agent waiting for approval refuses a prompt."}
+{"id": "b5677c3a83aeb2fd7a443db79b6da5fbe40a18a2", "message": "feat(integration): install an orb skill that teaches the control API\n\norb integration install writes it for Claude Code and pi."}
+{"id": "eda3357d4e708ee57f05d3af5f7659dbd92f1ecd", "message": "docs(control): note that refused requests write an api log line"}
+{"id": "fd8c30ec8564838ab06f2257749f6020994cdc92", "message": "feat(sounds): play a request sound and a done sound for agents\n\nThe request sound plays whenever an agent needs you, the done sound when\na turn ends off screen. Uses afplay on macOS or the first working Linux\nplayer; sounds from herdr (see NOTICE)."}
+{"id": "c7978978c3184a18dae1da544d5ef730f1993042", "message": "fix(sessions): open a ready session at once when the keys are in a pane\n\nIt takes the keys into its pane. A picker, the rename box or search\nstill makes it wait."}
+{"id": "97b2b12f65520f2430b2b15d2c064f005ec7e81a", "message": "feat(sidebar): mark the active row with a blue bold title, not a bar\n\nSearch matches in it keep their own blue."}
+{"id": "ed18152ae0c8c82c8a28f4b43b2004b7b17a3b91", "message": "Merge branch 'main' into agent-sounds"}
+{"id": "b1ff67ee758165edba07897e20ab109ef885ad30", "message": "feat(graphics): show kitty images from a pane's program in its pane\n\nIn kitty, images sent through shared memory are cropped to the pane,\ndrawn under the sidebar, pickers and toasts, kept through resizes and\nremoved while the pane is hidden."}
+{"id": "4c44fde0ea2b4973841667111b68298bdd58995b", "message": "feat(keymap): bind direct keys to Alt instead of Super\n\n<C-g> h and <C-g> l replace <C-S-h> and <C-S-l> for moving the keys\nbetween a pane and the sidebar. A kitty block in the README replaces\nscripts/kitty-keys.sh."}
+{"id": "a48e15283cf1931f12328e306c47c1af7d2af0ca", "message": "fix(sessions): mark only the visited agent seen and stop hover visits"}
+{"id": "5258bc8134d70fe2ae9ffe13fd05717c991e8604", "message": "fix(sessions): visit the agent pane an action moves the keys into"}
+{"id": "e75f8e4752fb1a655f201c6d3607bab4cdd4ef9b", "message": "fix(sessions): let the poll mark seen only the agent with the keys"}
+{"id": "ea33bac8b015da473132413c69b3e2114f55a7b3", "message": "docs: update internal notes"}
+{"id": "77eb4664dcc4e4b92ec53cee0fed5c1f3cf67d3b", "message": "docs: update internal notes"}
+{"id": "a1fc1d5c8f5a2b2649d8e45164b388a321a16e17", "message": "Merge branch 'main' into fix-keybind-handling"}
+{"id": "b14f4274f23360d1c01a5cc65d227fdf9a911d24", "message": "Merge branch 'main' into terminal-browser"}
+{"id": "68034ff11c9f6d1dffa047d579e8f4e6fa4e7bb3", "message": "feat(browser): pass kitty keys and pixel mouse to terminal-browser\n\nTyped text, key releases and pixel mouse reach it as in bare kitty, so\ntyping, held keys, small clicks and trackpad scrolling work. A drag\nreleased above the window still copies or drops."}
+{"id": "d0e4489561552734fc81898aee647f5f2b33410e", "message": "feat(browser): open terminal-browser --split right|down as an orb pane\n\norb names a private socket in each new pane's env. The keys stay where\nthey were; left and up are refused."}
+{"id": "c4279cc487d03354397a22eb22fcebd384eee02e", "message": "fix(browser): keep orb's overlays over a browser page in any theme\n\nMenus, pickers, toasts and floating panes now cover the page in any\nkitty theme, including one whose background is orb's own navy."}
+{"id": "d3811855a66c92885a95f39004c2013a0693ffa0", "message": "feat(colonies): add colonies, worlds and session parent links\n\norb saves which session made each session and clears the link when the\nmaker is deleted. Research and Learn sessions become colonies, and\nprojects can be shared or fresh worlds."}
+{"id": "330a2d84b710dae3c725653c1d1305ac9ccd7663", "message": "feat(colonies): add the worlds screen and the new-colony picker\n\n<C-g> C lists worlds (a adds a folder, d removes one) and <C-g> c names\na new colony in a world. <C-g> f lists worlds after projects; <C-g> g is\ngone."}
+{"id": "d6838948e5be651c583ab7ee9188f09744b2ef13", "message": "feat(colonies): add colonists and colony-aware settle and delete\n\norb session create from a colony pane makes a colonist. Settle and\ndelete on a colony ask No, Colony only or With colonists. <C-g> , lists\na colony's colonists."}
+{"id": "3edb7cd3c1f3c8c416db34582429a81c770592ea", "message": "feat(sidebar): nest colonists under a folded colonists row\n\nl, Enter or a search opens it, and a stuck colonist shows through it.\nThe project filter and search show the way down to a colonist."}
+{"id": "a9d28e543b00c2fdffcbd16d69c8e9006ffc3218", "message": "feat(sidebar): draw two-line cards with tree lines and colonist dots\n\nLine two shows the project or world, one icon per agent and the chevron.\nRows indent 4 columns a level; a colonists row shows a dot per colonist."}
+{"id": "c9717f6e7d22b317c1eac135f812ed8f084cc9d6", "message": "docs: describe worlds, colonies and colonists in the README"}
+{"id": "f721ed19b34481d464b2452e3ef34ee99e29d69d", "message": "test(colonies): cover shared worlds and colonist parents"}
+{"id": "e0d36d63a6543982b8816f09683b48c124511378", "message": "feat(colonies): start an API session in a fresh world as a helper\n\norb session create without --project there starts a plain session in the\ncaller's folder, and --worktree is refused."}
+{"id": "42c64817451f67f68fb5643b53b714d10f8d6118", "message": "fix(colonies): always delete a fresh colony's folder with the colony\n\nEven with Colony only while a helper still runs in it. A shared world's\nfolder is never deleted."}
+{"id": "374a2f187fe1027a77feb466412efc1dda8f9b9e", "message": "docs(integration): teach worlds, colonies and colonists in the skill"}
+{"id": "f8fdb020593519e4a54499a7cb9b7326d4db8bd0", "message": "docs: split the agent guide into AGENTS.md and docs/dev topic files\n\nAGENTS.md keeps what orb is, the commands and the rules every change\nfollows; architecture, rust-style, testing and keybindings carry the\ndetail. lint-rules name-checks the new docs."}
+{"id": "0b824983218b5272c7f0673e5c5f59b674e7676e", "message": "feat(cli): add --version and license orb under Apache-2.0\n\nAdd the LICENSE and the workspace package metadata every crate inherits.\norb --version and -V print \"orb <version>\" and exit before touching\nHOME, the log, the store or the terminal."}
+{"id": "5222f731d9dad28bc21fae1a58c2618f38d27b03", "message": "build: bundle SQLite and pin the Rust toolchain"}
+{"id": "82c3add283539308dbcbcbc094436c498a5ca619", "message": "fix(store): let an orb in ~/.local/bin upgrade saved data"}
+{"id": "f439d8e9ef821c98585bdf619f877d608aa2e21a", "message": "feat(install): add a one-command installer"}
+{"id": "3dde5874feeb7f638264d08d3cc1a0d753b8ddd2", "message": "ci: lint and test on macOS and Linux, build release binaries on tags"}
+{"id": "187f4c452d80f5602200a3dff346d208cd182b0e", "message": "docs: rewrite the README and add keys and changelog pages"}
+{"id": "65a5dcd745af29e61ca5732db192ea128847b19f", "message": "fix(colonies): copy and remove colony folders off the sessions queue\n\nA fresh colony copied its kit folder (and a deleted one removed it)\ninside the sessions actor, freezing splits, tabs and statuses until it\nended. Both now run as blocking side jobs, like new worktrees."}
+{"id": "6238366129ca6e50a9253464e47e990a930a8070", "message": "fix(sessions): say why a settle was refused"}
+{"id": "0c04b80fb78a1cd4178e1aaa8a5413581fcd7134", "message": "refactor(sessions): share one settle step for keys and the control API"}
+{"id": "1020b1e7e1fc270b32bc6ab5c55065aadf8ea03d", "message": "fix(control): give session create 3 minutes and check before retrying\n\nThe orb skill tells agents to check for the session before retrying."}
+{"id": "9ae3a39d4a594e74a34af3c8086dbfccd63f0cbe", "message": "fix(control): log why a request failed"}
+{"id": "f4824cc78e783ebd90e11f1ec2991d9eed530746", "message": "fix(control): time out silent connections and end waits on hang-up"}
+{"id": "bd717250a4c087376b76ca11c453855b2ffe0b41", "message": "refactor(sessions): claim API session starts in the sessions actor\n\nThe default branch is now read in the worktree job."}
+{"id": "efe5b58a98070f379f65d4cc6f876dd67b4fbcac", "message": "refactor(sessions): move mark-seen out of the intent handler"}
+{"id": "23e6fa7201d79a7f83b1dd9696c99471e62eeb0b", "message": "refactor(sessions): split the sidebar tree and store tables into files"}
+{"id": "0acced9bce27a034c278a4a55bf43a3bf977f8e1", "message": "fix(sounds): time-limit the sound player and fall back to the next one"}
+{"id": "ebd2edae7a0c19739547ecf80537e18539c80f25", "message": "feat(log): record what orb detected about the terminal at start"}
+{"id": "bb34e403ea1252d038d5e66989f121583e9ed290", "message": "fix(graphics): cap chunked image uploads and scroll images with text"}
+{"id": "86aa816aac7ef532fc0d38a712f7a1fcd5b3aab8", "message": "perf(graphics): spread large image writes across frames"}
+{"id": "2d0b94c3f8de5449698cd7bdb7406d7bf59d4dc3", "message": "test(keymap): pin every scope's bindings in a golden file"}
+{"id": "b5a8cd992e1bd61472e6f209cadc41136e290e5f", "message": "refactor(keymap): derive session-kind scopes from one hide rule"}
+{"id": "6695c84bfff715e39a466cde3373b35d5af903cc", "message": "test(sounds): make the hung-player test deterministic\n\nmacOS scans a freshly written program on its first run, which in a full\ntest run could outlast the 2 s limit. Both players are now system\nprograms (/bin/sh running sleep, /usr/bin/true)."}
+{"id": "d0164e899ef9321c62becec4370a66e418ce8ad3", "message": "fix(notify): time-limit the desktop notifier and reject bare waits\n\nterminal-notifier or osascript is stopped after 5 s and counted as\nfailed, so a hung one falls back. lint-rules rejects a bare .wait()\noutside the timed runner and the pane reaper."}
+{"id": "e333ea4a93d0f5c555ac55ffef73a1a98769f01d", "message": "docs(dev): point three line references at the moved code"}
