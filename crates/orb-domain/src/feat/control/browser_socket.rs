@@ -270,11 +270,13 @@ mod tests {
     use std::cell::RefCell;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     use error_stack::{Report, ResultExt};
     use serde_json::{Value, json};
 
     use super::{LaunchEnv, PaneFinder, SOCKET_FILE, pane_in, reply};
+    use crate::common::wait_within;
     use crate::feat::control::protocol::{
         ApiError, Direction, Done, ErrorCode, Op, PaneResult, Reply, Request,
     };
@@ -665,7 +667,7 @@ mod tests {
     fn process_that_has_exited_has_no_pane() -> std::io::Result<()> {
         // Given a process that has exited.
         let mut child = std::process::Command::new("/usr/bin/true").spawn()?;
-        child.wait()?;
+        wait_within(&mut child, Duration::from_secs(5))?;
 
         // When looking up its pane.
         let pane = LaunchEnv.pane_of(child.id());

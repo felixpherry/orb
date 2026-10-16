@@ -14,8 +14,8 @@
 //! with one. A later notification about the same agent replaces the earlier
 //! one. Like `osascript`, each one runs with no stdin, stdout or stderr, and a
 //! thread of its own waits for it to exit. If it fails, for example because
-//! it isn't allowed to notify, that thread sends the same notification through
-//! a fallback notifier instead.
+//! it isn't allowed to notify, or is still running after 5 s, that thread
+//! sends the same notification through a fallback notifier instead.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

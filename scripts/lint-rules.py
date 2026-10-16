@@ -14,12 +14,14 @@
   outside the timed runners in OUTPUT_ALLOWED fails, since it runs a program
   with no time limit.
 - Unlimited waits: a `.status()` after a call chain in production code fails,
-  since it waits on a program with no time limit.
+  since it waits on a program with no time limit; so does a `.wait()` anywhere
+  in Rust code (tests too) outside the reviewed WAIT_ALLOWED files.
 
 `--self-test` plants a bad name, a bad phrase, a dropped kill, a dropped
-report, an unreviewed zmx list site, an unlimited `.output()` and a bare
-`.status()`, and exits 0
-only if all are reported and a dropped kill in a test-only file is not.
+report, an unreviewed zmx list site, an unlimited `.output()`, a bare
+`.status()` and a bare `.wait()`, and exits 0 only if all are reported and
+neither a dropped kill in a test-only file nor a `.wait()` in a reviewed file
+is.
 
 Test-only files (`tests.rs`, `test_support.rs`) have no production part.
 """
@@ -90,6 +92,12 @@ OUTPUT_ALLOWED = {
 }
 # A `.status()` that ends a call chain: `Command::new(..)....status()`.
 STATUS = re.compile(r"\)\s*\.status\(\)")
+# Files that may call a bare `.wait()`, each reviewed.
+WAIT = re.compile(r"\.wait\(\)")
+WAIT_ALLOWED = {
+    "crates/orb-domain/src/common/child.rs": "the timed runner: it waits only on a child it just killed",
+    "crates/orb-term/src/pane.rs": "a pane's reaper waits on the pane's own program, which lives as long as the pane",
+}
 
 SPAN = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[A-Za-z_]\w*(::\w+)*$")
@@ -201,6 +209,17 @@ def check_statuses(label, text):
     ]
 
 
+def check_waits(label, text):
+    """Report `.wait()` calls outside the reviewed files, which wait on a program with no time limit."""
+    if label in WAIT_ALLOWED:
+        return []
+    return [
+        f"{label}:{text.count(chr(10), 0, found.start()) + 1}: "
+        ".wait() waits on a program with no time limit; use wait_within"
+        for found in WAIT.finditer(text)
+    ]
+
+
 def rust_files():
     for code_dir in CODE_DIRS:
         for path in sorted((ROOT / code_dir).rglob("*.rs")):
@@ -217,12 +236,17 @@ def self_test():
     zmx = check_zmx_lists("self-test", "fn f() {\n    self.zmx\n        .list(dir);\n}\n")
     output = check_outputs("self-test", "fn f() {\n    c.output();\n}\n")
     status = check_statuses("self-test", "fn f() {\n    Command::new(p)\n        .status();\n}\n")
-    for line in names + deny + kill + report + zmx + output + status:
+    wait = check_waits("self-test", "fn f() {\n    child.wait();\n}\n")
+    reviewed = check_waits("crates/orb-term/src/pane.rs", "fn f() {\n    child.wait();\n}\n")
+    for line in names + deny + kill + report + zmx + output + status + wait:
         print(line)
     if blind:
         print("self-test: a test-only file was checked as production")
         return 1
-    if not names or not deny or not kill or not report or not zmx or not output or not status:
+    if reviewed:
+        print("self-test: a .wait() in a reviewed file was reported")
+        return 1
+    if not all([names, deny, kill, report, zmx, output, status, wait]):
         print("self-test: a check did not fail on its planted text")
         return 1
     print("self-test: every check reported its planted text")
@@ -245,6 +269,7 @@ def main():
         reports += check_zmx_lists(rel, text)
         reports += check_outputs(rel, text)
         reports += check_statuses(rel, text)
+        reports += check_waits(rel, text)
     for report in reports:
         print(report)
     if reports:

@@ -2,7 +2,7 @@
 //! command that hangs can't hang orb.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -39,11 +39,29 @@ pub fn run_within(mut command: Command, limit: Duration) -> std::io::Result<Fini
         .spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
+    let Some(status) = wait_within(&mut child, limit)? else {
+        return Ok(Finished::TimedOut);
+    };
+    Ok(Finished::Exited(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }))
+}
+
+/// Waits at most `limit` for a started `child` to exit, killing (and
+/// reaping) it if it runs longer; `None` when it was killed. A child that
+/// exits at once is noticed within a millisecond or two.
+///
+/// # Errors
+///
+/// Returns an error if the child can't be waited on.
+pub fn wait_within(child: &mut Child, limit: Duration) -> std::io::Result<Option<ExitStatus>> {
     let started = Instant::now();
     let deadline = started + limit;
-    let status = loop {
+    loop {
         match child.try_wait()? {
-            Some(status) => break status,
+            Some(status) => return Ok(Some(status)),
             None if Instant::now() < deadline => thread::sleep(if started.elapsed() < FAST_FOR {
                 FAST_POLL
             } else {
@@ -52,15 +70,10 @@ pub fn run_within(mut command: Command, limit: Duration) -> std::io::Result<Fini
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Ok(Finished::TimedOut);
+                return Ok(None);
             }
         }
-    };
-    Ok(Finished::Exited(Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    }))
+    }
 }
 
 /// Reads all of `pipe` on a thread of its own, so a child that prints more

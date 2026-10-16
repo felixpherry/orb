@@ -5,6 +5,7 @@ use std::fmt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use error_stack::{Report, ResultExt};
 use wherror::Error;
@@ -12,8 +13,13 @@ use wherror::Error;
 use super::click::{ClickTarget, on_path};
 use super::osascript::OsascriptNotifier;
 use super::terminal_notifier::TerminalNotifierNotifier;
+use crate::common::wait_within;
 use crate::feat::sessions::state::{Notice, NoticeKind};
 use crate::ids::AgentId;
+
+/// How long a notifier program may run before it's stopped and counted as
+/// failed.
+const NOTIFIER_LIMIT: Duration = Duration::from_secs(5);
 
 /// A notification couldn't be sent.
 #[derive(Debug, Error)]
@@ -135,7 +141,8 @@ fn linux_notifier(_click: ClickTarget) -> Arc<dyn Notifier> {
 
 /// Runs `program` with `args` and no stdin, stdout or stderr, so it never
 /// writes into orb's screen, without waiting for it: a thread of its own
-/// waits for it to exit, and runs `on_failure` if it doesn't exit 0.
+/// waits up to [`NOTIFIER_LIMIT`] for it to exit, stopping it past that, and
+/// runs `on_failure` if it doesn't exit 0 in time.
 ///
 /// # Errors
 ///
@@ -161,7 +168,9 @@ where
     thread::Builder::new()
         .name("orb-notify".into())
         .spawn(move || {
-            if !child.wait().is_ok_and(|status| status.success()) {
+            if !wait_within(&mut child, NOTIFIER_LIMIT)
+                .is_ok_and(|status| status.is_some_and(|status| status.success()))
+            {
                 on_failure();
             }
         })

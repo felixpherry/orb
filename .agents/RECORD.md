@@ -123,6 +123,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Deleting a session hides it at once, then removes it; a failed store write or folder removal shows the reason in the message box.
 - (notify) While orb's terminal isn't focused, orb sends a desktop notification on macOS and Linux when an agent finishes a turn, needs approval, or needs input.
 - (notify) On macOS, notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
+- (notify) On macOS, a terminal-notifier or osascript still running 5 s after a notification is sent is stopped, and a stopped terminal-notifier counts as failed.
 - (notify) Clicking a `terminal-notifier` notification brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
 - (notify) On Linux, notifications are delivered over D-Bus to the freedesktop notification server, and nothing is shown when there is none.
 - (notify) On Linux, approval and input notifications are sent at critical urgency and finished-turn notifications at normal urgency.

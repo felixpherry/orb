@@ -182,6 +182,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitStatus, Stdio};
+    use std::time::Duration;
 
     use error_stack::{Report, ResultExt};
     use serde_json::{Value, json};
@@ -191,8 +192,12 @@ mod tests {
         IntegrationError, IntegrationPaths, SCRIPT, SKILL, claude_dir, claude_settings, install,
         pi_agent_dir,
     };
+    use crate::common::wait_within;
 
     type TestResult = Result<(), Report<IntegrationError>>;
+
+    /// How long the hook script may run before it's stopped.
+    const HOOK_LIMIT: Duration = Duration::from_secs(5);
 
     /// A scratch home with orb's, Claude's and pi's folders inside it.
     struct Home {
@@ -253,7 +258,9 @@ mod tests {
                 .write_all(input.as_bytes())
                 .change_context(IntegrationError)?;
         }
-        child.wait().change_context(IntegrationError)
+        wait_within(&mut child, HOOK_LIMIT)
+            .change_context(IntegrationError)?
+            .ok_or_else(|| Report::new(IntegrationError).attach("the hook ran past its limit"))
     }
 
     fn pane_file(home: &Path) -> PathBuf {
