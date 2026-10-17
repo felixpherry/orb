@@ -2787,6 +2787,74 @@ async fn api_plate_update_of_a_done_item_is_refused() -> Result<(), Report<Store
 }
 
 #[rstest::rstest]
+#[case::settled(false)]
+#[case::deleted(true)]
+#[tokio::test]
+async fn ending_a_session_leaves_its_plate_item(
+    #[case] deleted: bool,
+) -> Result<(), Report<StoreError>> {
+    // Given agent aa's idle session and a review it added to the plate.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let id = store.insert_plate_item(
+        &NewPlateItem {
+            session: inserted.session,
+            pane: inserted.pane,
+            ..new_review("review the fix")
+        },
+        SystemTime::now(),
+    )?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+
+    // When the session is settled, or deleted.
+    if deleted {
+        delete(&mut actor, inserted.session);
+    } else {
+        actor.settle_session(inserted.session);
+    }
+
+    // Then the item is still on the plate and still saved.
+    let kept = (
+        state.read().plate.item(id).is_some(),
+        actor.store.plate_items()?.iter().any(|item| item.id == id),
+    );
+    assert_eq!(
+        kept,
+        (true, true),
+        "ending a session should leave its plate items"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn adding_a_plate_item_announces_nothing() -> Result<(), Report<StoreError>> {
+    // Given the actor and a clone of its reporter.
+    let store = Store::open_in_memory()?;
+    let zmx = zmx_running(&store);
+    let (actor, _state, report) =
+        spawned_reporting(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
+
+    // When an agent adds a review.
+    api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // Then nothing plays a sound or pops a notice.
+    let loud: Vec<Outcome> = report
+        .outcomes()
+        .into_iter()
+        .filter(|outcome| matches!(outcome, Outcome::Announce(_) | Outcome::Notice(_)))
+        .collect();
+    assert_eq!(
+        loud,
+        Vec::new(),
+        "a new plate item should play no sound and show no notice"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
 #[tokio::test]
 async fn api_plate_done_stamps_done_at() -> Result<(), Report<StoreError>> {
     // Given a review on the plate.
