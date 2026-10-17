@@ -77,6 +77,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::mem;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -191,7 +192,8 @@ impl Frontend {
     /// Runs orb's TUI until the user quits or [`Frontend::quitter`] is called.
     /// Session commands go to `sessions`; worktree commands go to
     /// `worktrees`; search commands go to `search`; an agent whose worktree
-    /// under `worktrees_root` is gone has it recreated before attaching; the
+    /// under `worktrees_root` is gone has it recreated before attaching; a
+    /// pane's history is written under `history_dir` for its editor; the
     /// branch picker's refs come from `git`; panes run with `env`, plus
     /// terminal-browser's settings while orb runs in kitty, and attach
     /// through `zmx`; notices play a sound through `sounds` unless the
@@ -212,6 +214,7 @@ impl Frontend {
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
         worktrees_root: PathBuf,
+        history_dir: PathBuf,
         search: ActorRef<SearchActor>,
         git: GitService,
         harnesses: Harnesses,
@@ -235,6 +238,7 @@ impl Frontend {
                 sessions,
                 worktrees,
                 worktrees_root,
+                history_dir,
                 search,
                 git,
                 harnesses,
@@ -315,6 +319,8 @@ struct App {
     /// Where orb makes worktrees; an agent's missing worktree there is
     /// recreated on attach.
     worktrees_root: PathBuf,
+    /// Where `<C-g> [` writes a pane's history for its editor to open.
+    history_dir: PathBuf,
     /// Runs transcript searches and loads their previews.
     search: ActorRef<SearchActor>,
     git: GitService,
@@ -392,6 +398,7 @@ impl App {
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
         worktrees_root: PathBuf,
+        history_dir: PathBuf,
         search: ActorRef<SearchActor>,
         git: GitService,
         harnesses: Harnesses,
@@ -414,6 +421,7 @@ impl App {
             sessions,
             worktrees,
             worktrees_root,
+            history_dir,
             search,
             git,
             harnesses,
@@ -886,6 +894,7 @@ impl App {
                     pane.key(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
                 }
             }
+            Command::OpenHistory { session, pane } => self.open_history(*session, *pane),
             Command::ListBranches(cwd) => {
                 let refs = self.git.refs(cwd);
                 let mut app = self.state.write();
@@ -923,6 +932,28 @@ impl App {
             Command::Search(command) => {
                 let sent = self.search.tell(command.clone()).try_send();
                 log_unsent(&self.log, "search", command, sent);
+            }
+        }
+    }
+
+    /// Writes pane `pane`'s history, as plain text, to its file under the
+    /// history folder, and asks for a float of `session` whose shell opens
+    /// that file in `$EDITOR`, else `less` (see [`history_line`]). A pane
+    /// without a client does nothing; a file that can't be written shows why
+    /// and is logged.
+    fn open_history(&mut self, session: SessionId, pane: PaneId) {
+        let Some(text) = self.panes.get(&pane).map(|client| client.text(usize::MAX)) else {
+            return;
+        };
+        match write_history(&self.history_dir, pane, &text) {
+            Ok(path) => self.execute(&Command::Sessions(SessionsCommand::AddHistoryFloat {
+                session,
+                line: history_line(&path),
+            })),
+            Err(report) => {
+                self.log.error("couldn't save a pane's history", &report);
+                self.state.write().sessions.error =
+                    Some("couldn't save the pane's history".to_owned());
             }
         }
     }
@@ -1052,6 +1083,49 @@ where
             &format!("couldn't send {kind} to the {actor} actor: {error}"),
         );
     }
+}
+
+/// A pane's history couldn't be written for its editor. The report says
+/// which file.
+#[derive(Debug, Error)]
+#[error(debug)]
+struct HistoryError;
+
+/// Writes `text` to pane `pane`'s history file in `dir`, `pane-<id>.txt`,
+/// readable by the user only, making `dir` first; gives the file's path.
+///
+/// # Errors
+///
+/// Returns [`HistoryError`] when `dir` can't be made or the file can't be
+/// written.
+fn write_history(dir: &Path, pane: PaneId, text: &str) -> Result<PathBuf, Report<HistoryError>> {
+    let path = dir.join(format!("pane-{}.txt", pane.0));
+    fs::create_dir_all(dir)
+        .and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+        })
+        .and_then(|mut file| writeln!(file, "{text}"))
+        .change_context(HistoryError)
+        .attach_with(|| format!("couldn't write {}", path.display()))?;
+    Ok(path)
+}
+
+/// The line a fresh shell types to show history file `path`: `$EDITOR`, else
+/// `less`, at the bottom for vi, vim, nvim and less, then the file is
+/// removed. `exec` ends the pane's shell with the editor, so quitting it
+/// closes the pane. `$EDITOR` is left unquoted so `code -w` splits into words.
+fn history_line(path: &Path) -> String {
+    // The path in single quotes, its own `'` written `'\''`, which POSIX
+    // shells and fish both read as one word.
+    let file = format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    format!(
+        "exec sh -c 'f=$1; case ${{EDITOR:-less}} in *vi|*vim|*nvim) at=+;; *less) at=+G;; *) at=;; esac; ${{EDITOR:-less}} $at \"$f\"; rm -f \"$f\"' orb-history {file}"
+    )
 }
 
 /// The names of `dir`'s subdirectories, symlinked ones included. Names that

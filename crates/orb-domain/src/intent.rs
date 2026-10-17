@@ -116,6 +116,10 @@ pub enum Intent {
     /// Send Ctrl g to the focused pane's program (`<C-g> <C-g>`, since
     /// `<C-g>` alone is orb's leader).
     SendCtrlG,
+    /// Open the focused pane's history, as plain text, in a float running
+    /// `$EDITOR`, else `less`; quitting it closes the float. Only while the
+    /// keys are in a pane.
+    OpenHistory,
     /// Move back to the previous row in the jump list.
     JumpBack,
     /// Move forward to the next row in the jump list, after a jump back.
@@ -287,6 +291,7 @@ impl fmt::Display for Intent {
             Self::DragFloat { .. } => "drag float",
             Self::DropFloat => "drop float",
             Self::SendCtrlG => "send ctrl g",
+            Self::OpenHistory => "pane history",
             Self::Attach => "attach",
             Self::JumpBack => "jump back",
             Self::JumpForward => "jump forward",
@@ -363,6 +368,7 @@ mod tests {
     #[case(Intent::DragFloat { pane: PaneId(-1), x: 0, y: 0 }, "drag float")]
     #[case(Intent::DropFloat, "drop float")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
+    #[case(Intent::OpenHistory, "pane history")]
     #[case(Intent::ToggleFloats, "floats")]
     #[case(Intent::ToggleFloatEmbed, "embed/float")]
     #[case(Intent::TogglePinFloat, "pin float")]

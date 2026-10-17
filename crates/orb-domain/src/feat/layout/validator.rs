@@ -3,7 +3,7 @@
 use wherror::Error;
 
 use crate::feat::layout::state::SessionLayout;
-use crate::ids::PaneId;
+use crate::ids::{PaneId, SessionId};
 use crate::{AppState, Focus};
 
 /// Why a pane action (focus move between panes, split, close, zoom, pane
@@ -31,6 +31,40 @@ pub fn validate_pane_action(state: &AppState) -> Result<(), PaneActionError> {
         .shown_layout()
         .map(drop)
         .ok_or(PaneActionError::NoLayout)
+}
+
+/// Why `<C-g> [` can't open a pane's history.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum OpenHistoryError {
+    /// The keys aren't in a pane.
+    NotInPane,
+    /// No session is shown.
+    NothingShown,
+    /// The shown layout has no focused pane.
+    NoFocusedPane,
+}
+
+/// Allow opening a pane's history while the keys are in a pane of the shown
+/// session; gives that session and its focused pane.
+///
+/// # Errors
+///
+/// Returns [`OpenHistoryError::NotInPane`] when the keys are elsewhere,
+/// [`OpenHistoryError::NothingShown`] when no session is shown, and
+/// [`OpenHistoryError::NoFocusedPane`] when its layout has no focused pane.
+pub fn validate_open_history(state: &AppState) -> Result<(SessionId, PaneId), OpenHistoryError> {
+    if state.focus != Focus::Pane {
+        return Err(OpenHistoryError::NotInPane);
+    }
+    let session = state
+        .shown_session()
+        .ok_or(OpenHistoryError::NothingShown)?;
+    let pane = state
+        .shown_layout()
+        .and_then(SessionLayout::focused)
+        .ok_or(OpenHistoryError::NoFocusedPane)?;
+    Ok((session, pane))
 }
 
 /// Why a float action (pinning) can't proceed.
@@ -141,9 +175,9 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        FloatActionError, FocusPaneError, PaneActionError, TabActionError, TiledActionError,
-        validate_float_action, validate_focus_pane, validate_pane_action, validate_tab_action,
-        validate_tiled_action,
+        FloatActionError, FocusPaneError, OpenHistoryError, PaneActionError, TabActionError,
+        TiledActionError, validate_float_action, validate_focus_pane, validate_open_history,
+        validate_pane_action, validate_tab_action, validate_tiled_action,
     };
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::state::{SessionLayout, test_entry};
@@ -250,6 +284,22 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "pane action in a shown pane");
+    }
+
+    #[rstest::rstest]
+    fn open_history_with_nothing_shown_does_nothing() {
+        // Given the keys in a pane with no session shown.
+        let state = selected(Focus::Pane, false);
+
+        // When validating `<C-g> [`.
+        let result = validate_open_history(&state);
+
+        // Then it is refused: there's no pane whose history to open.
+        assert_eq!(
+            result,
+            Err(OpenHistoryError::NothingShown),
+            "a pane's history needs a shown session"
+        );
     }
 
     #[rstest::rstest]

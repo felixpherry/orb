@@ -5,8 +5,8 @@ use crate::command::SessionsCommand;
 use crate::feat::layout::state::{FocusMove, Layouts, SessionLayout, Tab};
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::layout::validator::{
-    validate_float_action, validate_focus_pane, validate_pane_action, validate_tab_action,
-    validate_tiled_action,
+    validate_float_action, validate_focus_pane, validate_open_history, validate_pane_action,
+    validate_tab_action, validate_tiled_action,
 };
 use crate::feat::pane::intent::enter_session;
 use crate::feat::picker::intent::open_picker;
@@ -80,6 +80,14 @@ pub(crate) fn toggle_pin_float(state: &mut AppState) -> Vec<Command> {
 pub(crate) fn send_ctrl_g(state: &mut AppState) -> Vec<Command> {
     match validate_pane_action(state) {
         Ok(()) => vec![Command::SendCtrlG],
+        Err(_) => vec![],
+    }
+}
+
+/// Asks the loop to open the focused pane's history in a float.
+pub(crate) fn open_history(state: &mut AppState) -> Vec<Command> {
+    match validate_open_history(state) {
+        Ok((session, pane)) => vec![Command::OpenHistory { session, pane }],
         Err(_) => vec![],
     }
 }
@@ -1090,6 +1098,25 @@ mod tests {
 
         // Then nothing is sent: no pane has the keys.
         assert!(commands.is_empty(), "no pane to send Ctrl g to");
+    }
+
+    #[rstest::rstest]
+    fn open_history_in_a_pane_returns_open_history_for_the_focused_pane() {
+        // Given the keys in shell pane 50, split off agent 1's pane.
+        let mut state = split_layout();
+
+        // When handling OpenHistory (`<C-g> [`).
+        let commands = IntentHandler::handle(&Intent::OpenHistory, &mut state);
+
+        // Then the loop is asked to open pane 50's history in session 1.
+        assert_eq!(
+            commands,
+            vec![Command::OpenHistory {
+                session: SessionId(1),
+                pane: PaneId(50),
+            }],
+            "<C-g> [ should open the focused pane's history"
+        );
     }
 
     #[rstest::rstest]

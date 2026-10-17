@@ -163,8 +163,6 @@ fn run(
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let env = child_env(std::env::vars_os());
-    let tz = TimeZone::system();
-    let notifier = desktop_notifier();
     let sounds = desktop_sounds(&orb_root, log);
     let sockets = socket_paths(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
@@ -173,13 +171,14 @@ fn run(
         Store::open_live(&store_path, upgrade_policy(&home, args), log).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
+    let history_dir = orb_root.join("history");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let context = runtime.enter();
     let state = State::new(AppState {
         home,
         ..AppState::default()
     });
-    let frontend = Frontend::new(tz);
+    let frontend = Frontend::new(TimeZone::system());
     quit_on_signals(frontend.quitter(), log);
     let services = services(&env, claude_dir, pi_sessions, &orb_root, log);
     let git = services.git.clone();
@@ -228,12 +227,13 @@ fn run(
             sessions,
             worktrees,
             worktrees_root,
+            history_dir,
             search,
             git,
             harnesses,
             [env, browser_env].concat(),
             zmx,
-            notifier,
+            desktop_notifier(),
             sounds,
             log.clone(),
         )

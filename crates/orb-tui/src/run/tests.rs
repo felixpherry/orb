@@ -62,7 +62,7 @@ use super::panes::{
 use super::report::{StartedAttach, show, started_attach};
 use super::{
     App, LoopEvent, PREVIEW_EVERY, Toasts, after_pane, cursor_style, handle_mouse_intents,
-    list_directories, preview_due, stale_preview,
+    history_line, list_directories, preview_due, stale_preview,
 };
 
 /// Pane `id`, a shell in `orb-p<id>`.
@@ -1441,6 +1441,7 @@ fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Resul
         sessions,
         worktrees,
         dir.path().join("worktrees"),
+        dir.path().join("history"),
         search,
         git,
         Harnesses::new(vec![]),
@@ -2733,6 +2734,70 @@ fn program_gets_a_release_lost_above_the_window_on_its_top_line() -> io::Result<
     assert_eq!(
         typed, "\x1b[<0;6;2M\x1b[<0;6;1m",
         "a program that got the press gets its release"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn open_history_writes_the_panes_text_to_its_history_file() -> io::Result<()> {
+    // Given pane 1 showing `hello world`.
+    let mut test = loop_app(FakeZmx::listing(""), says_hello)?;
+    test.attach(&[pane(1)]);
+    if !test.handle_until_output(pane(1))? {
+        return Err(io::Error::other("pane 1 printed nothing within 5 s"));
+    }
+
+    // When the loop opens its history.
+    test.app.execute(&Command::OpenHistory {
+        session: session_id(1),
+        pane: pane(1),
+    });
+
+    // Then its history file holds the pane's text.
+    let file = format!("history/pane-{}.txt", pane(1).0);
+    let written = fs::read_to_string(test.dir.path().join(file))?;
+    assert_eq!(
+        written, "hello world\n",
+        "the history file should hold what the pane showed"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn open_history_line_opens_the_editor_at_the_bottom() {
+    // Given a history file whose path has a space and a quote.
+    let path = Path::new("/home/me/it's here/pane-1.txt");
+
+    // When making the line its float's shell runs.
+    let line = history_line(path);
+
+    // Then it runs `$EDITOR`, else `less`, at the bottom, removes the file
+    // after, and passes the path as one word.
+    assert_eq!(
+        line,
+        r#"exec sh -c 'f=$1; case ${EDITOR:-less} in *vi|*vim|*nvim) at=+;; *less) at=+G;; *) at=;; esac; ${EDITOR:-less} $at "$f"; rm -f "$f"' orb-history '/home/me/it'\''s here/pane-1.txt'"#,
+        "the editor line"
+    );
+}
+
+#[rstest::rstest]
+fn history_failure_shows_why() -> io::Result<()> {
+    // Given pane 1 running, and a file where the history folder goes.
+    let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+    test.attach(&[pane(1)]);
+    fs::write(test.dir.path().join("history"), "")?;
+
+    // When the loop opens its history.
+    test.app.execute(&Command::OpenHistory {
+        session: session_id(1),
+        pane: pane(1),
+    });
+
+    // Then the message box says the history couldn't be saved.
+    assert_eq!(
+        test.state.read().sessions.error.as_deref(),
+        Some("couldn't save the pane's history"),
+        "a history that can't be written should say so"
     );
     Ok(())
 }

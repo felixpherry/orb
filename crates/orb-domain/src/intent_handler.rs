@@ -64,6 +64,7 @@ impl IntentHandler {
             Intent::ToggleFloatEmbed => layout::intent::toggle_float_embed(state),
             Intent::TogglePinFloat => layout::intent::toggle_pin_float(state),
             Intent::SendCtrlG => layout::intent::send_ctrl_g(state),
+            Intent::OpenHistory => layout::intent::open_history(state),
             Intent::ToggleZoom => layout::intent::toggle_zoom(state),
             Intent::BreakPane => layout::intent::break_pane(state),
             Intent::GrowFocused => layout::intent::grow_or_shrink(state, SizeStep::Grow),

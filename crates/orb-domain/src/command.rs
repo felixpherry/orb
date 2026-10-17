@@ -1,7 +1,7 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). The frontend loop carries out
-//! the pane commands (`Attach`, `Detach`, `SendCtrlG`) and the quick reads
-//! (`ListDirectories`, `ListBranches`, `LoadPreview`) itself. Each actor's
+//! the pane commands (`Attach`, `Detach`, `SendCtrlG`, `OpenHistory`) and the
+//! quick reads (`ListDirectories`, `ListBranches`, `LoadPreview`) itself. Each actor's
 //! commands are grouped in its own list, which the loop forwards whole:
 //! [`SessionsCommand`] (sessions, projects, panes, layouts, the sidebar's
 //! saved state), [`WorktreesCommand`] (rescan, delete) and [`SearchCommand`]
@@ -25,6 +25,9 @@ pub enum Command {
     Detach,
     /// Write Ctrl g to the focused pane.
     SendCtrlG,
+    /// Write pane `pane`'s history to a file and open it in a float of
+    /// `session` running `$EDITOR`, else `less`.
+    OpenHistory { session: SessionId, pane: PaneId },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),
     /// List the directory's subdirectories into the open directory picker.
@@ -55,6 +58,9 @@ pub enum SessionsCommand {
     StackPane(SessionId),
     /// Open a tab of one new pane in `session`.
     NewTab(SessionId),
+    /// Open a float on top of `session`'s floats, showing them, whose fresh
+    /// shell runs `line`.
+    AddHistoryFloat { session: SessionId, line: String },
     /// Open a tab in `session` whose fresh shell resumes `agent`'s
     /// conversation, and show it.
     ResumeAgent { session: SessionId, agent: AgentId },

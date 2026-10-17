@@ -500,6 +500,9 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::AddFloat(session) => self.add_pane(session, Placement::Float, None),
             SessionsCommand::StackPane(session) => self.add_pane(session, Placement::Stack, None),
             SessionsCommand::NewTab(session) => self.add_pane(session, Placement::Tab, None),
+            SessionsCommand::AddHistoryFloat { session, line } => {
+                self.add_pane(session, Placement::Float, Some(line));
+            }
             SessionsCommand::ResumeAgent { session, agent } => self.resume_agent(session, agent),
             SessionsCommand::SaveLayout(session) => self.save_layout(session),
             SessionsCommand::NewSession {

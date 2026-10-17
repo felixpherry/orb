@@ -284,6 +284,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Navigation,
             ),
             ("<leader><c-g>", Intent::SendCtrlG, Navigation),
+            ("<leader>[", Intent::OpenHistory, Navigation),
         ],
     );
     keymap
@@ -1765,6 +1766,24 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::in_a_pane(Scope::PANE, Some(Intent::OpenHistory))]
+    #[case::in_the_sidebar(Scope::SIDEBAR, None)]
+    fn left_bracket_after_the_leader_opens_history_only_in_a_pane(
+        #[case] scope: Scope,
+        #[case] expected: Option<Intent>,
+    ) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `[`.
+        let intent = press(&mut keys, key(KeyCode::Char('[')));
+
+        // Then a pane's history opens only from a pane.
+        assert_eq!(intent, expected, "<C-g> [ in {scope:?}");
+    }
+
+    #[rstest::rstest]
     fn leader_r_is_unbound_in_the_sidebar() {
         // Given `<C-g>` pressed in the sidebar.
         let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
@@ -2048,13 +2067,13 @@ mod tests {
     #[case(Scope::SIDEBAR, "/ C P Space W b c e f i l n q t w")]
     #[case(Scope::SIDEBAR_EMPTY, "/ C P Space W c e f i l n q")]
     #[case(Scope::SIDEBAR_INCOGNITO, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::PANE, "/ <C-g> C P Space W b c e h i m n p q r s t w")]
-    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W c e h i m n p q r s t")]
+    #[case(Scope::PANE, "/ <C-g> C P Space W [ b c e h i m n p q r s t w")]
+    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W [ c e h i m n p q r s t")]
     #[case(Scope::SIDEBAR_AGENT, "/ C P Space W b c e f i l n q t w")]
     #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ C P Space W c e f i l n q t")]
     #[case(Scope::SIDEBAR_COLONY, ", / C P Space W c e f i l n q t")]
     #[case(Scope::SIDEBAR_AGENT_COLONY, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W c e h i m n p q r s t")]
+    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W [ c e h i m n p q r s t")]
     #[case(Scope::SIDEBAR_COLONISTS, ", / C P Space W c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
