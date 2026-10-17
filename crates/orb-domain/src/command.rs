@@ -30,7 +30,7 @@ pub enum Command {
     /// `session` running `$EDITOR`, else `less`.
     OpenHistory { session: SessionId, pane: PaneId },
     /// Paste pane `from`'s highlighted selection, else its screen, into
-    /// pane `to`, once `to`'s program has printed.
+    /// pane `to`, once `to`'s program has turned bracketed paste on.
     SendText { from: PaneId, to: PaneId },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),

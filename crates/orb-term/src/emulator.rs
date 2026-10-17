@@ -536,6 +536,12 @@ impl Emulator {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
     }
 
+    /// Whether the child turned bracketed paste on, so a paste reaches it as
+    /// one block instead of lines it would run one by one.
+    pub(crate) fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// The title the child last set (OSC 0 or 2); `None` when it set none,
     /// an empty one, or reset it.
     pub(crate) fn title(&self) -> Option<String> {
@@ -1262,6 +1268,27 @@ mod tests {
             reads,
             expected,
             "reads the mouse after {}",
+            modes.escape_debug()
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::on("\x1b[?2004h", true)]
+    #[case::off_again("\x1b[?2004h\x1b[?2004l", false)]
+    #[case::nothing("", false)]
+    fn child_takes_bracketed_paste_after_asking(#[case] modes: &str, #[case] expected: bool) {
+        // Given a child that switched on `modes`.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(modes.as_bytes());
+
+        // When asking whether it takes bracketed paste.
+        let bracketed = emulator.bracketed_paste();
+
+        // Then the answer follows its bracketed paste mode.
+        assert_eq!(
+            bracketed,
+            expected,
+            "takes bracketed paste after {}",
             modes.escape_debug()
         );
     }

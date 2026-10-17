@@ -345,7 +345,8 @@ struct App {
     broken: HashSet<PaneId>,
     /// Resume commands waiting for their fresh pane's first output.
     typing: HashMap<PaneId, String>,
-    /// Pastes waiting for their pane's first output.
+    /// Pastes waiting for their pane's program to turn bracketed paste on,
+    /// so they land in its prompt instead of running line by line.
     pastes: HashMap<PaneId, String>,
     /// Shown on the start screen when a pane's client couldn't start.
     pane_error: Option<String>,
@@ -972,7 +973,9 @@ impl App {
     }
 
     /// Pastes pane `from`'s highlighted selection, else its screen, into
-    /// pane `to`, or keeps it until `to`'s program first prints. A pane
+    /// pane `to` once `to`'s program has turned bracketed paste on and no
+    /// resume command waits there; until then the text waits (see
+    /// [`App::type_resume`]), replacing any text already waiting. A pane
     /// added earlier in this turn gets its client first. Nothing is pasted
     /// from a pane without a client or with no text, nor into a pane that
     /// has no client.
@@ -989,7 +992,9 @@ impl App {
             self.reconcile();
         }
         match self.panes.get(&to) {
-            Some(pane) if pane.has_output() => pane.paste(&text),
+            Some(pane) if pane.bracketed_paste() && !self.typing.contains_key(&to) => {
+                pane.paste(&text);
+            }
             Some(_) => {
                 self.pastes.insert(to, text);
             }

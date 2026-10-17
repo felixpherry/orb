@@ -529,18 +529,23 @@ impl App {
         resume_plan(&spawning, &listed)
     }
 
-    /// Types pane `id`'s waiting resume command, then pastes its waiting
-    /// text, once each, now that its client printed: zmx's `session "…"
-    /// created` banner comes before the shell starts, and the shell reads
-    /// the line at its first prompt.
+    /// Types pane `id`'s waiting resume command now that its client printed:
+    /// zmx's `session "…" created` banner comes before the shell starts, and
+    /// the shell reads the line at its first prompt. Then pastes the pane's
+    /// waiting text once its program has turned bracketed paste on, so the
+    /// text lands in a prompt without being sent; until then it keeps
+    /// waiting, output after output. In a pane brought back with a resume
+    /// command, the shell can turn bracketed paste on before the agent
+    /// starts, so the text can reach the shell instead and be lost.
     pub(super) fn type_resume(&mut self, id: PaneId) {
-        if let Some(line) = self.typing.remove(&id)
-            && let Some(pane) = self.panes.get(&id)
-        {
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        if let Some(line) = self.typing.remove(&id) {
             pane.type_line(&line);
         }
-        if let Some(text) = self.pastes.remove(&id)
-            && let Some(pane) = self.panes.get(&id)
+        if pane.bracketed_paste()
+            && let Some(text) = self.pastes.remove(&id)
         {
             pane.paste(&text);
         }

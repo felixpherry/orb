@@ -282,6 +282,12 @@ impl Pane {
         lock(&self.emulator).reads_mouse()
     }
 
+    /// Whether the child turned bracketed paste on (see
+    /// [`Emulator::bracketed_paste`]).
+    pub fn bracketed_paste(&self) -> bool {
+        lock(&self.emulator).bracketed_paste()
+    }
+
     /// The title the child last set (OSC 0 or 2); `None` when it set none,
     /// an empty one, or reset it.
     pub fn title(&self) -> Option<String> {
