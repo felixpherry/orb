@@ -581,7 +581,6 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::net::TcpListener;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime};
@@ -590,6 +589,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::GitCli;
+    use crate::common::write_program;
     use crate::feat::git::git_service::{Git, GitError, GitRef};
 
     /// A home directory for test repos, and a git that ignores the user's
@@ -626,13 +626,11 @@ mod tests {
             let bin = self.path("bin");
             fs::create_dir_all(&bin).change_context(GitError)?;
             let fake = bin.join(program);
-            fs::write(
+            write_program(
                 &fake,
-                format!("#!/bin/sh\n[ -n \"$WARMING\" ] && exit 0\n{script}\n"),
+                &format!("#!/bin/sh\n[ -n \"$WARMING\" ] && exit 0\n{script}\n"),
             )
             .change_context(GitError)?;
-            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
-                .change_context(GitError)?;
             // macOS checks a new program on its first run, which can take
             // longer than a test's limit; run it once so the tests time only
             // the script.

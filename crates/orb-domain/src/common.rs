@@ -15,6 +15,8 @@ mod process;
 mod services;
 mod shutdown;
 mod state;
+#[cfg(test)]
+mod test_program;
 mod text_input;
 
 pub use child::{Finished, run_within, wait_within};
@@ -25,4 +27,6 @@ pub use process::{ancestry, parse_parents};
 pub use services::Services;
 pub use shutdown::stop_gracefully;
 pub use state::{Outcome, Reporter, State};
+#[cfg(test)]
+pub use test_program::write_program;
 pub use text_input::TextInput;

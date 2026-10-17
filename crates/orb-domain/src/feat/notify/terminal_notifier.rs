@@ -140,7 +140,6 @@ fn sh_words(words: &[&str]) -> String {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Arc;
@@ -151,7 +150,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::TerminalNotifierNotifier;
-    use crate::common::run_within;
+    use crate::common::{run_within, write_program};
     use crate::feat::notify::click::{ClickTarget, Kitty, OrbCli};
     use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
     use crate::ids::{AgentId, PaneId};
@@ -193,9 +192,7 @@ mod tests {
     /// Writes a `terminal-notifier` into `dir` that shows nothing and exits `code`.
     fn exiting(dir: &Path, code: i32) -> Result<PathBuf, Report<NotifyError>> {
         let path = dir.join("terminal-notifier");
-        fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).change_context(NotifyError)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .change_context(NotifyError)?;
+        write_program(&path, &format!("#!/bin/sh\nexit {code}\n")).change_context(NotifyError)?;
         Ok(path)
     }
 
@@ -381,14 +378,13 @@ mod tests {
         let root = TempDir::new()?;
         let log = root.path().join("log");
         let program = root.path().join("orb");
-        fs::write(
+        write_program(
             &program,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$HOME\" \"$@\" >> '{}'\n",
                 log.display()
             ),
         )?;
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
         let home = root.path().join("it's $home");
         let click = ClickTarget {
             orb: Some(OrbCli {
@@ -420,8 +416,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> '{}'\n",
             log.display()
         );
-        fs::write(&path, script)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        write_program(&path, &script)?;
         Ok(path)
     }
 
