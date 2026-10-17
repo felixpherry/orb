@@ -1,6 +1,5 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jiff::tz::TimeZone;
 use orb_domain::AppState;
 use orb_domain::feat::harness::{HarnessId, claude, pi};
 use orb_domain::feat::plate::{ItemState, Plate, PlateItem, Verb};
@@ -105,7 +104,7 @@ fn with_items(items: Vec<PlateItem>) -> AppState {
 /// Draws `state`'s start screen on a `width`×`height` buffer.
 fn draw(state: &AppState, width: u16, height: u16) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-    render(state, now(), &TimeZone::UTC, buf.area, &mut buf);
+    render(state, now(), buf.area, &mut buf);
     buf
 }
 
@@ -642,7 +641,7 @@ fn small_area_draws_nothing_outside_itself() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
 
     // When drawing the start screen into the area.
-    render(&state, now(), &TimeZone::UTC, area, &mut buf);
+    render(&state, now(), area, &mut buf);
 
     // Then every cell outside the area is still blank.
     let drawn: Vec<Position> = buf
@@ -658,7 +657,7 @@ fn small_area_draws_nothing_outside_itself() {
 /// all of a `width`×`height` buffer; returns the buffer and the float's rect.
 fn draw_float(state: &AppState, width: u16, height: u16) -> (Buffer, Rect) {
     let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-    let (rect, _) = render_float(state, now(), &TimeZone::UTC, buf.area, &mut buf);
+    let (rect, _) = render_float(state, now(), buf.area, &mut buf);
     (buf, rect)
 }
 
@@ -718,7 +717,7 @@ fn float_draws_nothing_outside_its_rect() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
 
     // When drawing the float over it.
-    let (rect, _) = render_float(&state, now(), &TimeZone::UTC, right, &mut buf);
+    let (rect, _) = render_float(&state, now(), right, &mut buf);
 
     // Then every cell outside the float is still blank.
     let drawn: Vec<Position> = buf

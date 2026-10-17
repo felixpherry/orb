@@ -12,7 +12,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
-use jiff::tz::TimeZone;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use wherror::Error;
@@ -30,7 +29,6 @@ use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::plate::api::{self as plate, PlateAsk};
-use crate::feat::plate::local_midnight;
 use crate::feat::sessions::sessions_actor::{
     ApiAdd, ApiPlace, ApiStart, ApiStartError, SessionsActor,
 };
@@ -61,8 +59,6 @@ pub struct ControlDeps {
     pub panes: PaneControl,
     /// Read agents' transcripts for their replies.
     pub harnesses: Harnesses,
-    /// The user's time zone: where today starts for `plate list`.
-    pub tz: TimeZone,
 }
 
 /// Opens the control socket at `path`, only for the user, and answers each
@@ -226,7 +222,7 @@ enum Action {
     },
     /// The last reply in an agent's transcript.
     Transcript { harness: HarnessId, path: PathBuf },
-    /// A plate request: an ask to the sessions actor, or the list.
+    /// A plate add, update or close the sessions actor answers.
     Plate(PlateAsk),
 }
 
@@ -259,10 +255,6 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
                 Ok(reply) => Reply::ok(&reply),
                 Err(error) => Reply::err(error),
             };
-        }
-        Ok(Action::Plate(PlateAsk::List)) => {
-            let now = SystemTime::now();
-            return plate::list(&deps.state.read(), now, local_midnight(now, &deps.tz));
         }
         Ok(Action::Add(add)) => add_pane(deps, add),
         Ok(Action::Start(start)) => start_session(deps, start),
@@ -384,7 +376,15 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::AgentWait { .. }
         | Op::AgentGet { .. }
         | Op::AgentReply { .. } => agent_io(app, &request.op, caller),
-        Op::PlateAdd { .. } | Op::PlateUpdate { .. } | Op::PlateDone { .. } | Op::PlateList => {
+        Op::PlateList => {
+            let now = SystemTime::now();
+            Ok(Action::Answered(plate::list(
+                app,
+                now,
+                app.zone.midnight(now),
+            )))
+        }
+        Op::PlateAdd { .. } | Op::PlateUpdate { .. } | Op::PlateDone { .. } => {
             plate::plan(app, &request.op, caller).map(Action::Plate)
         }
     }
@@ -901,7 +901,6 @@ mod tests {
         AgentKind, ApiError, Direction, Done, ErrorCode, ItemResult, Op, Reply, Request,
     };
     use crate::feat::layout::state::test_entry;
-    use crate::feat::plate::api::PlateAsk;
     use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind};
     use crate::ids::{PaneId, PlateItemId, SessionId};
     use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
@@ -1126,7 +1125,7 @@ mod tests {
 
         // Then it's answered from the state, with no ask.
         assert!(
-            matches!(planned, Ok(Action::Plate(PlateAsk::List))),
+            matches!(planned, Ok(Action::Answered(_))),
             "plate list is a read, got {planned:?}"
         );
     }

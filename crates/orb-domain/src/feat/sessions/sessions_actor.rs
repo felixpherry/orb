@@ -101,7 +101,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
-use jiff::tz::TimeZone;
 use kameo::mailbox;
 use kameo::prelude::{
     Actor, ActorRef, Context, DelegatedReply, Message, Reply, ReplySender, Spawn,
@@ -187,8 +186,6 @@ pub struct SessionsActorDeps {
     /// Neither orb's Claude hook nor its pi extension is installed; the mode
     /// line says how to install them.
     pub integration_missing: bool,
-    /// The user's time zone: where today starts for the plate's done items.
-    pub tz: TimeZone,
 }
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
@@ -1010,7 +1007,7 @@ pub(crate) fn to_ms(time: SystemTime) -> i64 {
 }
 
 /// Milliseconds since the Unix epoch as a time; negative clamps to the epoch.
-fn from_ms(ms: i64) -> SystemTime {
+pub(crate) fn from_ms(ms: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
 

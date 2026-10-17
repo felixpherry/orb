@@ -26,7 +26,6 @@ impl SessionsActor {
             incognito_root,
             report,
             integration_missing,
-            tz,
         } = deps;
         if let Err(error) = fs::create_dir_all(&incognito_root) {
             services.log.error(
@@ -73,7 +72,11 @@ impl SessionsActor {
                 )),
             ),
         };
-        let (plate, plate_error) = restore_plate(&store, &services.log, &tz);
+        let (plate, plate_error) = restore_plate(
+            &store,
+            &services.log,
+            state.read().zone.midnight(SystemTime::now()),
+        );
         let error = error.or(layouts_error).or(plate_error);
         {
             let mut app = state.write();

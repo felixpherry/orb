@@ -1,9 +1,10 @@
 //! Saving and loading the plate's items.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use super::*;
 use crate::feat::plate::{ItemState, NewPlateItem, PlateItem, Verb};
+use crate::feat::sessions::sessions_actor::{from_ms, to_ms};
 use crate::ids::PlateItemId;
 
 impl Store {
@@ -167,17 +168,4 @@ fn plate_row(row: &Row<'_>) -> rusqlite::Result<Option<PlateItem>> {
         done_at: row.get::<_, Option<i64>>(12)?.map(from_ms),
         created_at: from_ms(row.get(13)?),
     }))
-}
-
-/// A time as milliseconds since the Unix epoch; before it is 0.
-fn to_ms(time: SystemTime) -> i64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-        })
-}
-
-/// Milliseconds since the Unix epoch as a time; negative clamps to the epoch.
-fn from_ms(ms: i64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }

@@ -86,11 +86,7 @@ pub(crate) fn go_target(
     key: RowKey,
     session: SessionId,
 ) -> Result<GoTarget, GoError> {
-    let found = app
-        .sessions
-        .session(session)
-        .filter(|_| !app.sessions.deleting.contains(&session))
-        .ok_or(GoError::SessionGone)?;
+    let found = app.sessions.live(session).ok_or(GoError::SessionGone)?;
     let item = match key {
         RowKey::Agent(pane) => return Ok(GoTarget::Agent { session, pane }),
         RowKey::Item(id) => app.plate.item(id),

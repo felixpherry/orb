@@ -203,7 +203,6 @@ fn run(
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
         report: frontend.reporter(),
         integration_missing: !integrations.any_installed(),
-        tz: tz.clone(),
     });
     runtime.block_on(sessions.wait_for_startup());
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
@@ -230,7 +229,6 @@ fn run(
             runtime: runtime.handle().clone(),
             panes: frontend.controller(),
             harnesses: harnesses.clone(),
-            tz,
         },
     );
     let ended = frontend

@@ -18,12 +18,10 @@
 
 use std::time::{Duration, SystemTime};
 
-use jiff::tz::TimeZone;
 use orb_domain::AppState;
-use orb_domain::feat::harness::{HarnessId, HarnessInfo};
+use orb_domain::feat::harness::HarnessId;
 use orb_domain::feat::plate::{
     Board, BoardRow, Group, GroupKind, ItemState, LinkKind, OrbAsk, RowKey, RowSource, Verb,
-    local_midnight,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -31,7 +29,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 
-use crate::session_picker::{boxed, cut_right, wrap_words};
+use crate::picker::span;
+use crate::session_picker::{boxed, centred, cut_right, wrap_words};
 use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BLUE1, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, GREEN,
     GREEN1, GUTTER, INPUT_ICON, MAGENTA, ORANGE, RED, VISUAL, YELLOW, ago_label, render_split,
@@ -66,16 +65,15 @@ const SESSION_ROOM: usize = 22;
 
 /// Draws the plate as the start screen in `area` (the right-hand side),
 /// inside a 2-column, 1-row margin, with Done today counted from local
-/// midnight of `now` in `tz`. Returns `area`, all of which is the plate's,
+/// midnight of `now`. Returns `area`, all of which is the plate's,
 /// and how many rows the list shows.
 pub(crate) fn render(
     state: &AppState,
     now: SystemTime,
-    tz: &TimeZone,
     area: Rect,
     buf: &mut Buffer,
 ) -> (Rect, usize) {
-    let board = Board::new(state, local_midnight(now, tz));
+    let board = Board::new(state, state.zone.midnight(now));
     let outer = Rect {
         x: area.x.saturating_add(2),
         y: area.y.saturating_add(1),
@@ -87,19 +85,18 @@ pub(crate) fn render(
 
 /// Draws the plate floating over the shown session: a cleared rect 92% ×
 /// 86% of the tab body inside `right`, centred, holding the list and the
-/// preview, with Done today counted from local midnight of `now` in `tz`.
+/// preview, with Done today counted from local midnight of `now`.
 /// Returns that rect and how many rows the list shows.
 pub(crate) fn render_float(
     state: &AppState,
     now: SystemTime,
-    tz: &TimeZone,
     right: Rect,
     buf: &mut Buffer,
 ) -> (Rect, usize) {
     let [_, body] = tabs::areas(right);
     let rect = float_rect(body);
     Clear.render(rect, buf);
-    let board = Board::new(state, local_midnight(now, tz));
+    let board = Board::new(state, state.zone.midnight(now));
     (rect, render_boxes(&board, state, now, rect, buf))
 }
 
@@ -108,14 +105,7 @@ pub(crate) fn render_float(
 fn float_rect(body: Rect) -> Rect {
     let share =
         |size: u16, percent: u32| u16::try_from(u32::from(size) * percent / 100).unwrap_or(size);
-    let width = share(body.width, 92);
-    let height = share(body.height, 86);
-    Rect {
-        x: body.x + (body.width - width) / 2,
-        y: body.y + (body.height - height) / 2,
-        width,
-        height,
-    }
+    centred(body, share(body.width, 92), share(body.height, 86))
 }
 
 /// Draws `board`'s list box and preview box in `outer`: side by side from
@@ -365,7 +355,7 @@ fn render_preview(
     text.push(Line::default());
     text.extend(link_lines(row, width));
     text.push(Line::default());
-    text.push(source_line(row, &state.harnesses, now));
+    text.push(source_line(row, state, now));
     let text_area = Rect {
         height: inner.height.saturating_sub(2),
         ..inner
@@ -435,8 +425,8 @@ fn link_lines(row: &BoardRow<'_>, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Where `row` came from, then its project and age.
-fn source_line(row: &BoardRow<'_>, harnesses: &[HarnessInfo], now: SystemTime) -> Line<'static> {
-    let agent = agent_name(row.harness.as_ref(), harnesses);
+fn source_line(row: &BoardRow<'_>, state: &AppState, now: SystemTime) -> Line<'static> {
+    let agent = agent_name(row.harness.as_ref(), state);
     let session = &row.session_title;
     let text = match row.source {
         RowSource::Orb { .. } => format!("orb saw {agent} waiting in {session}"),
@@ -454,15 +444,11 @@ fn source_line(row: &BoardRow<'_>, harnesses: &[HarnessInfo], now: SystemTime) -
 }
 
 /// The harness's id and mark (`claude ✳`), or `a shell` with none.
-fn agent_name(harness: Option<&HarnessId>, harnesses: &[HarnessInfo]) -> String {
+fn agent_name(harness: Option<&HarnessId>, state: &AppState) -> String {
     let Some(id) = harness else {
         return "a shell".to_owned();
     };
-    match harnesses
-        .iter()
-        .find(|info| &info.id == id)
-        .and_then(|info| info.icon.as_deref())
-    {
+    match state.harness_info(id).and_then(|info| info.icon.as_deref()) {
         Some(icon) => format!("{id} {icon}"),
         None => id.to_string(),
     }
@@ -512,14 +498,8 @@ fn render_nothing(area: Rect, buf: &mut Buffer) {
 /// `row`'s glyph in `kind`.
 fn glyph(row: &BoardRow<'_>, kind: GroupKind) -> Span<'static> {
     let (icon, colour) = match row.source {
-        RowSource::Orb {
-            ask: OrbAsk::Approval,
-            ..
-        } => (APPROVAL_ICON, YELLOW),
-        RowSource::Orb {
-            ask: OrbAsk::Answer,
-            ..
-        } => (INPUT_ICON, MAGENTA),
+        RowSource::Orb(OrbAsk::Approval) => (APPROVAL_ICON, YELLOW),
+        RowSource::Orb(OrbAsk::Answer) => (INPUT_ICON, MAGENTA),
         RowSource::Item(item) => match kind {
             GroupKind::YourMove if item.urgent => (URGENT_ICON, RED),
             GroupKind::YourMove => (MOVE_ICON, ORANGE),
@@ -601,13 +581,6 @@ fn long_ago(elapsed: Duration) -> String {
 fn padded(text: &str, width: usize) -> String {
     let used = Line::raw(text).width();
     format!("{text}{}", " ".repeat(width.saturating_sub(used)))
-}
-
-fn span<T>(text: T, fg: Color) -> Span<'static>
-where
-    T: Into<String>,
-{
-    Span::styled(text.into(), Style::new().fg(fg))
 }
 
 fn bold(fg: Color) -> Style {

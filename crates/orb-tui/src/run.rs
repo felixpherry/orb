@@ -13,8 +13,9 @@
 //! Every session's layout (tabs of split panes) is kept and saved; while a
 //! session is attached, each of its panes has a client. The right side shows
 //! the selected session, a tab bar over its shown tab's panes, while it is
-//! attached, else the plate as the start screen. Each frame resizes every visible pane to
-//! the inside of its frame; panes of hidden tabs and other sessions keep their size. A
+//! attached, else the plate as the start screen. Each frame resizes every
+//! visible pane to the inside of its frame; panes of hidden tabs and other
+//! sessions keep their size. A
 //! pane that leaves every layout (closed, or its session deleted) is killed
 //! with `zmx kill`. A pane of an attached session whose program ended closes
 //! in its layout. At start every `orb-p*` session on orb's pane dir that no

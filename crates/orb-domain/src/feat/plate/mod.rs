@@ -18,7 +18,7 @@ pub mod state;
 pub(crate) mod validator;
 pub mod view;
 
-pub use board::{Board, BoardRow, Group, GroupKind, OrbAsk, RowKey, RowSource, orb_rows};
+pub use board::{Board, BoardRow, Group, GroupKind, OrbAsk, RowKey, RowSource, your_move_count};
 pub use intent::PlateKey;
 pub use links::BrowserTabs;
 pub use opener::{LinkOpener, LinkService};

@@ -92,12 +92,7 @@ pub(crate) enum LinkRoute {
 /// starts at the session's folder, or at home with no session.
 pub(crate) fn route(state: &AppState, item: &PlateItem, n: usize) -> Option<LinkRoute> {
     let address = item.links.get(n.checked_sub(1)?)?;
-    let live = |id: SessionId| {
-        state
-            .sessions
-            .session(id)
-            .filter(|found| !state.sessions.deleting.contains(&found.id))
-    };
+    let live = |id| state.sessions.live(id);
     let target = live(item.session).or_else(|| state.shown_session().and_then(live));
     let dir = target.map(|session| session.dir.as_path());
     let path = (Link::of(address).kind == LinkKind::File).then(|| resolved(state, dir, address));

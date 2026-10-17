@@ -141,7 +141,7 @@ pub(crate) fn render(
             images,
         );
     }
-    let plate_page = render_plate(state, now, tz, right, frame.buffer_mut(), hits);
+    let plate_page = render_plate(state, now, right, frame.buffer_mut(), hits);
     mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
     let renaming = state
         .rename
@@ -212,7 +212,6 @@ pub(crate) fn render(
 fn render_plate(
     state: &AppState,
     now: SystemTime,
-    tz: &TimeZone,
     right: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
@@ -220,8 +219,8 @@ fn render_plate(
     let drawn = match state.shown_layout() {
         Some(_) => state
             .plate_floats()
-            .then(|| plate::render_float(state, now, tz, right, buf)),
-        None => Some(plate::render(state, now, tz, right, buf)),
+            .then(|| plate::render_float(state, now, right, buf)),
+        None => Some(plate::render(state, now, right, buf)),
     };
     let (area, page) = drawn.filter(|_| state.focus == Focus::Plate)?;
     hits.record_overlay(area);

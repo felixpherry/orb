@@ -2,9 +2,7 @@
 //! for agents, and saved after the user's x, p and u.
 
 use super::*;
-use crate::feat::plate::{
-    NewPlateItem, Plate, PlateChange, PlateItem, PlateRefusal, local_midnight,
-};
+use crate::feat::plate::{NewPlateItem, Plate, PlateChange, PlateItem, PlateRefusal};
 use crate::ids::PlateItemId;
 
 /// The message shown when the plate's saved items can't be read or tidied.
@@ -133,12 +131,16 @@ impl SessionsActor {
     }
 }
 
-/// The saved plate, after deleting the items closed before today's midnight
-/// in `tz`, with the reason when that delete or the load failed. A failed
+/// The saved plate, after deleting the items closed before `today` (local
+/// midnight), with the reason when that delete or the load failed. A failed
 /// delete still loads the rest; a failed load gives an empty plate.
-pub(super) fn restore_plate(store: &Store, log: &Log, tz: &TimeZone) -> (Plate, Option<String>) {
+pub(super) fn restore_plate(
+    store: &Store,
+    log: &Log,
+    today: SystemTime,
+) -> (Plate, Option<String>) {
     let deleted = store
-        .delete_done_before(local_midnight(SystemTime::now(), tz))
+        .delete_done_before(today)
         .err()
         .map(|report| failed(log, PLATE_UNLOADED, &report));
     match store.plate_items() {

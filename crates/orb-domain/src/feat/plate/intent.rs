@@ -149,18 +149,10 @@ fn select(state: &mut AppState, now: SystemTime, pick: Pick) {
 /// (`Attach`, which gives the pane its keys again) when they came from a
 /// pane and a session is still shown, else to the sidebar.
 fn close(state: &mut AppState) -> Vec<Command> {
-    let view = state.plate.view_mut();
-    view.pending = None;
-    let back = view.back;
-    match (back, state.shown_session()) {
-        (Focus::Pane, Some(shown)) => {
-            state.focus = Focus::Pane;
-            vec![Command::Attach(shown)]
-        }
-        _ => {
-            state.focus = Focus::Sidebar;
-            vec![]
-        }
+    give_back(state);
+    match (state.focus, state.shown_session()) {
+        (Focus::Pane, Some(shown)) => vec![Command::Attach(shown)],
+        _ => vec![],
     }
 }
 

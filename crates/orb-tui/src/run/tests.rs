@@ -1456,7 +1456,6 @@ fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Resul
             incognito_root: dir.path().join("incognito"),
             report: report.clone(),
             integration_missing: false,
-            tz: TimeZone::UTC,
         });
         let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
             git: git.clone(),

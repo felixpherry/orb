@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use orb_domain::feat::picker::state::PickerState;
-use orb_domain::feat::plate::{Board, GroupKind, local_midnight};
+use orb_domain::feat::plate::your_move_count;
 use orb_domain::feat::sessions::state::{AgentStatus, Sessions, SidebarItem};
 use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
@@ -50,7 +50,7 @@ pub(crate) fn render(
     buf: &mut Buffer,
 ) {
     let (mode, colour) = mode(state);
-    let your_move = Board::new(state, local_midnight(now, tz)).count(GroupKind::YourMove);
+    let your_move = your_move_count(state);
     let right = right(&state.sessions, your_move, colour, now, tz);
     let right_width = u16::try_from(right.width())
         .unwrap_or(u16::MAX)

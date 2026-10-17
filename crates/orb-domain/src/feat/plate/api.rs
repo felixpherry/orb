@@ -24,8 +24,6 @@ pub(crate) enum PlateAsk {
     Add(ApiPlateAdd),
     Update(ApiPlateUpdate),
     Done(ApiPlateDone),
-    /// Answered from the state with today's local midnight.
-    List,
 }
 
 /// What plate `op` from `caller` comes to, or why it's refused.
@@ -59,7 +57,6 @@ pub(crate) fn plan(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Pl
             validator::known_item(app, *item)?;
             Ok(PlateAsk::Done(ApiPlateDone { item: *item }))
         }
-        Op::PlateList => Ok(PlateAsk::List),
         _ => Err(ApiError::new(ErrorCode::BadRequest, "not a plate request")),
     }
 }
@@ -144,10 +141,6 @@ pub(crate) fn ask(deps: &ControlDeps, ask: PlateAsk) -> Reply {
             deps.runtime
                 .block_on(async { deps.sessions.ask(done).await }),
         ),
-        PlateAsk::List => Reply::err(ApiError::new(
-            ErrorCode::BadRequest,
-            "plate list is answered from the state",
-        )),
     }
 }
 

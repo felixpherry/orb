@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use super::state::{ItemState, PlateItem, Verb};
 use crate::AppState;
 use crate::feat::harness::HarnessId;
-use crate::feat::sessions::state::{Agent, AgentStatus};
+use crate::feat::sessions::state::{Agent, AgentStatus, Session};
 use crate::ids::{PaneId, PlateItemId, SessionId};
 
 /// Which group a row sits in, in the order the plate shows them.
@@ -58,9 +58,9 @@ pub enum OrbAsk {
 pub enum RowSource<'a> {
     /// An item an agent added.
     Item(&'a PlateItem),
-    /// orb's own row for `agent`, waiting on the user; built from its
+    /// orb's own row for an agent waiting on the user; built from its
     /// status, never stored.
-    Orb { ask: OrbAsk, agent: &'a Agent },
+    Orb(OrbAsk),
 }
 
 /// One row of the plate, with everything the screen shows for it.
@@ -88,14 +88,8 @@ impl BoardRow<'_> {
     /// then its answer rows, then items.
     fn rank(&self) -> u8 {
         match self.source {
-            RowSource::Orb {
-                ask: OrbAsk::Approval,
-                ..
-            } => 0,
-            RowSource::Orb {
-                ask: OrbAsk::Answer,
-                ..
-            } => 1,
+            RowSource::Orb(OrbAsk::Approval) => 0,
+            RowSource::Orb(OrbAsk::Answer) => 1,
             RowSource::Item(_) => 2,
         }
     }
@@ -136,14 +130,14 @@ impl<'a> Board<'a> {
         let mut parked = Vec::new();
         let mut done = Vec::new();
         for item in app.plate.items() {
-            let row = item_row(app, item);
-            match item.state {
-                ItemState::YourMove => your_move.push(row),
-                ItemState::Waiting => waiting.push(row),
-                ItemState::Parked { .. } => parked.push(row),
-                ItemState::Done if row.since.is_some_and(|at| at >= today) => done.push(row),
-                ItemState::Done => {}
-            }
+            let list = match item.state {
+                ItemState::YourMove => &mut your_move,
+                ItemState::Waiting => &mut waiting,
+                ItemState::Parked { .. } => &mut parked,
+                ItemState::Done if item_since(item) >= today => &mut done,
+                ItemState::Done => continue,
+            };
+            list.push(item_row(app, item));
         }
         your_move.sort_by_key(|row| {
             (
@@ -220,25 +214,16 @@ impl<'a> Board<'a> {
 /// colonists included and the project filter ignored. Each is named after
 /// the agent's pane, else the agent's title, else its session's title.
 #[must_use]
-pub fn orb_rows(app: &AppState) -> Vec<BoardRow<'_>> {
+fn orb_rows(app: &AppState) -> Vec<BoardRow<'_>> {
     let sessions = &app.sessions;
     sessions
         .all_agents()
         .filter_map(|agent| {
-            let ask = match agent.status {
-                AgentStatus::NeedsApproval => OrbAsk::Approval,
-                AgentStatus::NeedsInput => OrbAsk::Answer,
-                _ => return None,
-            };
-            let launch = agent.pane.as_ref()?;
-            let session = sessions
-                .session(launch.session)
-                .filter(|session| session.settled_at.is_none())
-                .filter(|session| !sessions.deleting.contains(&session.id))?;
+            let (ask, pane, session) = orb_ask(app, agent)?;
             let session_title = sessions.title(session);
             let name = app
                 .layouts
-                .entry(launch.pane)
+                .entry(pane)
                 .and_then(|entry| entry.name.clone())
                 .or_else(|| agent.title.clone())
                 .unwrap_or_else(|| session_title.clone());
@@ -247,8 +232,8 @@ pub fn orb_rows(app: &AppState) -> Vec<BoardRow<'_>> {
                 OrbAsk::Answer => (Verb::Answer, format!("Answer {name}")),
             };
             Some(BoardRow {
-                key: RowKey::Agent(launch.pane),
-                source: RowSource::Orb { ask, agent },
+                key: RowKey::Agent(pane),
+                source: RowSource::Orb(ask),
                 verb,
                 title,
                 session: session.id,
@@ -262,6 +247,50 @@ pub fn orb_rows(app: &AppState) -> Vec<BoardRow<'_>> {
             })
         })
         .collect()
+}
+
+/// How many rows Your move holds: the open items there plus orb's rows,
+/// counted without laying out the board.
+#[must_use]
+pub fn your_move_count(app: &AppState) -> usize {
+    let items = app
+        .plate
+        .items()
+        .iter()
+        .filter(|item| item.state == ItemState::YourMove)
+        .count();
+    let agents = app
+        .sessions
+        .all_agents()
+        .filter(|agent| orb_ask(app, agent).is_some())
+        .count();
+    items + agents
+}
+
+/// What `agent` waits on the user for, its pane and its session, when orb
+/// gives it a row: it waits for an approval or an answer, has a pane, and
+/// its session exists, isn't settled and isn't being deleted.
+fn orb_ask<'a>(app: &'a AppState, agent: &Agent) -> Option<(OrbAsk, PaneId, &'a Session)> {
+    let sessions = &app.sessions;
+    let ask = match agent.status {
+        AgentStatus::NeedsApproval => OrbAsk::Approval,
+        AgentStatus::NeedsInput => OrbAsk::Answer,
+        _ => return None,
+    };
+    let launch = agent.pane.as_ref()?;
+    let session = sessions
+        .live(launch.session)
+        .filter(|session| session.settled_at.is_none())?;
+    Some((ask, launch.pane, session))
+}
+
+/// Where `item`'s age counts from: its close for a done item, else its last
+/// state change.
+fn item_since(item: &PlateItem) -> SystemTime {
+    match item.state {
+        ItemState::Done => item.done_at.unwrap_or(item.changed_at),
+        _ => item.changed_at,
+    }
 }
 
 /// `item`'s row, titled with its session as that session is called now, or
@@ -284,10 +313,7 @@ fn item_row<'a>(app: &'a AppState, item: &'a PlateItem) -> BoardRow<'a> {
             .map(|project| project.title.clone()),
         harness: item.harness.clone(),
         urgent: item.urgent,
-        since: Some(match item.state {
-            ItemState::Done => item.done_at.unwrap_or(item.changed_at),
-            _ => item.changed_at,
-        }),
+        since: Some(item_since(item)),
     }
 }
 

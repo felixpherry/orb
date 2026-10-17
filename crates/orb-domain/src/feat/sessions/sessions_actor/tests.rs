@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use error_stack::{Report, ResultExt};
-use jiff::tz::TimeZone;
 use ratatui::layout::Rect;
 
 use super::links::LinkJob;
@@ -679,7 +678,6 @@ fn start_in(
         incognito_root: incognito_root.to_owned(),
         report: Reporter::new(|_| {}),
         integration_missing: false,
-        tz: TimeZone::UTC,
     });
     (actor, state)
 }
@@ -718,7 +716,6 @@ fn deps_beside(
         incognito_root: PathBuf::from(INCOGNITO_ROOT),
         report: Reporter::new(|_| {}),
         integration_missing: false,
-        tz: TimeZone::UTC,
     }
 }
 
@@ -9066,7 +9063,6 @@ impl PaneStatus {
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
             report: Reporter::new(|_| {}),
             integration_missing: false,
-            tz: TimeZone::UTC,
         });
         Ok(Self {
             dir,
@@ -9482,7 +9478,6 @@ async fn spawned_reporting(
         incognito_root: PathBuf::from(INCOGNITO_ROOT),
         report: report.clone(),
         integration_missing: false,
-        tz: TimeZone::UTC,
     });
     tokio::time::timeout(LIMIT, actor.wait_for_startup())
         .await

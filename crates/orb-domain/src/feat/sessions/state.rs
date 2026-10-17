@@ -526,6 +526,11 @@ impl Sessions {
         self.sessions.iter().find(|session| session.id == id)
     }
 
+    /// Session `id`, if it exists and isn't being deleted.
+    pub fn live(&self, id: SessionId) -> Option<&Session> {
+        self.session(id).filter(|_| !self.deleting.contains(&id))
+    }
+
     /// Project `id`, if it still exists.
     pub fn project(&self, id: ProjectId) -> Option<&Project> {
         self.projects.iter().find(|project| project.id == id)
