@@ -109,7 +109,7 @@ Entries are added or amended **only with human approval**.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any agent in the same directory is working or waiting.
 - (branches) The branch picker's four git reads run at the same time.
-- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> s`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
+- (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito sessions or colonies; `<C-g> ,` only on a colony; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> s`, `<C-g> [`, `<C-g> y`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `<C-g> h` only in a pane, `<C-g> l` only in the sidebar; `p`/`s` only on a session card, `r`/`d` on a card or an agent row, and none of them on a colonists row.
 - (keybinds) Which keys are bound follows the side with the keys, the row under the sidebar cursor (or the shown session in a pane), and the session's kind, whose one rule leaves `<C-g> w` and `<C-g> b` unbound on Incognito sessions and colonies and binds `<C-g> ,` only on colonies.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
@@ -144,6 +144,7 @@ Entries are added or amended **only with human approval**.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`<C-g>` for the leader), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
+- (keybinds) `<C-g> ?` in the sidebar or a pane, and `?` in the sidebar, open a searchable list of every key that works there, Alt and jump keys included.
 - (keybinds) which-key labels `<C-g> e` "toggle sidebar", `<C-g> h` "go to sidebar", `<C-g> l` "go to panes", `<C-g> t 1`–`9` "tab 1"–"tab 9", `<C-g> w` "session's worktree" and `<C-g> W` "all worktrees".
 - (dashboard) While no session whose panes orb holds is shown, the right-hand area shows a LazyVim-style start screen: a gradient ORB banner and a footer counting working agents, sessions and projects, with no menu and no keys.
 - (dashboard) When a pane's client can't start, the reason shows in red under the start screen's footer; other errors show in the message box.
@@ -205,6 +206,9 @@ Entries are added or amended **only with human approval**.
 - (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, Colonists or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
 - (picker) The session picker's preview shows the selected agent's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools the session ran, and the end of its last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
 - (picker) While the session picker is open, a growing transcript re-reads the preview at most once a second, and a newly selected agent's preview loads at once; a transcript that stopped growing is re-read within a second without a key press.
+- (keybinds) `<C-g> y` in a pane pastes the pane's highlighted selection, else its visible screen, into the prompt of an agent picked from a list, without sending it, and moves the keys to that agent's pane.
+- (picker) The `<C-g> y` list holds every unsettled agent inside the project filter but the pane's own, opens with an empty search, and doesn't share the session picker's remembered filter.
+- (keybinds) `<C-g> y` refuses an agent waiting for approval or input, so a paste never answers its prompt.
 - (mouse) orb captures the mouse from startup until it exits.
 - (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a press on a pane moves the keys into it without reaching its program; the start screen takes no clicks.
 - (mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.
@@ -244,7 +248,8 @@ Entries are added or amended **only with human approval**.
 - (picker) The search picker is drawn like the session picker, with its list box titled Search, `indexing n/total` beside the title while transcripts are still being indexed, `200+` as its count when more than 200 messages matched, and `search unavailable: <error>` in place of the rows when the index can't be opened.
 - (picker) The search picker's preview shows the agent's status, branch and model, then the exchange the matching message is in, naming the speaker only where it changes; the matching message is plain wrapped text with its matches lit and the first one in view, and the other messages render as Markdown.
 - (picker) The search picker loads the first row's preview along with the results.
-- (picker) `⏎` in the search picker reveals the agent in the sidebar and attaches to its current session, and on an agent deleted since, or one Claude no longer knows, it only closes the picker.
+- (picker) `⏎` in the search picker shows the found agent's own pane with the keys in it, and on an agent deleted since, or one Claude no longer knows, it only closes the picker.
+- (picker) `⏎` in the search picker on an agent whose program has ended opens a new tab in its session that resumes its chat.
 - (arch) Everything orb does differently per harness (the agents it sees running, reading transcripts, the resume command, and where status comes from) lives in that harness's implementation of one shared interface, picked by the harness id each agent stores.
 - (sessions) An agent whose stored harness orb doesn't know shows as gone.
 - (sessions) Panes migrated from pi agents keep their `orb-<32 hex>` zmx session under `~/.orb/pi`.
@@ -319,6 +324,7 @@ Entries are added or amended **only with human approval**.
 - (layout) While a float has the keys, the tab bar's layout name shows the float layout instead of the tab's.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
+- (keybinds) `<C-g> [` in a pane opens that pane's history, as plain text, in a floating pane running `$EDITOR`, else `less`, and the float closes when the editor quits.
 - (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell, the card is folded or the card is a one-agent colonist, and it follows every focus change inside the session.
 - (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
