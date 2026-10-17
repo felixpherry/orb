@@ -29,10 +29,10 @@
 //! dropped, keeping its program. While a pane
 //! has the keys, input goes straight to its program except orb's Alt keys,
 //! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
-//! itself reads the directory picker's listings, the branch picker's refs
-//! and the session picker's preview, re-reading the preview whenever the
-//! selected agent's transcript changes length, since each takes
-//! milliseconds.
+//! itself reads the directory picker's listings, the branch picker's refs,
+//! the key list's keys for where it was opened, and the session picker's
+//! preview, re-reading the preview whenever the selected agent's transcript
+//! changes length, since each takes milliseconds.
 //!
 //! A click on the sidebar, `<C-g> h` or `<C-g> e` from a pane moves the keys
 //! to the sidebar and leaves the panes drawn, so `<C-g> l` or `<C-g> e` goes
@@ -93,7 +93,7 @@ use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::{SoundService, sound_for};
-use orb_domain::feat::picker::state::{PickerKind, worktree_items};
+use orb_domain::feat::picker::state::{PickerKind, PickerState, worktree_items};
 use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::{pane_env, terminal_browser_env};
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
@@ -924,6 +924,15 @@ impl App {
             }
             Command::LoadPreview { agent, transcript } => {
                 self.load_preview(*agent, transcript);
+            }
+            Command::ListKeys => {
+                let mut app = self.state.write();
+                if let Some(from) = app.picker.as_ref().map(PickerState::return_to) {
+                    let rows = keymap::key_rows(Scope::of(from, &app));
+                    if let Some(picker) = &mut app.picker {
+                        picker.show_keys(rows);
+                    }
+                }
             }
             Command::Sessions(command) => {
                 let sent = self.sessions.tell(command.clone()).try_send();

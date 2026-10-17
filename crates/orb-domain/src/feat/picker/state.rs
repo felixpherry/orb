@@ -185,6 +185,9 @@ pub enum PickerKind {
     /// `<C-g> /`: messages across every agent's transcripts that match the typed
     /// text. `overflow` is whether more matched than are listed.
     Search { overflow: bool },
+    /// `<C-g> ?`, or `?` in the sidebar: every key that works where it was
+    /// opened, to read. Picking one only closes it.
+    Keys,
 }
 
 /// What the session picker's preview shows for an agent: its transcript's
@@ -355,6 +358,14 @@ impl PickerState {
     pub fn search(return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Search { overflow: false },
+            ..Self::projects(Vec::new(), return_to)
+        }
+    }
+
+    /// The key list, with nothing typed and no rows yet.
+    pub fn keys(return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Keys,
             ..Self::projects(Vec::new(), return_to)
         }
     }
@@ -944,6 +955,20 @@ impl PickerState {
         self.list.set_items(items, "");
     }
 
+    /// Lists `rows`, each a key's text and label, in the order given,
+    /// filtered by the typed text. Ignored unless this is the key list.
+    pub fn show_keys(&mut self, rows: Vec<(String, String)>) {
+        if self.kind != PickerKind::Keys {
+            return;
+        }
+        let items = rows
+            .into_iter()
+            .map(|(keys, label)| PickerItem::Key { keys, label })
+            .collect();
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+    }
+
     /// Whether the selected agent's transcript, now `len` bytes long, needs
     /// reading for the preview: nothing was read for it yet, or it was read
     /// at another length.
@@ -989,7 +1014,8 @@ impl PickerState {
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. }
-                | PickerItem::WorldKind { .. },
+                | PickerItem::WorldKind { .. }
+                | PickerItem::Key { .. },
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }

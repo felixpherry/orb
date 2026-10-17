@@ -5828,3 +5828,95 @@ fn send_pick_on_an_agent_waiting_for_approval_keeps_the_list_open() {
         "a refused send should leave the list open"
     );
 }
+
+#[rstest::rstest]
+fn open_key_list_opens_the_keys_picker() {
+    // Given agents 1 and 2, with the keys in the sidebar.
+    let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+    // When handling OpenKeyList.
+    IntentHandler::handle(&Intent::OpenKeyList, &mut state);
+
+    // Then the key list is open and takes the keys.
+    assert_eq!(
+        (picker_kind(&state), state.focus),
+        (Some(PickerKind::Keys), Focus::Picker),
+        "<C-g> ? should open the key list"
+    );
+}
+
+#[rstest::rstest]
+fn open_key_list_returns_list_keys() {
+    // Given agents 1 and 2, with the keys in the sidebar.
+    let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+    // When handling OpenKeyList.
+    let commands = IntentHandler::handle(&Intent::OpenKeyList, &mut state);
+
+    // Then the loop is asked for the keys that work there.
+    assert_eq!(commands, [Command::ListKeys], "the loop fills the key list");
+}
+
+/// The key list opened from the sidebar, listing three keys.
+fn key_list() -> AppState {
+    let mut state = jumping(Focus::Sidebar, &[], &[]);
+    IntentHandler::handle(&Intent::OpenKeyList, &mut state);
+    if let Some(picker) = &mut state.picker {
+        picker.show_keys(
+            [
+                ("<C-g> p d", "split down"),
+                ("<C-g> p r", "split right"),
+                ("<C-g> q", "quit"),
+            ]
+            .map(|(keys, label)| (keys.to_owned(), label.to_owned()))
+            .to_vec(),
+        );
+    }
+    state
+}
+
+#[rstest::rstest]
+fn typing_in_the_key_list_filters_its_rows() {
+    // Given the key list with split down, split right and quit.
+    let mut state = key_list();
+
+    // When typing `split`.
+    for ch in "split".chars() {
+        IntentHandler::handle(&Intent::PickerInput(ch), &mut state);
+    }
+
+    // Then only the split keys are shown.
+    let shown: Vec<PickerItem> = state
+        .picker
+        .as_ref()
+        .map(|picker| picker.shown().map(|(item, _)| item.clone()).collect())
+        .unwrap_or_default();
+    let key = |keys: &str, label: &str| PickerItem::Key {
+        keys: keys.to_owned(),
+        label: label.to_owned(),
+    };
+    assert_eq!(
+        shown,
+        [
+            key("<C-g> p d", "split down"),
+            key("<C-g> p r", "split right")
+        ],
+        "typing should filter the key list"
+    );
+}
+
+#[rstest::rstest]
+fn enter_in_the_key_list_closes_it() {
+    // Given the key list opened from the sidebar.
+    let mut state = key_list();
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then it closes, runs nothing, and the keys go back to the sidebar.
+    assert_eq!(
+        (picker_kind(&state), state.focus, commands),
+        (None, Focus::Sidebar, vec![]),
+        "⏎ only closes the key list"
+    );
+}

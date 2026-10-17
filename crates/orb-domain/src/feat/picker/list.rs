@@ -81,6 +81,9 @@ pub enum PickerItem {
     /// A world kind to add a folder as, in the `Add <name> as` pick: `Fresh`
     /// when `fresh`, else `Shared`. Matched on its label.
     WorldKind { fresh: bool },
+    /// A key in the key list: its keys as which-key names them (`<C-g> p d`)
+    /// and what it does. Matched on both.
+    Key { keys: String, label: String },
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
@@ -436,7 +439,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::Session { .. }
         | PickerItem::Worktree { .. }
         | PickerItem::Hit { .. }
-        | PickerItem::WorldKind { .. } => false,
+        | PickerItem::WorldKind { .. }
+        | PickerItem::Key { .. } => false,
     }
 }
 
@@ -480,8 +484,9 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
     if let PickerItem::Hit { .. } = item {
         return Some((0, Matches::default()));
     }
-    // A project is matched on "title\nroot". Typed text never holds a line
-    // break, so every offset falls on one side of it.
+    // A project is matched on "title\nroot" and a key on "keys label". Typed
+    // terms never hold a line break or a space, so every offset falls on one
+    // side of it: `name` holds the title's or the keys', `path` the rest's.
     let (label, title_len) = match item {
         PickerItem::Project { title, kind, .. } if *kind != ProjectKind::Normal => {
             (title.clone(), None)
@@ -500,6 +505,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
         PickerItem::WorldKind { fresh } => (world_kind_label(*fresh).to_owned(), None),
+        PickerItem::Key { keys, label } => (format!("{keys} {label}"), Some(keys.len())),
     };
     let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
@@ -562,7 +568,8 @@ mod tests {
                 PickerItem::Covers { colonists } => super::covers_label(*colonists).to_owned(),
                 PickerItem::Session { label, .. }
                 | PickerItem::Worktree { label, .. }
-                | PickerItem::Hit { label, .. } => label.clone(),
+                | PickerItem::Hit { label, .. }
+                | PickerItem::Key { label, .. } => label.clone(),
                 PickerItem::WorldKind { fresh } => super::world_kind_label(*fresh).to_owned(),
             })
             .collect()
@@ -650,7 +657,8 @@ mod tests {
                 | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. }
-                | PickerItem::WorldKind { .. } => None,
+                | PickerItem::WorldKind { .. }
+                | PickerItem::Key { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -713,6 +721,29 @@ mod tests {
                 path: vec![5, 6, 7],
             }],
             "a path match should be offset into the path"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_match_is_split_between_its_keys_and_its_label() {
+        // Given the key `<C-g> q`, labelled quit.
+        let mut list = PickerList::new(vec![PickerItem::Key {
+            keys: "<C-g> q".to_owned(),
+            label: "quit".to_owned(),
+        }]);
+
+        // When filtering with "C-g" and "uit".
+        list.refilter("C-g uit");
+
+        // Then "C-g" is lit in the keys, and "uit" in the label.
+        let matches: Vec<&Matches> = list.shown().map(|(_, matches)| matches).collect();
+        assert_eq!(
+            matches,
+            [&Matches {
+                name: vec![1, 2, 3],
+                path: vec![1, 2, 3],
+            }],
+            "a key's matches should be offset into its keys and its label"
         );
     }
 

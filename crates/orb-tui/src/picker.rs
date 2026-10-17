@@ -18,7 +18,8 @@
 //! its glyph; the branch and base pickers show each branch with its badge on
 //! the right, the branch picker dimming the ones checked out where the
 //! session can't follow and saying where; a project that isn't a git
-//! repository gets one row, `Initialize Git`.
+//! repository gets one row, `Initialize Git`. The key list shows each key in
+//! cyan, then what it does, the labels lined up, and only `Esc close`.
 //! Where the filter matched is blue and bold, and the rows scroll to keep the
 //! selection in view.
 
@@ -54,6 +55,10 @@ pub(crate) const WORKTREE: &str = "\u{f126}";
 const HISTORY: &str = "\u{f1da}";
 /// Before Initialize Git (`nf-fa-git`).
 const GIT: &str = "\u{f1d3}";
+
+/// How wide a key list row's keys are drawn, so the labels line up: the
+/// longest key, `<C-g> Space`, and two spaces.
+const KEY_COLUMN: usize = 13;
 
 /// How far the picker's rows are scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -195,6 +200,7 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
         PickerKind::SendTo { .. } => "Send to",
         PickerKind::Worktrees => "Worktrees",
         PickerKind::Search { .. } => "Search",
+        PickerKind::Keys => "Keys",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { world: false, .. } => "Add project",
         PickerKind::Directories { world: true, .. } => "Add world",
@@ -266,10 +272,11 @@ pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
 }
 
 /// What `⏎` does in a list picker or a picker that closes with `Esc close`;
-/// `None` in the worktree picker, where it does nothing.
+/// `None` in the worktree picker, where it does nothing, and in the key list,
+/// where it only closes.
 fn confirm_verb(kind: &PickerKind) -> Option<&'static str> {
     match kind {
-        PickerKind::Worktrees => None,
+        PickerKind::Worktrees | PickerKind::Keys => None,
         PickerKind::ManageProjects => Some("new session"),
         PickerKind::Worlds | PickerKind::ManageWorlds => Some("new colony"),
         PickerKind::Sessions { .. } => Some("open"),
@@ -483,6 +490,15 @@ fn row_content(
                 labelled(icon(glyph, fg), world_kind_label(*fresh), &matches.name),
                 None,
             )
+        }
+        PickerItem::Key { keys, label } => {
+            let pad = KEY_COLUMN.saturating_sub(Span::raw(keys.as_str()).width());
+            let left = highlight(keys, &matches.name, |_| CYAN)
+                .into_iter()
+                .chain([Span::raw(" ".repeat(pad.max(2)))])
+                .chain(highlight(label, &matches.path, |_| FG))
+                .collect();
+            (left, None)
         }
     }
 }
@@ -1063,6 +1079,7 @@ mod tests {
         "Add world"
     )]
     #[case::world_kind(PickerState::world_kind("/x/kit".into(), Focus::Sidebar), "Add kit as")]
+    #[case::keys(PickerState::keys(Focus::Sidebar), "Keys")]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
@@ -1243,6 +1260,7 @@ mod tests {
     )]
     #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
     #[case(workspace(), "⏎ select · Esc close")]
+    #[case::keys(PickerState::keys(Focus::Sidebar), "─ Esc close ╯")]
     fn hints(#[case] picker: PickerState, #[case] expected: &str) {
         // Given a picker of some kind.
 
@@ -1491,6 +1509,26 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains(&format!("{FOLDER} dev"))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_row_shows_the_keys_then_the_label() {
+        // Given the key list listing `<C-g> q`, labelled quit.
+        let picker = {
+            let mut picker = PickerState::keys(Focus::Sidebar);
+            picker.show_keys(vec![("<C-g> q".to_owned(), "quit".to_owned())]);
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the row is the keys, then the label in line with the others.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("<C-g> q      quit")),
             "screen was {lines:#?}"
         );
     }

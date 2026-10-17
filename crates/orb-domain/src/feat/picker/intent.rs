@@ -154,6 +154,13 @@ pub(crate) fn open_search(state: &mut AppState) -> Vec<Command> {
     vec![Command::Search(SearchCommand::SearchTranscripts { query })]
 }
 
+/// Opens the key list with nothing typed, and asks for the keys that work
+/// where the keys were.
+pub(crate) fn open_key_list(state: &mut AppState) -> Vec<Command> {
+    open_picker(state, PickerState::keys(state.focus));
+    vec![Command::ListKeys]
+}
+
 /// Opens the project filter: all projects, the worlds in worlds order,
 /// Incognito, then the projects most recent first.
 pub(crate) fn filter_projects(state: &mut AppState) -> Vec<Command> {
@@ -601,6 +608,10 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
             }
         }
         Some(&PickerKind::SendTo { from }) => send_to_picked(state, from),
+        Some(PickerKind::Keys) => {
+            close_picker(state);
+            vec![]
+        }
         Some(PickerKind::Worktrees) => vec![],
         Some(PickerKind::DeleteWorktree { .. }) => leave_delete_worktree(state),
         Some(PickerKind::Directories { world: true, .. }) => pick_world_root(state),

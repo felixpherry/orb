@@ -12,11 +12,12 @@
 //! f` and `<C-g> l` only in the sidebar); `<C-g> h` moves the keys to the
 //! sidebar, `<C-g> l` into the panes, `<C-g> s` settles the shown session
 //! after the sidebar's settle confirm, `<C-g> e` hides or shows the sidebar,
-//! `<C-g> q` quits, `<C-g> c` starts a colony and `<C-g> C` opens the
-//! worlds screen. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
-//! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
-//! row, `l`/`h`/`⏎` but none of `r`/`p`/`s`/`d` on a colonists row) go
-//! through the same keymap. Which keys are bound follows the side with
+//! `<C-g> q` quits, `<C-g> c` starts a colony, `<C-g> C` opens the
+//! worlds screen and `<C-g> ?` lists every key that works there, from
+//! [`key_rows`]. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`,
+//! `⏎`, `/` and `i`, `?`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on
+//! an agent row, `l`/`h`/`⏎` but none of `r`/`p`/`s`/`d` on a colonists row)
+//! go through the same keymap. Which keys are bound follows the side with
 //! the keys, the row they act on and the session's kind; [`hidden`] is the
 //! one rule that leaves a kind's useless keys unbound. In a pane every
 //! other key goes to its program. An open picker, the rename box and
@@ -31,7 +32,7 @@ use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
 use orb_domain::feat::sessions::state::{SessionKind, SidebarItem};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui_which_key::{Keymap, WhichKeyState};
+use ratatui_which_key::{Key, Keymap, NodeResult, WhichKeyState};
 
 /// The which-key popup's section for a binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,9 +88,10 @@ pub(crate) struct Scope {
 
 impl Scope {
     /// The scope for keys in `focus` over `state`: the sidebar cursor's row
-    /// and its session, or in a pane the shown session. A pane focus with
-    /// nothing shown doesn't last (the keys leave once no layout is shown),
-    /// so it reads as a plain session's pane.
+    /// and its session, or in a pane the shown session, wherever the keys
+    /// are now (the key list asks for the scope it was opened from). A pane
+    /// focus with nothing shown doesn't last (the keys leave once no layout
+    /// is shown), so it reads as a plain session's pane.
     pub(crate) fn of(focus: Focus, state: &AppState) -> Self {
         let plain = |side, row| Self {
             side,
@@ -97,7 +99,10 @@ impl Scope {
             kind: SessionKind::Plain,
         };
         if focus == Focus::Pane {
-            let kind = state.keyed_session().map_or(SessionKind::Plain, |s| s.kind);
+            let kind = state
+                .shown_session()
+                .and_then(|id| state.sessions.session(id))
+                .map_or(SessionKind::Plain, |s| s.kind);
             return Self {
                 side: Side::Pane,
                 row: Row::Session,
@@ -203,6 +208,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ("h", Intent::Fold, Navigation),
             ("<leader>f", Intent::FilterProjects, Sessions),
             ("<leader>l", Intent::FocusPanes, Navigation),
+            ("?", Intent::OpenKeyList, General),
         ],
     );
     bind(
@@ -234,6 +240,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ("<leader>C", Intent::OpenWorlds, Sessions),
             ("<leader>/", Intent::OpenSearch, Navigation),
             ("<leader>W", Intent::OpenWorktreePicker, Navigation),
+            ("<leader>?", Intent::OpenKeyList, General),
         ],
     );
     bind(
@@ -289,6 +296,57 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         ],
     );
     keymap
+}
+
+/// Every key sequence `scope` binds, as which-key names its keys (`<C-g> p
+/// d`), with its intent (`None` for a group of keys) and its popup text.
+fn walk(scope: Scope) -> Vec<(String, Option<Intent>, String)> {
+    let keymap = keymap();
+    let mut found = vec![];
+    let mut paths: Vec<Vec<KeyEvent>> = vec![vec![]];
+    while let Some(path) = paths.pop() {
+        for (child, desc) in keymap
+            .get_children_at_path(&path, &scope)
+            .unwrap_or_default()
+        {
+            let full = [path.clone(), vec![child]].concat();
+            let keys = full.iter().map(Key::display).collect::<Vec<_>>().join(" ");
+            match keymap.navigate(&full, &scope) {
+                Some(NodeResult::Leaf { action }) => found.push((keys, Some(action), desc)),
+                Some(NodeResult::Branch { .. }) => {
+                    found.push((keys, None, desc));
+                    paths.push(full);
+                }
+                None => {}
+            }
+        }
+    }
+    found
+}
+
+/// The key list's rows for `scope`, each a key's text and what it does: the
+/// keys that don't start with `<C-g>` (the sidebar's letters), then the
+/// `<C-g>` keys, each sorted by their text, then the Alt keys and the jump
+/// keys. Groups of keys aren't rows; the keys under them are.
+pub(crate) fn key_rows(scope: Scope) -> Vec<(String, String)> {
+    let leader = LEADER.display();
+    let mut rows: Vec<(String, String)> = walk(scope)
+        .into_iter()
+        .filter_map(|(keys, action, label)| action.map(|_| (keys, label)))
+        .collect();
+    rows.sort_by(|(a, _), (b, _)| (a.starts_with(&leader), a).cmp(&(b.starts_with(&leader), b)));
+    let alt = ALT_KEYS.iter().map(|(keys, _, intent)| {
+        let label = match intent {
+            Intent::GoToTab(_) => "tab 1…9".to_owned(),
+            other => other.to_string(),
+        };
+        ((*keys).to_owned(), label)
+    });
+    let jump = JUMP_KEYS
+        .iter()
+        .map(|(keys, _, intent)| ((*keys).to_owned(), intent.to_string()));
+    rows.extend(alt.chain(jump));
+    rows
 }
 
 /// Binds each of `keys` in every scope `within` picks, unless that scope's
@@ -351,6 +409,13 @@ fn is_leader(key: KeyEvent) -> bool {
     (key.code, key.modifiers) == (LEADER.code, LEADER.modifiers)
 }
 
+/// The jump keys as the key list shows them, each with its key under Ctrl
+/// and its intent; `jump_route` matches the same keys.
+const JUMP_KEYS: &[(&str, KeyCode, Intent)] = &[
+    ("<C-[>", KeyCode::Char('['), Intent::JumpBack),
+    ("<C-]>", KeyCode::Char(']'), Intent::JumpForward),
+];
+
 /// The jump `key` asks for: `<C-[>` goes back through the jump list and
 /// `<C-]>` forward, as kitty reports them under the disambiguate flag
 /// (`CSI 91;5u`, `CSI 93;5u`). A plain Esc, which is what Ctrl+[ sends
@@ -363,6 +428,60 @@ fn jump_route(key: KeyEvent) -> Option<Intent> {
         _ => None,
     }
 }
+
+/// The Alt keys as the key list shows them, each with the keys under Alt
+/// that do it and its intent; `alt_route` matches the same keys. The digits
+/// share one row, each going to its own tab.
+const ALT_KEYS: &[(&str, &[KeyCode], Intent)] = &[
+    (
+        "Alt h",
+        &[KeyCode::Char('h'), KeyCode::Left],
+        Intent::MoveFocus(NavDirection::Left),
+    ),
+    (
+        "Alt j",
+        &[KeyCode::Char('j'), KeyCode::Down],
+        Intent::MoveFocus(NavDirection::Down),
+    ),
+    (
+        "Alt k",
+        &[KeyCode::Char('k'), KeyCode::Up],
+        Intent::MoveFocus(NavDirection::Up),
+    ),
+    (
+        "Alt l",
+        &[KeyCode::Char('l'), KeyCode::Right],
+        Intent::MoveFocus(NavDirection::Right),
+    ),
+    ("Alt n", &[KeyCode::Char('n')], Intent::AddPane),
+    ("Alt x", &[KeyCode::Char('x')], Intent::ClosePane),
+    ("Alt f", &[KeyCode::Char('f')], Intent::ToggleFloats),
+    (
+        "Alt +",
+        &[KeyCode::Char('+'), KeyCode::Char('=')],
+        Intent::GrowFocused,
+    ),
+    ("Alt -", &[KeyCode::Char('-')], Intent::ShrinkFocused),
+    (
+        "Alt 1…9",
+        &[
+            KeyCode::Char('1'),
+            KeyCode::Char('2'),
+            KeyCode::Char('3'),
+            KeyCode::Char('4'),
+            KeyCode::Char('5'),
+            KeyCode::Char('6'),
+            KeyCode::Char('7'),
+            KeyCode::Char('8'),
+            KeyCode::Char('9'),
+        ],
+        Intent::GoToTab(1),
+    ),
+    ("Alt [", &[KeyCode::Char('[')], Intent::PreviousSwapLayout),
+    ("Alt ]", &[KeyCode::Char(']')], Intent::NextSwapLayout),
+    ("Alt i", &[KeyCode::Char('i')], Intent::MoveTabLeft),
+    ("Alt o", &[KeyCode::Char('o')], Intent::MoveTabRight),
+];
 
 /// The Alt key `key` asks for, in the sidebar or a pane. Shift is ignored so
 /// `Alt +` matches however the terminal reports it. A terminal that sends Cmd
@@ -525,8 +644,9 @@ mod tests {
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        KeyCategory, Keys, LEADER, Route, Row, Scope, Side, alt_route, keymap, mode_route,
-        picker_list_route, picker_route, press, route,
+        ALT_KEYS, JUMP_KEYS, KeyCategory, Keys, LEADER, Route, Row, Scope, Side, alt_route,
+        jump_route, key_rows, keymap, mode_route, picker_list_route, picker_route, press, route,
+        walk,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
     use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
@@ -1219,28 +1339,13 @@ mod tests {
     /// <popup text>` for a binding and `<keys> +<popup text>` for a group,
     /// keys as which-key names them.
     fn golden_lines(scope: Scope) -> String {
-        let keymap = keymap();
-        let mut lines = vec![];
-        let mut paths: Vec<Vec<KeyEvent>> = vec![vec![]];
-        while let Some(path) = paths.pop() {
-            for (child, desc) in keymap
-                .get_children_at_path(&path, &scope)
-                .unwrap_or_default()
-            {
-                let full = [path.clone(), vec![child]].concat();
-                let keys = full.iter().map(Key::display).collect::<Vec<_>>().join(" ");
-                match keymap.navigate(&full, &scope) {
-                    Some(NodeResult::Leaf { action }) => {
-                        lines.push(format!("{keys} -> {action:?}: {desc}"));
-                    }
-                    Some(NodeResult::Branch { .. }) => {
-                        lines.push(format!("{keys} +{desc}"));
-                        paths.push(full);
-                    }
-                    None => {}
-                }
-            }
-        }
+        let mut lines: Vec<String> = walk(scope)
+            .into_iter()
+            .map(|(keys, action, desc)| match action {
+                Some(action) => format!("{keys} -> {action:?}: {desc}"),
+                None => format!("{keys} +{desc}"),
+            })
+            .collect();
         lines.sort();
         lines.join("\n")
     }
@@ -1803,6 +1908,242 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn question_mark_opens_the_key_list_in_the_sidebar() {
+        // Given the keymap in the sidebar.
+        let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
+
+        // When pressing `?` as the terminal reports it, with Shift.
+        let intent = press(
+            &mut keys,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+
+        // Then the key list opens.
+        assert_eq!(intent, Some(Intent::OpenKeyList), "? in the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn leader_question_mark_opens_the_key_list(
+        #[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY, Scope::PANE)] scope: Scope,
+    ) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `?`.
+        let intent = press(&mut keys, key(KeyCode::Char('?')));
+
+        // Then the key list opens.
+        assert_eq!(intent, Some(Intent::OpenKeyList), "<C-g> ? in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    fn pane_scope_behind_a_picker_is_the_shown_sessions() {
+        // Given an Incognito session shown in a pane, the sidebar cursor on
+        // nothing, and a picker opened from the pane holding the keys.
+        let (_, mut state) = in_pane(Some(SessionKind::Incognito));
+        state.sessions.cursor = None;
+        state.focus = Focus::Picker;
+
+        // When reading the pane's scope.
+        let scope = Scope::of(Focus::Pane, &state);
+
+        // Then it is the Incognito session's pane.
+        assert_eq!(
+            scope,
+            Scope::PANE_INCOGNITO,
+            "the shown session sets the kind"
+        );
+    }
+
+    /// Whether `rows` holds the row `keys` reading `label`.
+    fn has_row(rows: &[(String, String)], keys: &str, label: &str) -> bool {
+        rows.iter().any(|(k, l)| k == keys && l == label)
+    }
+
+    #[rstest::rstest]
+    fn key_rows_in_a_pane_hold_the_leader_keys() {
+        // Given / When listing the keys that work in a pane.
+        let rows = key_rows(Scope::PANE);
+
+        // Then `<C-g> [` is listed with its label.
+        assert!(
+            has_row(&rows, "<C-g> [", "pane history"),
+            "the pane's rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_in_a_pane_hold_the_alt_keys() {
+        // Given / When listing the keys that work in a pane.
+        let rows = key_rows(Scope::PANE);
+
+        // Then `Alt x` is listed with its label.
+        assert!(
+            has_row(&rows, "Alt x", "close pane"),
+            "the pane's rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_list_the_tab_digits_as_one_row() {
+        // Given / When listing the keys that work in a pane.
+        let rows = key_rows(Scope::PANE);
+
+        // Then `Alt 1…9` is one row.
+        assert!(
+            has_row(&rows, "Alt 1…9", "tab 1…9"),
+            "the pane's rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_end_with_the_jump_keys(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
+        // Given / When listing the keys that work in `scope`.
+        let rows = key_rows(scope);
+
+        // Then the jump keys come last.
+        let last: Vec<(&str, &str)> = rows
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(|(keys, label)| (keys.as_str(), label.as_str()))
+            .collect();
+        assert_eq!(
+            last,
+            [("<C-[>", "jump back"), ("<C-]>", "jump forward")],
+            "the last rows in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_in_the_sidebar_hold_its_letters() {
+        // Given / When listing the keys that work on a session in the sidebar.
+        let rows = key_rows(Scope::SIDEBAR);
+
+        // Then `j` is listed with its label.
+        assert!(
+            has_row(&rows, "j", "next session"),
+            "the sidebar's rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_in_the_sidebar_list_letters_then_leader_then_alt_keys() {
+        // Given / When listing the keys that work on a session in the sidebar.
+        let rows = key_rows(Scope::SIDEBAR);
+
+        // Then a letter comes before a `<C-g>` key, which comes before an Alt
+        // key.
+        let at = |keys: &str| rows.iter().position(|(k, _)| k == keys);
+        let order = [at("j"), at("<C-g> q"), at("Alt h")];
+        assert!(
+            order.iter().all(Option::is_some) && order.is_sorted(),
+            "j, <C-g> q and Alt h were at {order:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_skip_groups(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
+        // Given / When listing the keys that work in `scope`.
+        let rows = key_rows(scope);
+
+        // Then no row is a group of keys.
+        let groups: Vec<&(String, String)> = rows
+            .iter()
+            .filter(|(keys, _)| ["<C-g>", "<C-g> p", "<C-g> t", "g"].contains(&keys.as_str()))
+            .collect();
+        assert!(groups.is_empty(), "group rows in {scope:?}: {groups:?}");
+    }
+
+    /// The key codes the route checks scan: printable ASCII and the arrows.
+    fn scanned_codes() -> impl Iterator<Item = KeyCode> {
+        (' '..='~').map(KeyCode::Char).chain([
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+        ])
+    }
+
+    #[rstest::rstest]
+    fn every_alt_key_row_routes_to_its_intent() {
+        // Given the key list's Alt rows.
+
+        // When routing each of their keys under Alt.
+        let wrong: Vec<(KeyCode, Option<Intent>)> = ALT_KEYS
+            .iter()
+            .flat_map(|(_, codes, intent)| {
+                codes.iter().filter_map(move |&code| {
+                    let expected = match (intent, code) {
+                        (Intent::GoToTab(_), KeyCode::Char(digit)) => {
+                            digit.to_digit(10).map(|n| Intent::GoToTab(n as usize))
+                        }
+                        _ => Some(intent.clone()),
+                    };
+                    let routed = alt_route(alt(code));
+                    (routed != expected).then_some((code, routed))
+                })
+            })
+            .collect();
+
+        // Then each asks for its row's intent.
+        assert!(wrong.is_empty(), "Alt keys routed elsewhere: {wrong:?}");
+    }
+
+    #[rstest::rstest]
+    fn every_alt_key_the_route_answers_is_listed() {
+        // Given every key a terminal reports.
+
+        // When routing each under Alt.
+        let missing: Vec<KeyCode> = scanned_codes()
+            .filter(|&code| alt_route(alt(code)).is_some())
+            .filter(|code| !ALT_KEYS.iter().any(|(_, codes, _)| codes.contains(code)))
+            .collect();
+
+        // Then each one that does something has a row in the key list.
+        assert!(
+            missing.is_empty(),
+            "Alt keys missing from the list: {missing:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn every_jump_key_row_routes_to_its_intent() {
+        // Given the key list's jump rows.
+
+        // When routing each of their keys under Ctrl.
+        let wrong: Vec<(KeyCode, Option<Intent>)> = JUMP_KEYS
+            .iter()
+            .filter_map(|(_, code, intent)| {
+                let routed = jump_route(KeyEvent::new(*code, KeyModifiers::CONTROL));
+                (routed.as_ref() != Some(intent)).then_some((*code, routed))
+            })
+            .collect();
+
+        // Then each asks for its row's intent.
+        assert!(wrong.is_empty(), "jump keys routed elsewhere: {wrong:?}");
+    }
+
+    #[rstest::rstest]
+    fn every_jump_key_the_route_answers_is_listed() {
+        // Given every key a terminal reports.
+
+        // When routing each under Ctrl.
+        let missing: Vec<KeyCode> = scanned_codes()
+            .filter(|&code| jump_route(KeyEvent::new(code, KeyModifiers::CONTROL)).is_some())
+            .filter(|code| !JUMP_KEYS.iter().any(|(_, listed, _)| listed == code))
+            .collect();
+
+        // Then each one that does something has a row in the key list.
+        assert!(
+            missing.is_empty(),
+            "jump keys missing from the list: {missing:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn leader_r_is_unbound_in_the_sidebar() {
         // Given `<C-g>` pressed in the sidebar.
         let mut keys = Keys::new(keymap(), Scope::SIDEBAR);
@@ -2083,17 +2424,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::SIDEBAR, "/ C P Space W b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_EMPTY, "/ C P Space W c e f i l n q")]
-    #[case(Scope::SIDEBAR_INCOGNITO, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::PANE, "/ <C-g> C P Space W [ b c e h i m n p q r s t w y")]
-    #[case(Scope::PANE_INCOGNITO, "/ <C-g> C P Space W [ c e h i m n p q r s t y")]
-    #[case(Scope::SIDEBAR_AGENT, "/ C P Space W b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ C P Space W c e f i l n q t")]
-    #[case(Scope::SIDEBAR_COLONY, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / C P Space W c e f i l n q t")]
-    #[case(Scope::PANE_COLONY, ", / <C-g> C P Space W [ c e h i m n p q r s t y")]
-    #[case(Scope::SIDEBAR_COLONISTS, ", / C P Space W c e f i l n q")]
+    #[case(Scope::SIDEBAR, "/ ? C P Space W b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_EMPTY, "/ ? C P Space W c e f i l n q")]
+    #[case(Scope::SIDEBAR_INCOGNITO, "/ ? C P Space W c e f i l n q t")]
+    #[case(Scope::PANE, "/ <C-g> ? C P Space W [ b c e h i m n p q r s t w y")]
+    #[case(
+        Scope::PANE_INCOGNITO,
+        "/ <C-g> ? C P Space W [ c e h i m n p q r s t y"
+    )]
+    #[case(Scope::SIDEBAR_AGENT, "/ ? C P Space W b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ ? C P Space W c e f i l n q t")]
+    #[case(Scope::SIDEBAR_COLONY, ", / ? C P Space W c e f i l n q t")]
+    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / ? C P Space W c e f i l n q t")]
+    #[case(
+        Scope::PANE_COLONY,
+        ", / <C-g> ? C P Space W [ c e h i m n p q r s t y"
+    )]
+    #[case(Scope::SIDEBAR_COLONISTS, ", / ? C P Space W c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

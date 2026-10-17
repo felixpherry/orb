@@ -2,10 +2,11 @@
 //! has updated [`AppState`](crate::AppState). The frontend loop carries out
 //! the pane commands (`Attach`, `Detach`, `SendCtrlG`, `OpenHistory`,
 //! `SendText`) and the quick reads (`ListDirectories`, `ListBranches`,
-//! `LoadPreview`) itself. Each actor's commands are grouped in its own list,
-//! which the loop forwards whole: [`SessionsCommand`] (sessions, projects,
-//! panes, layouts, the sidebar's saved state), [`WorktreesCommand`] (rescan,
-//! delete) and [`SearchCommand`] (query, preview).
+//! `LoadPreview`, `ListKeys`) itself. Each actor's commands are grouped in
+//! its own list, which the loop forwards whole: [`SessionsCommand`]
+//! (sessions, projects, panes, layouts, the sidebar's saved state),
+//! [`WorktreesCommand`] (rescan, delete) and [`SearchCommand`] (query,
+//! preview).
 
 use std::path::PathBuf;
 
@@ -37,6 +38,9 @@ pub enum Command {
     ListDirectories(PathBuf),
     /// Read the agent's transcript into the open session picker's preview.
     LoadPreview { agent: AgentId, transcript: PathBuf },
+    /// List the keys that work where the open key list was opened from into
+    /// it.
+    ListKeys,
     /// Work for the sessions actor.
     Sessions(SessionsCommand),
     /// Work for the worktrees actor.

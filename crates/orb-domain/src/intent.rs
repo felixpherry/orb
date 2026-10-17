@@ -154,6 +154,9 @@ pub enum Intent {
     /// Open the search picker, which finds typed text in the prompts and
     /// replies of every agent's transcripts, newest message first.
     OpenSearch,
+    /// Open the key list: every key that works where the keys are, with
+    /// which-key's labels, filtered by typing. It runs nothing.
+    OpenKeyList,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
@@ -310,6 +313,7 @@ impl fmt::Display for Intent {
             Self::OpenProjects => "projects",
             Self::OpenWorlds => "worlds",
             Self::OpenSearch => "grep",
+            Self::OpenKeyList => "keys",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
             Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
@@ -422,6 +426,12 @@ mod tests {
     fn open_search_displays_as_grep() {
         // Given / When / Then: which-key labels OpenSearch "grep".
         assert_eq!(Intent::OpenSearch.to_string(), "grep", "which-key label");
+    }
+
+    #[rstest::rstest]
+    fn open_key_list_displays_as_keys() {
+        // Given / When / Then: which-key labels OpenKeyList "keys".
+        assert_eq!(Intent::OpenKeyList.to_string(), "keys", "which-key label");
     }
 
     #[rstest::rstest]

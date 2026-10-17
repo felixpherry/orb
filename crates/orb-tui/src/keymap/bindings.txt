@@ -3,6 +3,7 @@
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -30,6 +31,7 @@
 <C-g> t x -> CloseTab: close tab
 <C-g> w -> ChangeWorkspace: session's worktree
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -49,6 +51,7 @@ s -> ToggleSettle: settle
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -74,6 +77,7 @@ s -> ToggleSettle: settle
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -94,6 +98,7 @@ s -> ToggleSettle: settle
 <C-g> +<leader>
 <C-g> , -> OpenColonists: colonists
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -119,6 +124,7 @@ s -> ToggleSettle: settle
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -138,6 +144,7 @@ s -> ToggleSettle: settle
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -165,6 +172,7 @@ s -> ToggleSettle: settle
 <C-g> t x -> CloseTab: close tab
 <C-g> w -> ChangeWorkspace: session's worktree
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -182,6 +190,7 @@ r -> Rename: rename
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -207,6 +216,7 @@ r -> Rename: rename
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -225,6 +235,7 @@ r -> Rename: rename
 <C-g> +<leader>
 <C-g> , -> OpenColonists: colonists
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -250,6 +261,7 @@ r -> Rename: rename
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 d -> Delete: delete
@@ -268,6 +280,7 @@ r -> Rename: rename
 <C-g> +<leader>
 <C-g> , -> OpenColonists: colonists
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -280,6 +293,7 @@ r -> Rename: rename
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 g +...
@@ -295,6 +309,7 @@ l -> Unfold: open
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -307,6 +322,7 @@ l -> Unfold: open
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 g +...
@@ -322,6 +338,7 @@ l -> Unfold: open
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -334,6 +351,7 @@ l -> Unfold: open
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 g +...
@@ -349,6 +367,7 @@ l -> Unfold: open
 <C-d> -> SelectHalfPageDown: half page down
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -361,6 +380,7 @@ l -> Unfold: open
 <C-g> n -> NewSession: new session
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
+? -> OpenKeyList: keys
 Enter -> Attach: attach
 G -> SelectLast: bottom
 g +...
@@ -375,6 +395,7 @@ l -> Unfold: open
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
 <C-g> <C-g> -> SendCtrlG: send ctrl g
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -421,6 +442,7 @@ l -> Unfold: open
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
 <C-g> <C-g> -> SendCtrlG: send ctrl g
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -466,6 +488,7 @@ l -> Unfold: open
 <C-g> , -> OpenColonists: colonists
 <C-g> / -> OpenSearch: grep
 <C-g> <C-g> -> SendCtrlG: send ctrl g
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
@@ -510,6 +533,7 @@ l -> Unfold: open
 <C-g> +<leader>
 <C-g> / -> OpenSearch: grep
 <C-g> <C-g> -> SendCtrlG: send ctrl g
+<C-g> ? -> OpenKeyList: keys
 <C-g> C -> OpenWorlds: worlds
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions

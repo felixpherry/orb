@@ -104,6 +104,7 @@ impl IntentHandler {
             Intent::ToggleColonists => picker::intent::toggle_colonists(state),
             Intent::OpenWorktreePicker => picker::intent::open_worktree_picker(state),
             Intent::OpenSearch => picker::intent::open_search(state),
+            Intent::OpenKeyList => picker::intent::open_key_list(state),
             Intent::FilterProjects => picker::intent::filter_projects(state),
             Intent::AddProject => picker::intent::add_project(state),
             Intent::ChangeWorkspace => git::intent::open_workspace_picker(state),
