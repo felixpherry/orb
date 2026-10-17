@@ -24,7 +24,7 @@ const SCRIPT: &str = include_str!("assets/orb-agent-state.sh");
 const EXTENSION: &str = include_str!("assets/orb-agent-state.ts");
 /// The `orb` skill, where Claude and pi look for it under their own folders.
 const SKILL_FILE: &str = "skills/orb/SKILL.md";
-const SKILL: &str = include_str!("assets/orb-skill.md");
+const SKILL: &str = include_str!("assets/skills/orb/SKILL.md");
 /// What the mode line shows at start when neither integration is installed.
 pub const NUDGE: &str = "run orb integration install";
 
