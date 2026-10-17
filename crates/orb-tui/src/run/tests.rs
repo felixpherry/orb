@@ -57,7 +57,7 @@ use crate::toast::{Toast, ToastKind};
 
 use super::panes::{
     AttachPlan, ExitOutcome, PaneExit, attach_at_start, attach_or_restore, broken_pane_message,
-    classify_exit, clear_detached, closed_in_layouts, exit_outcome, holds_agent, pane_error_after,
+    classify_exit, clear_detached, closed_in_layouts, exit_outcome, exited_at_start, holds_agent,
     present_at_start, reattachable, resume_plan, stale_sessions, to_drop, to_kill, to_spawn,
 };
 use super::report::{StartedAttach, show, started_attach};
@@ -1285,13 +1285,13 @@ fn pane_exit_of_a_session_not_shown_is_dropped(
 
 #[rstest::rstest]
 fn early_exit_names_the_session() {
-    // Given no pane error.
-    let error = None;
+    // Given dropped panes, one of session `orb-tui` that exited early.
+    let dropped = [(false, None), (true, Some("orb-tui".to_owned()))];
 
-    // When one of the dropped panes, of session `orb-tui`, exited early.
-    let error = pane_error_after(error, [(false, None), (true, Some("orb-tui".to_owned()))]);
+    // When working out the message box's error.
+    let error = exited_at_start(dropped);
 
-    // Then the start screen names the session that exited at start.
+    // Then the message box's error names the session that exited at start.
     assert_eq!(
         error.as_deref(),
         Some("session orb-tui exited at start"),
@@ -1301,13 +1301,13 @@ fn early_exit_names_the_session() {
 
 #[rstest::rstest]
 fn early_exit_of_an_untitled_session_says_session_exited_at_start() {
-    // Given no pane error.
-    let error = None;
+    // Given a dropped pane with no session title that exited early.
+    let dropped = [(true, None)];
 
-    // When a dropped pane with no session title exited early.
-    let error = pane_error_after(error, [(true, None)]);
+    // When working out the message box's error.
+    let error = exited_at_start(dropped);
 
-    // Then the start screen says the session exited at start.
+    // Then the message box's error says the session exited at start.
     assert_eq!(
         error.as_deref(),
         Some("session exited at start"),
@@ -1316,19 +1316,15 @@ fn early_exit_of_an_untitled_session_says_session_exited_at_start() {
 }
 
 #[rstest::rstest]
-fn later_exit_keeps_the_pane_error() {
-    // Given an existing pane error.
-    let error = Some("couldn't start the attach command".to_owned());
+fn later_exit_gives_no_error() {
+    // Given one dropped pane that exited later.
+    let dropped = [(false, None)];
 
-    // When the only dropped pane exited later.
-    let error = pane_error_after(error, [(false, None)]);
+    // When working out the message box's error.
+    let error = exited_at_start(dropped);
 
-    // Then the pane error is unchanged.
-    assert_eq!(
-        error.as_deref(),
-        Some("couldn't start the attach command"),
-        "a later exit leaves the pane error as is"
-    );
+    // Then there is no error.
+    assert_eq!(error, None, "a later exit shows nothing");
 }
 
 #[rstest::rstest]
@@ -1498,6 +1494,11 @@ fn exits_at_once(_: &ZmxSession) -> Vec<OsString> {
     ["/bin/sh", "-c", "exit 0"].map(OsString::from).to_vec()
 }
 
+/// A client whose program doesn't exist, so it can't start.
+fn cant_start(_: &ZmxSession) -> Vec<OsString> {
+    vec![OsString::from("/nonexistent/orb-attach")]
+}
+
 /// A client that keeps running.
 fn keeps_running(_: &ZmxSession) -> Vec<OsString> {
     ["/bin/sh", "-c", "/bin/sleep 30"]
@@ -1645,6 +1646,69 @@ fn exited_client_with_unlistable_zmx_keeps_its_pane() -> io::Result<()> {
     assert!(
         test.state.read().layouts.pane_ids().contains(&pane(1)),
         "an exit zmx can't explain keeps the pane"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn pane_that_cant_start_shows_its_reason_in_the_message_box() -> io::Result<()> {
+    // Given an attach command whose program doesn't exist.
+    let mut test = loop_app(FakeZmx::listing(""), cant_start)?;
+
+    // When pane 1's session is attached.
+    test.attach(&[pane(1)]);
+
+    // Then the message box says the attach couldn't start.
+    let now = Instant::now();
+    let until = test
+        .app
+        .toasts
+        .deadline(now)
+        .ok_or_else(|| io::Error::other("the message box shows nothing"))?;
+    assert_eq!(
+        test.app.toasts.shown(now),
+        Some(&Toast::new(
+            ToastKind::Error,
+            "couldn't start zmx attach",
+            until
+        )),
+        "a pane that can't start shows why in the message box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn pane_that_exits_at_start_names_its_session_in_the_message_box() -> io::Result<()> {
+    // Given zmx listing nothing, and pane 1 of session `orb-tui` whose
+    // client exits at once.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    test.attach(&[pane(1)]);
+    for session in &mut test.state.write().sessions.sessions {
+        session.name = Some("orb-tui".to_owned());
+    }
+
+    // When its exit arrives and the loop goes round.
+    let event = test
+        .exit_of(pane(1))
+        .ok_or_else(|| io::Error::other("pane 1's client didn't exit within 5 s"))?;
+    test.app.handle(event, &mut io::sink())?;
+    test.app.reconcile();
+
+    // Then the message box names the session that exited at start.
+    let now = Instant::now();
+    let until = test
+        .app
+        .toasts
+        .deadline(now)
+        .ok_or_else(|| io::Error::other("the message box shows nothing"))?;
+    assert_eq!(
+        test.app.toasts.shown(now),
+        Some(&Toast::new(
+            ToastKind::Error,
+            "session orb-tui exited at start",
+            until
+        )),
+        "a pane that exits at start names its session in the message box"
     );
     Ok(())
 }

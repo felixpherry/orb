@@ -8,6 +8,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use super::view::PlateView;
 use crate::feat::harness::HarnessId;
 use crate::ids::{PaneId, PlateItemId, SessionId};
 
@@ -269,10 +270,12 @@ impl fmt::Display for PlateRefusal {
     }
 }
 
-/// Every item on the plate, in id order. The sessions actor writes it.
+/// Every item on the plate, in id order, and how the user is viewing it.
+/// The sessions actor writes the items; the intent handler writes the view.
 #[derive(Debug, Default)]
 pub struct Plate {
     items: Vec<PlateItem>,
+    view: PlateView,
 }
 
 impl Plate {
@@ -280,13 +283,27 @@ impl Plate {
     #[must_use]
     pub fn from_saved(mut items: Vec<PlateItem>) -> Self {
         items.sort_by_key(|item| item.id.0);
-        Self { items }
+        Self {
+            items,
+            view: PlateView::default(),
+        }
     }
 
     /// Every item, in id order.
     #[must_use]
     pub fn items(&self) -> &[PlateItem] {
         &self.items
+    }
+
+    /// How the user is viewing the plate.
+    #[must_use]
+    pub fn view(&self) -> &PlateView {
+        &self.view
+    }
+
+    /// The view, for the intent handler to change.
+    pub fn view_mut(&mut self) -> &mut PlateView {
+        &mut self.view
     }
 
     /// The item with `id`.

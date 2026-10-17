@@ -82,9 +82,9 @@ pub struct AppState {
     /// session) and by the sessions actor, its owner (restoring the saved
     /// list).
     pub jumps: JumpList,
-    /// What needs the user across all of orb (see [`Plate`]). Written by the
-    /// sessions actor, its owner: loaded at start, then each agent's add,
-    /// update and done.
+    /// What needs the user across all of orb (see [`Plate`]). Its items are
+    /// written by the sessions actor, their owner: loaded at start, then each
+    /// agent's add, update and done. Its view is written by the intent handler.
     pub plate: Plate,
     /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
     /// its owner; the intent handler also clears `notice` on the next intent.

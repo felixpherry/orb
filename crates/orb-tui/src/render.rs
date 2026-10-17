@@ -1,7 +1,7 @@
 //! Draws a frame: the sidebar on the left, the shown session's tabs or the
-//! start screen on the right, the mode line at the bottom, and the which-key
-//! popup on top while a key sequence is pending. The message box is drawn
-//! over everything but the mode line.
+//! plate as the start screen on the right, the mode line at the bottom, and
+//! the which-key popup on top while a key sequence is pending. The message
+//! box is drawn over everything but the mode line.
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
 //! popup (the session and worktree pickers in their own snacks layout), and
@@ -32,12 +32,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Color;
 
-use crate::dashboard;
 use crate::graphics::DrawnImages;
 use crate::keymap::Keys;
 use crate::mode_line;
 use crate::mouse::HitMap;
 use crate::picker::{self, PickerScroll};
+use crate::plate;
 use crate::rename;
 use crate::search_picker;
 use crate::session_picker;
@@ -70,9 +70,8 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// Draws the whole frame. The right side shows the shown layout's tabs with
 /// each of its panes that has a client in `panes`; the focused pane's cursor
 /// shows only while the keys are in it. Without a shown layout, the right
-/// side shows the start screen, with `pane_error` saying why the session
-/// couldn't start. While the sidebar has the keys, the cursor sits on the
-/// first cell of its selected row. `toast` shows in the message box, and the
+/// side shows the plate as the start screen. While the sidebar has the keys,
+/// the cursor sits on the first cell of its selected row. `toast` shows in the message box, and the
 /// mode line's clock shows `now` in `tz`. Cells nothing coloured get
 /// `background`. Each drawn pane's images go into
 /// `images`. Returns the sidebar's layout unless it's hidden, how
@@ -85,7 +84,6 @@ pub(crate) fn render(
     frame: &mut Frame,
     state: &AppState,
     panes: &HashMap<PaneId, Pane>,
-    pane_error: Option<&str>,
     toast: Option<&Toast>,
     keys: &Keys,
     now: SystemTime,
@@ -133,7 +131,7 @@ pub(crate) fn render(
                 cursor = Some(pane_cursor);
             }
         }
-        None => dashboard::render(state, pane_error, right, frame.buffer_mut()),
+        None => plate::render(state, now, tz, right, frame.buffer_mut()),
     }
     mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
     let renaming = state

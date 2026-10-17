@@ -13,7 +13,7 @@
 //! Every session's layout (tabs of split panes) is kept and saved; while a
 //! session is attached, each of its panes has a client. The right side shows
 //! the selected session, a tab bar over its shown tab's panes, while it is
-//! attached, else the start screen. Each frame resizes every visible pane to
+//! attached, else the plate as the start screen. Each frame resizes every visible pane to
 //! the inside of its frame; panes of hidden tabs and other sessions keep their size. A
 //! pane that leaves every layout (closed, or its session deleted) is killed
 //! with `zmx kill`. A pane of an attached session whose program ended closes
@@ -39,8 +39,8 @@
 //! back in. Settling
 //! or deleting a session ends its panes' clients; `⏎` on a settled session
 //! brings its panes back the way start-up does. A pane whose program exits
-//! within a second of attaching leaves `session <title> exited at start` on
-//! the start screen.
+//! within a second of attaching leaves `session <title> exited at start` in
+//! the message box.
 //!
 //! When an agent finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
@@ -144,7 +144,7 @@ const PREVIEW_EVERY: Duration = Duration::from_secs(1);
 /// works, so its wait time, shown in whole seconds, counts up.
 const WAIT_TICK: Duration = Duration::from_secs(1);
 
-/// What the start screen says after an attached program exits within
+/// What the message box says after an attached program exits within
 /// [`EARLY_EXIT`] of starting.
 const EXITED_AT_START: &str = "session exited at start";
 
@@ -352,8 +352,6 @@ struct App {
     /// Pastes waiting for their pane's program to turn bracketed paste on,
     /// so they land in its prompt instead of running line by line.
     pastes: HashMap<PaneId, String>,
-    /// Shown on the start screen when a pane's client couldn't start.
-    pane_error: Option<String>,
     /// The message box: the latest error or notice, until it times out.
     toasts: Toasts,
     /// The session a worker last made ready, until it opens or is dropped.
@@ -441,7 +439,6 @@ impl App {
             broken: HashSet::new(),
             typing: HashMap::new(),
             pastes: HashMap::new(),
-            pane_error: None,
             toasts: Toasts::default(),
             ready: None,
             env,
@@ -886,7 +883,6 @@ impl App {
                     log_unsent(&self.log, "sessions", &command, sent);
                     return;
                 }
-                self.pane_error = None;
                 self.reconcile();
                 self.sync_focus();
             }
@@ -1065,7 +1061,6 @@ impl App {
                 frame,
                 &state,
                 &self.panes,
-                self.pane_error.as_deref(),
                 self.toasts.shown(Instant::now()),
                 &self.keys,
                 now,
