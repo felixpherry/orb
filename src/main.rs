@@ -347,8 +347,8 @@ where
     });
 }
 
-/// Where orb's integrations live: under `orb_root`, `claude_dir`, and pi's
-/// agent dir (`$PI_CODING_AGENT_DIR`, else under `home`).
+/// Where orb's integrations live: under `orb_root`, `claude_dir`, pi's agent
+/// dir (`$PI_CODING_AGENT_DIR`, else under `home`), and `~/.agents/skills`.
 fn integration_paths(home: &Path, orb_root: &Path, claude_dir: &Path) -> IntegrationPaths {
     IntegrationPaths {
         orb_root: orb_root.to_owned(),
@@ -357,6 +357,7 @@ fn integration_paths(home: &Path, orb_root: &Path, claude_dir: &Path) -> Integra
             std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from),
             home,
         ),
+        agents_skills_dir: home.join(".agents/skills"),
     }
 }
 

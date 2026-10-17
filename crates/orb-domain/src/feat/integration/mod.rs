@@ -1,11 +1,13 @@
 //! orb's integrations with Claude Code and pi: a Claude hook and a pi
 //! extension that report, through a file per pane under `~/.orb/panes/`,
-//! which conversation runs in which pane, and an `orb` skill in Claude's and
-//! pi's skills folders that teaches agents to drive orb. `orb integration
-//! install` puts them in place.
+//! which conversation runs in which pane, and orb's skills in Claude's and
+//! pi's skills folders: the `orb` skill that teaches agents to drive orb, and
+//! the workflow skills that take an approved plan to an open pull request.
+//! `orb integration install` puts them in place.
 
 pub mod claude_settings;
 pub mod pane_file;
+mod skills;
 
 use std::fs;
 use std::io;
@@ -22,9 +24,9 @@ pub const SCRIPT_NAME: &str = "orb-agent-state.sh";
 const EXTENSION_NAME: &str = "orb-agent-state.ts";
 const SCRIPT: &str = include_str!("assets/orb-agent-state.sh");
 const EXTENSION: &str = include_str!("assets/orb-agent-state.ts");
-/// The `orb` skill, where Claude and pi look for it under their own folders.
-const SKILL_FILE: &str = "skills/orb/SKILL.md";
-const SKILL: &str = include_str!("assets/skills/orb/SKILL.md");
+/// Where older orb versions put pi's copy of the `orb` skill, under pi's
+/// agent dir.
+const OLD_PI_SKILL: &str = "skills/orb";
 /// What the mode line shows at start when neither integration is installed.
 pub const NUDGE: &str = "run orb integration install";
 
@@ -42,6 +44,8 @@ pub struct IntegrationPaths {
     pub claude_dir: PathBuf,
     /// pi's agent dir: `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
     pub pi_dir: PathBuf,
+    /// The shared skills folder pi reads (`~/.agents/skills`).
+    pub agents_skills_dir: PathBuf,
 }
 
 /// Claude's config home: `config_dir` (`$CLAUDE_CONFIG_DIR`) when set, else
@@ -81,14 +85,16 @@ impl IntegrationPaths {
 }
 
 /// Writes the hook script, adds orb's hooks to Claude's `settings.json`,
-/// writes the pi extension, and writes the `orb` skill for both. Returns one
-/// line per file for the user, `~` for `home`.
+/// writes the pi extension, writes orb's skills into Claude's skills folder
+/// and into `~/.agents/skills` for pi, and removes the `orb` skill copy older
+/// versions wrote under pi's agent dir unless that copy is one of the folders
+/// written. Returns one line per step for the user, `~` for `home`.
 ///
 /// # Errors
 ///
-/// Returns an error naming the file if a folder or file can't be written, or
-/// if `settings.json` isn't a JSON object (comments included); files written
-/// before the failure stay.
+/// Returns an error naming the file or folder if one can't be written or
+/// removed, or if `settings.json` isn't a JSON object (comments included);
+/// files written before the failure stay.
 pub fn install(
     paths: &IntegrationPaths,
     home: &Path,
@@ -125,23 +131,40 @@ pub fn install(
     };
     let extension = paths.pi_extension();
     write_atomic(&extension, EXTENSION)?;
-    let skills = [&paths.claude_dir, &paths.pi_dir].map(|dir| dir.join(SKILL_FILE));
-    for skill in &skills {
-        write_atomic(skill, SKILL)?;
-    }
-    let lines = [
+    let mut lines = vec![
         format!("wrote {}", tilde(&script, home)),
         settings_line,
         format!("wrote {}", tilde(&extension, home)),
     ];
-    Ok(lines
-        .into_iter()
-        .chain(
-            skills
-                .iter()
-                .map(|skill| format!("wrote {}", tilde(skill, home))),
-        )
-        .collect())
+    let claude_skills = paths.claude_dir.join("skills");
+    let skill_dirs = [&claude_skills, &paths.agents_skills_dir];
+    let old = paths.pi_dir.join(OLD_PI_SKILL);
+    // When pi's skills folder links to a folder written below, the old copy is
+    // the live orb skill, so it stays and the writes update it in place.
+    let old_is_live = fs::canonicalize(&old).is_ok_and(|old| {
+        skill_dirs
+            .iter()
+            .any(|dir| fs::canonicalize(dir.join("orb")).is_ok_and(|live| live == old))
+    });
+    if !old_is_live {
+        match fs::remove_dir_all(&old) {
+            Ok(()) => lines.push(format!("removed {}", tilde(&old, home))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Report::new(error)
+                    .change_context(IntegrationError)
+                    .attach(format!("couldn't remove {}", old.display())));
+            }
+        }
+    }
+    let count = skills::skill_count();
+    for dir in skill_dirs {
+        for (file, text) in skills::SKILLS {
+            write_atomic(&dir.join(file), text)?;
+        }
+        lines.push(format!("wrote {count} skills to {}", tilde(dir, home)));
+    }
+    Ok(lines)
 }
 
 /// Writes `text` to `path` through a temp file beside it and a rename, making
@@ -188,8 +211,9 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
+    use super::skills::{LOOP_RULES, SKILLS};
     use super::{
-        IntegrationError, IntegrationPaths, SCRIPT, SKILL, claude_dir, claude_settings, install,
+        IntegrationError, IntegrationPaths, SCRIPT, claude_dir, claude_settings, install,
         pi_agent_dir,
     };
     use crate::common::wait_within;
@@ -212,6 +236,7 @@ mod tests {
                 orb_root: tmp.path().join(".orb"),
                 claude_dir: tmp.path().join(".claude"),
                 pi_dir: tmp.path().join(".pi/agent"),
+                agents_skills_dir: tmp.path().join(".agents/skills"),
             };
             Ok(Self { tmp, paths })
         }
@@ -409,9 +434,25 @@ mod tests {
         Ok(())
     }
 
+    /// The embedded contents of the skill file at `file`.
+    fn skill(file: &str) -> Option<&'static str> {
+        SKILLS
+            .iter()
+            .find(|(path, _)| *path == file)
+            .map(|(_, text)| *text)
+    }
+
+    /// Every skill file under `dir`, keyed by its path inside `dir`.
+    fn skill_files(dir: &Path) -> Result<Vec<(String, String)>, Report<IntegrationError>> {
+        SKILLS
+            .iter()
+            .map(|(file, _)| Ok(((*file).to_owned(), read(&dir.join(file))?)))
+            .collect()
+    }
+
     #[rstest::rstest]
     #[case::claude(".claude/skills/orb/SKILL.md")]
-    #[case::pi(".pi/agent/skills/orb/SKILL.md")]
+    #[case::pi(".agents/skills/orb/SKILL.md")]
     fn install_writes_the_orb_skill(#[case] file: &str) -> TestResult {
         // Given an empty home.
         let home = Home::new()?;
@@ -421,9 +462,208 @@ mod tests {
 
         // Then the agent's skills folder holds orb's skill.
         assert_eq!(
-            read(&home.path().join(file))?,
-            SKILL,
+            Some(read(&home.path().join(file))?.as_str()),
+            skill("orb/SKILL.md"),
             "the orb skill should be written"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::claude(".claude/skills")]
+    #[case::pi(".agents/skills")]
+    fn install_writes_every_skill_file(#[case] dir: &str) -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When installing.
+        home.install()?;
+
+        // Then the agent's skills folder holds every skill file, as embedded.
+        let written = skill_files(&home.path().join(dir))?;
+        let embedded: Vec<(String, String)> = SKILLS
+            .iter()
+            .map(|(file, text)| ((*file).to_owned(), (*text).to_owned()))
+            .collect();
+        assert_eq!(written, embedded, "every skill file should be written");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::micro("run-micro-loop")]
+    #[case::phased("run-phased-loop")]
+    #[case::simple("run-simple-loop")]
+    fn install_puts_the_loop_rules_beside_each_loop(#[case] name: &str) -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When installing.
+        home.install()?;
+
+        // Then the loop's folder holds the shared loop rules next to its skill.
+        let folder = home.path().join(".claude/skills").join(name);
+        let found = (
+            folder.join("SKILL.md").is_file(),
+            read(&folder.join("task-loop-rules.md"))?,
+        );
+        assert_eq!(
+            found,
+            (true, LOOP_RULES.to_owned()),
+            "the loop rules should sit beside the loop's SKILL.md"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_removes_the_old_pi_copy_of_the_orb_skill() -> TestResult {
+        // Given an older orb's copy of the orb skill in pi's agent dir.
+        let home = Home::new()?;
+        let old = home.path().join(".pi/agent/skills/orb");
+        fs::create_dir_all(&old).change_context(IntegrationError)?;
+        fs::write(old.join("SKILL.md"), "old").change_context(IntegrationError)?;
+
+        // When installing.
+        let lines = home.install()?;
+
+        // Then the old copy is gone and the output says so.
+        let says_so = lines
+            .iter()
+            .any(|line| line == "removed ~/.pi/agent/skills/orb");
+        assert_eq!(
+            (old.exists(), says_so),
+            (false, true),
+            "the old pi copy should be removed and reported"
+        );
+        Ok(())
+    }
+
+    /// Makes pi's skills folder a link to the agents skills folder, with an
+    /// older orb skill already there, and returns that orb skill's folder.
+    fn link_pi_skills_to_agents_skills(home: &Home) -> Result<PathBuf, Report<IntegrationError>> {
+        let live = home.paths.agents_skills_dir.join("orb");
+        fs::create_dir_all(&live).change_context(IntegrationError)?;
+        fs::write(live.join("SKILL.md"), "old").change_context(IntegrationError)?;
+        fs::create_dir_all(&home.paths.pi_dir).change_context(IntegrationError)?;
+        std::os::unix::fs::symlink(
+            &home.paths.agents_skills_dir,
+            home.paths.pi_dir.join("skills"),
+        )
+        .change_context(IntegrationError)?;
+        Ok(live)
+    }
+
+    #[rstest::rstest]
+    fn install_keeps_the_orb_skill_when_pi_skills_links_to_agents_skills() -> TestResult {
+        // Given pi's skills folder is a link to the agents skills folder, which
+        // already holds an orb skill.
+        let home = Home::new()?;
+        let live = link_pi_skills_to_agents_skills(&home)?;
+
+        // When installing.
+        home.install()?;
+
+        // Then the agents skills folder holds the new orb skill.
+        assert_eq!(
+            read(&live.join("SKILL.md")).ok().as_deref(),
+            skill("orb/SKILL.md"),
+            "the orb skill should survive the old-copy removal"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_reports_no_removal_when_pi_skills_links_to_agents_skills() -> TestResult {
+        // Given pi's skills folder is a link to the agents skills folder, which
+        // already holds an orb skill.
+        let home = Home::new()?;
+        link_pi_skills_to_agents_skills(&home)?;
+
+        // When installing.
+        let lines = home.install()?;
+
+        // Then nothing is reported removed.
+        let removed = lines.iter().any(|line| line.starts_with("removed "));
+        assert!(!removed, "the live orb skill shouldn't be reported removed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_keeps_extra_files_in_the_orb_skill_when_pi_skills_links_to_agents_skills()
+    -> TestResult {
+        // Given pi's skills folder links to the agents skills folder, whose orb
+        // skill holds a file of the user's.
+        let home = Home::new()?;
+        let live = link_pi_skills_to_agents_skills(&home)?;
+        fs::write(live.join("notes.md"), "mine").change_context(IntegrationError)?;
+
+        // When installing.
+        home.install()?;
+
+        // Then the user's file is still there.
+        assert_eq!(
+            read(&live.join("notes.md")).ok().as_deref(),
+            Some("mine"),
+            "the user's file in the live orb skill should stay"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_without_an_old_pi_copy_succeeds_quietly() -> TestResult {
+        // Given an empty home, with no old pi copy of the orb skill.
+        let home = Home::new()?;
+
+        // When installing.
+        let lines = home.install()?;
+
+        // Then nothing is reported removed.
+        let removed = lines.iter().any(|line| line.starts_with("removed "));
+        assert!(!removed, "nothing should be reported removed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_reports_one_line_per_skills_folder() -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When installing.
+        let lines = home.install()?;
+
+        // Then the output names each skills folder with the skill count.
+        let skill_lines: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.contains("skills to "))
+            .collect();
+        assert_eq!(
+            skill_lines,
+            [
+                "wrote 18 skills to ~/.claude/skills",
+                "wrote 18 skills to ~/.agents/skills"
+            ],
+            "the output should have one line per skills folder"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::claude(".claude/skills")]
+    #[case::pi(".agents/skills")]
+    fn install_twice_leaves_the_same_skill_files(#[case] dir: &str) -> TestResult {
+        // Given orb's skills already installed.
+        let home = Home::new()?;
+        home.install()?;
+        let before = skill_files(&home.path().join(dir))?;
+
+        // When installing again.
+        home.install()?;
+
+        // Then the skill files are as they were.
+        let after = skill_files(&home.path().join(dir))?;
+        assert_eq!(
+            after, before,
+            "a second install should leave the same files"
         );
         Ok(())
     }
