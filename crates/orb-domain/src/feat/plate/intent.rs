@@ -1211,7 +1211,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn u_twice_undoes_only_once() {
+    fn u_twice_undoes_only_the_last_x() {
+        // Given items 1 and 2 in Your move, both closed with `x`, 1 first.
+        let mut state = your_move(2);
+        pressed(&mut state, &[PlateKey::Done, PlateKey::Done]);
+
+        // When pressing `u` twice.
+        pressed(&mut state, &[PlateKey::Undo, PlateKey::Undo]);
+
+        // Then only item 2 came back.
+        assert_eq!(
+            (state_of(&state, 1), state_of(&state, 2)),
+            (Some(ItemState::Done), Some(ItemState::YourMove)),
+            "u should undo only the last x"
+        );
+    }
+
+    #[rstest::rstest]
+    fn u_twice_saves_once() {
         // Given items 1 and 2 in Your move, both closed with `x`, 1 first.
         let mut state = your_move(2);
         pressed(&mut state, &[PlateKey::Done, PlateKey::Done]);
@@ -1219,12 +1236,8 @@ mod tests {
         // When pressing `u` twice.
         let commands = pressed(&mut state, &[PlateKey::Undo, PlateKey::Undo]);
 
-        // Then only item 2 came back, saved once.
-        assert_eq!(
-            (commands, state_of(&state, 1), state_of(&state, 2)),
-            (saves(2), Some(ItemState::Done), Some(ItemState::YourMove)),
-            "u should undo only the last x, and only once"
-        );
+        // Then only item 2 is saved, once.
+        assert_eq!(commands, saves(2), "a second u should save nothing");
     }
 
     #[rstest::rstest]

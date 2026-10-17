@@ -10,6 +10,7 @@ use orb_domain::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{DONE_ICON, IDEA_ICON, PARKED_ICON, URGENT_ICON, render, render_float};
 use crate::sidebar::{APPROVAL_ICON, BLUE, DARK3, DARK5, MAGENTA, RED, VISUAL, YELLOW};
@@ -194,20 +195,32 @@ fn start_screen_draws_the_four_group_headers_in_order() {
 }
 
 #[rstest::rstest]
-fn folded_done_today_says_z_opens_and_hides_its_rows() {
+fn folded_done_today_says_z_opens_it() {
     // Given an item done a minute ago, Done today folded.
     let state = with_items(vec![item(1, ItemState::Done)]);
 
     // When drawing the start screen 80×40.
     let buf = draw(&state, 80, 40);
 
-    // Then its header says z opens it, and its row isn't drawn.
-    let screen = lines(&buf).join("\n");
+    // Then its header counts the item and says z opens it.
+    let header = line_with(&buf, "Done today");
     assert!(
-        line_with(&buf, "Done today").contains("Done today  1  z opens")
-            && !screen.contains("item 1"),
-        "screen was\n{screen}"
+        header.contains("Done today  1  z opens"),
+        "header was '{header}'"
     );
+}
+
+#[rstest::rstest]
+fn folded_done_today_hides_its_rows() {
+    // Given an item done a minute ago, Done today folded.
+    let state = with_items(vec![item(1, ItemState::Done)]);
+
+    // When drawing the start screen 80×40.
+    let buf = draw(&state, 80, 40);
+
+    // Then its row isn't drawn.
+    let screen = lines(&buf).join("\n");
+    assert!(!screen.contains("item 1"), "screen was\n{screen}");
 }
 
 #[rstest::rstest]
@@ -413,7 +426,7 @@ fn narrow_list_leaves_out_the_session_title() {
 
     // Then its row shows only the age on the right.
     let row = line_with(&buf, "item 1");
-    let list: String = row.chars().take(60).collect();
+    let list: String = row.graphemes(true).take(60).collect();
     assert!(
         !list.contains("Fix the bug") && list.contains("3m"),
         "row was '{row}'"

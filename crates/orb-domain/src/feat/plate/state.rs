@@ -4,9 +4,11 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use error_stack::Report;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
+use wherror::Error;
 
 use super::view::PlateView;
 use crate::feat::harness::HarnessId;
@@ -152,10 +154,14 @@ impl PlateItem {
     ///
     /// # Errors
     ///
-    /// [`PlateRefusal::Done`] when the item is done.
-    pub fn updated(&self, change: &PlateChange, now: SystemTime) -> Result<Self, PlateRefusal> {
+    /// [`ItemDoneError`] when the item is done.
+    pub fn updated(
+        &self,
+        change: &PlateChange,
+        now: SystemTime,
+    ) -> Result<Self, Report<ItemDoneError>> {
         if self.state == ItemState::Done {
-            return Err(PlateRefusal::Done(self.id));
+            return Err(Report::new(ItemDoneError(self.id)).attach(ITEM_DONE.to_owned()));
         }
         let state = match change.waiting {
             Some(true) => ItemState::Waiting,
@@ -277,29 +283,25 @@ pub struct PlateChange {
     pub waiting: Option<bool>,
 }
 
-/// Why an update or a close of an item was turned down.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlateRefusal {
-    /// No item has that id.
-    NotFound(PlateItemId),
-    /// The item is done, so it can't change.
-    Done(PlateItemId),
-    /// The store couldn't save it; the reason.
-    Unsaved(String),
+/// The words for a change to a done item.
+pub const ITEM_DONE: &str = "item is done";
+
+/// The words for item `id`, which isn't on the plate.
+#[must_use]
+pub fn no_item(id: PlateItemId) -> String {
+    format!("no item {}", id.0)
 }
 
-impl fmt::Display for PlateRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound(id) => write!(f, "no item {}", id.0),
-            Self::Done(_) => f.write_str("item is done"),
-            Self::Unsaved(why) => f.write_str(why),
-        }
-    }
-}
+/// Item `.0` is done, so it can't change. The report's latest `String`
+/// attachment is [`ITEM_DONE`].
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error(debug)]
+pub struct ItemDoneError(pub PlateItemId);
 
 /// Every item on the plate, in id order, and how the user is viewing it.
-/// The sessions actor writes the items; the intent handler writes the view.
+/// The sessions actor writes the items for agents, and the intent handler
+/// writes them for the user's x, p and u; only the intent handler writes the
+/// view.
 #[derive(Debug, Default)]
 pub struct Plate {
     items: Vec<PlateItem>,
@@ -622,12 +624,12 @@ mod tests {
         };
 
         // When moving it to Waiting.
-        let updated = item.updated(&change, at(50));
+        let updated = item.updated(&change, at(50)).ok();
 
         // Then it waits, changed now.
         assert_eq!(
             updated.map(|item| (item.state, item.changed_at)),
-            Ok((ItemState::Waiting, at(50))),
+            Some((ItemState::Waiting, at(50))),
             "a state move resets the item's age"
         );
     }
@@ -643,12 +645,12 @@ mod tests {
         };
 
         // When retitling it, still the user's move.
-        let updated = item.updated(&change, at(50));
+        let updated = item.updated(&change, at(50)).ok();
 
         // Then the title changed and the age didn't.
         assert_eq!(
             updated.map(|item| (item.title, item.changed_at)),
-            Ok(("look again".to_owned(), at(10))),
+            Some(("look again".to_owned(), at(10))),
             "a change without a state move keeps the item's age"
         );
     }
@@ -666,12 +668,12 @@ mod tests {
         };
 
         // When updating it with one link.
-        let updated = item.updated(&change, at(50));
+        let updated = item.updated(&change, at(50)).ok();
 
         // Then that's its only link.
         assert_eq!(
             updated.map(|item| item.links),
-            Ok(vec!["c".to_owned()]),
+            Some(vec!["c".to_owned()]),
             "given links replace the old ones"
         );
     }
@@ -682,12 +684,14 @@ mod tests {
         let item = test_item(1, ItemState::Done);
 
         // When updating it.
-        let updated = item.updated(&PlateChange::default(), at(50));
+        let updated = item
+            .updated(&PlateChange::default(), at(50))
+            .map_err(|report| *report.current_context());
 
-        // Then it's refused.
+        // Then it's refused as done.
         assert_eq!(
             updated,
-            Err(PlateRefusal::Done(PlateItemId(1))),
+            Err(ItemDoneError(PlateItemId(1))),
             "a done item can't change"
         );
     }

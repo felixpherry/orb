@@ -88,6 +88,7 @@ use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::control::pane_control::{PaneControl, PaneReply, PaneRequest};
+use orb_domain::feat::control::quoted;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
@@ -1165,9 +1166,8 @@ fn write_history(dir: &Path, pane: PaneId, text: &str) -> Result<PathBuf, Report
 /// removed. `exec` ends the pane's shell with the editor, so quitting it
 /// closes the pane. `$EDITOR` is left unquoted so `code -w` splits into words.
 fn history_line(path: &Path) -> String {
-    // The path in single quotes, its own `'` written `'\''`, which POSIX
-    // shells and fish both read as one word.
-    let file = format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    // The path as one word to POSIX shells and fish alike (see `quoted`).
+    let file = quoted(&path.to_string_lossy());
     format!(
         "exec sh -c 'f=$1; case ${{EDITOR:-less}} in *vi|*vim|*nvim) at=+;; *less) at=+G;; *) at=;; esac; ${{EDITOR:-less}} $at \"$f\"; rm -f \"$f\"' orb-history {file}"
     )

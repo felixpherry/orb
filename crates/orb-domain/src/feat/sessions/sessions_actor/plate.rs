@@ -1,12 +1,30 @@
 //! The plate's items: brought back at start, then added, changed and closed
 //! for agents, and saved after the user's x, p and u.
 
+use error_stack::ResultExt;
+use wherror::Error;
+
 use super::*;
-use crate::feat::plate::{NewPlateItem, Plate, PlateChange, PlateItem, PlateRefusal};
+use crate::feat::plate::state::no_item;
+use crate::feat::plate::{NewPlateItem, Plate, PlateChange, PlateItem};
 use crate::ids::PlateItemId;
 
 /// The message shown when the plate's saved items can't be read or tidied.
 const PLATE_UNLOADED: &str = "couldn't load the plate";
+
+/// Why an agent's add, change or close of a plate item failed. Every report
+/// carries a one-line reason as its latest `String` attachment, the API's
+/// message.
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum PlateApiError {
+    /// No item has that id.
+    NotFound,
+    /// The item is done, so it can't change.
+    Done,
+    /// The store couldn't save it.
+    Unsaved,
+}
 
 /// An agent's new plate item. Only ever `ask`ed: an `Err` reply to a `tell`
 /// would stop the actor.
@@ -31,7 +49,7 @@ pub struct ApiPlateDone {
 }
 
 impl Message<ApiPlateAdd> for SessionsActor {
-    type Reply = Result<PlateItemId, String>;
+    type Reply = Result<PlateItemId, Report<PlateApiError>>;
 
     fn handle(
         &mut self,
@@ -43,7 +61,7 @@ impl Message<ApiPlateAdd> for SessionsActor {
 }
 
 impl Message<ApiPlateUpdate> for SessionsActor {
-    type Reply = Result<(), PlateRefusal>;
+    type Reply = Result<(), Report<PlateApiError>>;
 
     fn handle(
         &mut self,
@@ -55,7 +73,7 @@ impl Message<ApiPlateUpdate> for SessionsActor {
 }
 
 impl Message<ApiPlateDone> for SessionsActor {
-    type Reply = Result<(), PlateRefusal>;
+    type Reply = Result<(), Report<PlateApiError>>;
 
     fn handle(
         &mut self,
@@ -67,54 +85,110 @@ impl Message<ApiPlateDone> for SessionsActor {
 }
 
 impl SessionsActor {
-    /// Saves `add`'s item, added now, and puts it on the plate; its new id,
-    /// or why it couldn't be saved.
-    fn add_plate_item(&self, add: ApiPlateAdd) -> Result<PlateItemId, String> {
+    /// Saves `add`'s item, added now, and puts it on the plate; its new id.
+    ///
+    /// # Errors
+    ///
+    /// [`PlateApiError::Unsaved`] when the store can't save it.
+    fn add_plate_item(&self, add: ApiPlateAdd) -> Result<PlateItemId, Report<PlateApiError>> {
         let now = SystemTime::now();
         let id = self
             .store
             .insert_plate_item(&add.item, now)
-            .map_err(|report| save_failed(&self.services.log, &report))?;
+            .map_err(|report| self.unsaved(&report))?;
         self.state.write().plate.add(add.item.into_item(id, now));
         self.report.changed();
         Ok(id)
     }
 
     /// Makes `update`'s change to its item now, saved and on the plate.
-    fn update_plate_item(&self, update: &ApiPlateUpdate) -> Result<(), PlateRefusal> {
-        let updated = {
-            let app = self.state.read();
-            let item = app
-                .plate
-                .item(update.item)
-                .ok_or(PlateRefusal::NotFound(update.item))?;
-            item.updated(&update.change, SystemTime::now())?
-        };
-        self.save_plate_item(updated)
+    ///
+    /// # Errors
+    ///
+    /// [`PlateApiError::NotFound`] when there's no such item,
+    /// [`PlateApiError::Done`] when it's done, the user's x landing while the
+    /// change was saving included, and [`PlateApiError::Unsaved`] when the
+    /// store can't save it.
+    fn update_plate_item(&self, update: &ApiPlateUpdate) -> Result<(), Report<PlateApiError>> {
+        let now = SystemTime::now();
+        self.change_plate_item(update.item, |item| {
+            item.updated(&update.change, now)
+                .map(Some)
+                .change_context(PlateApiError::Done)
+        })
     }
 
     /// Closes `done`'s item now, saved and on the plate; an item already
     /// done is left as it is.
-    fn finish_plate_item(&self, done: &ApiPlateDone) -> Result<(), PlateRefusal> {
-        let finished = {
-            let app = self.state.read();
-            app.plate
-                .item(done.item)
-                .ok_or(PlateRefusal::NotFound(done.item))?
-                .finished(SystemTime::now())
-        };
-        finished.map_or(Ok(()), |item| self.save_plate_item(item))
+    ///
+    /// # Errors
+    ///
+    /// [`PlateApiError::NotFound`] when there's no such item, and
+    /// [`PlateApiError::Unsaved`] when the store can't save it.
+    fn finish_plate_item(&self, done: &ApiPlateDone) -> Result<(), Report<PlateApiError>> {
+        let now = SystemTime::now();
+        self.change_plate_item(done.item, |item| Ok(item.finished(now)))
     }
 
-    /// Saves `item` over its old row, then puts it on the plate in place of
-    /// the old one.
-    fn save_plate_item(&self, item: PlateItem) -> Result<(), PlateRefusal> {
-        self.store
-            .save_plate_item(&item)
-            .map_err(|report| PlateRefusal::Unsaved(save_failed(&self.services.log, &report)))?;
-        self.state.write().plate.replace(item);
-        self.report.changed();
-        Ok(())
+    /// Makes an agent's `change` to item `id`: saves the item `change` makes
+    /// of it, then puts that on the plate. `change` refuses with an error,
+    /// or leaves the item as it is with `None`. When the user's x, p or u
+    /// lands while the save runs, `change` is made again to the item as the
+    /// plate has it now, so the store and the plate both keep what the user
+    /// did; and when that's refused or changes nothing, the user's item is
+    /// saved back over the agent's, so a restart keeps it too.
+    ///
+    /// # Errors
+    ///
+    /// [`PlateApiError::NotFound`] when there's no such item, `change`'s
+    /// refusal, and [`PlateApiError::Unsaved`] when the store can't save
+    /// it; the plate is left as it is.
+    fn change_plate_item(
+        &self,
+        id: PlateItemId,
+        change: impl Fn(&PlateItem) -> Result<Option<PlateItem>, Report<PlateApiError>>,
+    ) -> Result<(), Report<PlateApiError>> {
+        let mut saved_over_user = false;
+        loop {
+            let read = self
+                .state
+                .read()
+                .plate
+                .item(id)
+                .cloned()
+                .ok_or_else(|| not_found(id))?;
+            let changed = match change(&read) {
+                Ok(Some(changed)) => changed,
+                kept => {
+                    if saved_over_user {
+                        self.store_plate_item(id);
+                    }
+                    return kept.map(drop);
+                }
+            };
+            self.store
+                .save_plate_item(&changed)
+                .map_err(|report| self.unsaved(&report))?;
+            let taken = {
+                let mut app = self.state.write();
+                let unchanged = app.plate.item(id) == Some(&read);
+                if unchanged {
+                    app.plate.replace(changed);
+                }
+                unchanged
+            };
+            if taken {
+                self.report.changed();
+                return Ok(());
+            }
+            saved_over_user = true;
+        }
+    }
+
+    /// Logs the store's failure `report` and gives the agent's
+    /// [`PlateApiError::Unsaved`] with the message box's words.
+    fn unsaved(&self, report: &Report<StoreError>) -> Report<PlateApiError> {
+        Report::new(PlateApiError::Unsaved).attach(save_failed(&self.services.log, report))
     }
 
     /// Saves item `id` as the plate has it, after the user's x, p or u; a
@@ -147,4 +221,9 @@ pub(super) fn restore_plate(
         Ok(items) => (Plate::from_saved(items), deleted),
         Err(report) => (Plate::default(), Some(failed(log, PLATE_UNLOADED, &report))),
     }
+}
+
+/// The refusal for a change to item `id`, which isn't on the plate.
+fn not_found(id: PlateItemId) -> Report<PlateApiError> {
+    Report::new(PlateApiError::NotFound).attach(no_item(id))
 }

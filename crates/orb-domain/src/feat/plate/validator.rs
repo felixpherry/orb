@@ -4,6 +4,7 @@ use crate::AppState;
 use crate::feat::control::protocol::{ApiError, ErrorCode};
 use crate::feat::control::target::{self, Resolved};
 use crate::feat::control::validator::not_settled;
+use crate::feat::plate::state::{ITEM_DONE, no_item};
 use crate::feat::plate::{PlateItem, RowKey, Verb};
 use crate::ids::{PaneId, PlateItemId, SessionId};
 
@@ -45,7 +46,7 @@ pub(crate) fn open_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, A
     if item.state.is_open() {
         Ok(item)
     } else {
-        Err(ApiError::new(ErrorCode::BadRequest, "item is done"))
+        Err(ApiError::new(ErrorCode::BadRequest, ITEM_DONE))
     }
 }
 
@@ -53,7 +54,24 @@ pub(crate) fn open_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, A
 pub(crate) fn known_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, ApiError> {
     app.plate
         .item(id)
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, format!("no item {}", id.0)))
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, no_item(id)))
+}
+
+/// `links`, each free of control characters (C0, DEL and C1);
+/// `bad_request` naming the first that holds one. A link can be typed into
+/// a shell, where a control character such as Ctrl-C would act on the
+/// prompt instead of staying in the link.
+pub(crate) fn links(links: &[String]) -> Result<(), ApiError> {
+    match links
+        .iter()
+        .position(|link| link.chars().any(char::is_control))
+    {
+        Some(at) => Err(ApiError::new(
+            ErrorCode::BadRequest,
+            format!("link {} holds a control character", at + 1),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Where ⏎ on a plate row takes the user.

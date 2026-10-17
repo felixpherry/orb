@@ -23,7 +23,7 @@ pub use intent::PlateKey;
 pub use links::BrowserTabs;
 pub use opener::{LinkOpener, LinkService};
 pub use state::{
-    ItemState, Link, LinkKind, NewPlateItem, Plate, PlateChange, PlateItem, PlateRefusal, Verb,
+    ItemDoneError, ItemState, Link, LinkKind, NewPlateItem, Plate, PlateChange, PlateItem, Verb,
     local_midnight,
 };
 pub use view::{PlateCursor, PlatePrefix, PlateUndo, PlateView};

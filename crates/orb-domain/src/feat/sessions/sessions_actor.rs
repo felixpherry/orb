@@ -146,7 +146,7 @@ mod settle;
 mod start;
 
 use self::plate::restore_plate;
-pub use self::plate::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate};
+pub use self::plate::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError};
 use self::poll::{agent_mut, display_title, show};
 use self::projects::{KitCopy, own_folder};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};

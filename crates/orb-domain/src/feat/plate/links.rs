@@ -710,6 +710,11 @@ mod tests {
         "https://x.test/?q=it's",
         r"exec terminal-browser open 'https://x.test/?q=it'\''s'"
     )]
+    #[case::backslash_and_quote(
+        r"https://x/\'(cmd) #",
+        r"exec terminal-browser open 'https://x/'\\''\''(cmd) #'"
+    )]
+    #[case::trailing_backslash(r"https://x/a\", r"exec terminal-browser open 'https://x/a'\\''")]
     fn browser_line_quotes_the_url(#[case] url: &str, #[case] expected: &str) {
         // Given a link.
         // When building its browser tab's line.

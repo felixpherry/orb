@@ -3041,6 +3041,22 @@ fn open_history_writes_the_panes_text_to_its_history_file() -> io::Result<()> {
 }
 
 #[rstest::rstest]
+fn open_history_line_keeps_a_backslash_in_the_path_for_fish() {
+    // Given a history file whose path has a backslash.
+    let path = Path::new("/tmp/a\\b/pane-1.txt");
+
+    // When making the line its tab's shell runs.
+    let line = history_line(path);
+
+    // Then the backslash sits outside the quotes, escaped, so fish and POSIX
+    // shells both read the path as is.
+    assert!(
+        line.ends_with(r"orb-history '/tmp/a'\\'b/pane-1.txt'"),
+        "the path should be quoted for fish too, got {line}"
+    );
+}
+
+#[rstest::rstest]
 fn open_history_line_opens_the_editor_at_the_bottom() {
     // Given a history file whose path has a space and a quote.
     let path = Path::new("/home/me/it's here/pane-1.txt");

@@ -13,9 +13,9 @@ use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
     ApiAdd, ApiPlace, ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, ApiStart, ApiStartError,
-    ColonyFolderReady, ColonyJob, FAST_POLL, Placement, RemoveFolder, SAVE_FAILED, SLOW_POLL,
-    SessionsActor, SessionsActorDeps, WorktreeJob, WorktreeReady, current_branch, now_ms,
-    spawn_sessions_actor,
+    ColonyFolderReady, ColonyJob, FAST_POLL, Placement, PlateApiError, RemoveFolder, SAVE_FAILED,
+    SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob, WorktreeReady, current_branch,
+    now_ms, spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -33,9 +33,7 @@ use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
 use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
 use crate::feat::plate::links::browser_line;
 use crate::feat::plate::opener::fake::{FakeLinks, LinkCall};
-use crate::feat::plate::{
-    ItemState, LinkService, NewPlateItem, PlateChange, PlateItem, PlateRefusal, Verb,
-};
+use crate::feat::plate::{ItemState, LinkService, NewPlateItem, PlateChange, PlateItem, Verb};
 use crate::feat::sessions::state::{
     Agent, AgentStatus, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session, SessionKind,
     SidebarItem,
@@ -2647,13 +2645,13 @@ async fn api_plate_add(
 }
 
 /// Asks `actor` for the plate change `msg` and waits, at most [`LIMIT`],
-/// for its answer, a refusal included.
+/// for its answer, a refusal's reason included.
 async fn api_plate_change<M>(
     actor: &ActorRef<SessionsActor>,
     msg: M,
-) -> Result<Result<(), PlateRefusal>, Report<StoreError>>
+) -> Result<Result<(), PlateApiError>, Report<StoreError>>
 where
-    SessionsActor: Message<M, Reply = Result<(), PlateRefusal>>,
+    SessionsActor: Message<M, Reply = Result<(), Report<PlateApiError>>>,
     M: std::fmt::Debug + Send + 'static,
 {
     match tokio::time::timeout(LIMIT, actor.ask(msg))
@@ -2662,7 +2660,7 @@ where
         .attach("the actor didn't answer in time")?
     {
         Ok(()) => Ok(Ok(())),
-        Err(SendError::HandlerError(refusal)) => Ok(Err(refusal)),
+        Err(SendError::HandlerError(refusal)) => Ok(Err(*refusal.current_context())),
         Err(error) => Err(Report::new(StoreError).attach(format!("{error:?}"))),
     }
 }
@@ -2765,7 +2763,7 @@ async fn api_plate_update_of_a_done_item_is_refused() -> Result<(), Report<Store
     let id = api_plate_add(&actor, new_review("review the plan")).await?;
     api_plate_change(&actor, ApiPlateDone { item: id })
         .await?
-        .map_err(|refusal| Report::new(StoreError).attach(refusal.to_string()))?;
+        .map_err(|refusal| Report::new(StoreError).attach(format!("{refusal:?}")))?;
 
     // When an agent retitles it.
     let change = PlateChange {
@@ -2775,11 +2773,7 @@ async fn api_plate_update_of_a_done_item_is_refused() -> Result<(), Report<Store
     let answer = api_plate_change(&actor, ApiPlateUpdate { item: id, change }).await?;
 
     // Then it's refused as done.
-    assert_eq!(
-        answer,
-        Err(PlateRefusal::Done(id)),
-        "a done item can't change"
-    );
+    assert_eq!(answer, Err(PlateApiError::Done), "a done item can't change");
     Ok(())
 }
 
@@ -2924,7 +2918,7 @@ async fn api_plate_done_of_a_done_item_keeps_its_close_time() -> Result<(), Repo
     let id = api_plate_add(&actor, new_review("review the plan")).await?;
     api_plate_change(&actor, ApiPlateDone { item: id })
         .await?
-        .map_err(|refusal| Report::new(StoreError).attach(refusal.to_string()))?;
+        .map_err(|refusal| Report::new(StoreError).attach(format!("{refusal:?}")))?;
     let closed = state.read().plate.item(id).and_then(|item| item.done_at);
 
     // When an agent closes it again.
@@ -2936,6 +2930,123 @@ async fn api_plate_done_of_a_done_item_keeps_its_close_time() -> Result<(), Repo
         (answer, closed.is_some(), after),
         (Ok(()), true, closed),
         "a second close should change nothing"
+    );
+    Ok(())
+}
+
+/// How long the store file is held while the user's key lands: long enough
+/// for the actor to have read the item and be waiting to save it.
+const MID_SAVE: Duration = Duration::from_millis(300);
+
+/// Asks `actor` for `update` while the store file at `path` is held by
+/// another writer, so the save waits; makes `user`'s change to the item as
+/// the app state has it meanwhile, as the user's x, p or u would; then lets
+/// the save through. The actor's answer.
+async fn update_while_user_changes_it(
+    actor: &ActorRef<SessionsActor>,
+    state: &State,
+    path: &Path,
+    update: ApiPlateUpdate,
+    user: impl FnOnce(&PlateItem) -> Option<PlateItem>,
+) -> Result<Result<(), PlateApiError>, Report<StoreError>> {
+    let gate = rusqlite::Connection::open(path).change_context(StoreError)?;
+    gate.execute_batch("BEGIN IMMEDIATE")
+        .change_context(StoreError)?;
+    let id = update.item;
+    let asker = actor.clone();
+    let answer = tokio::spawn(async move { api_plate_change(&asker, update).await });
+    tokio::time::sleep(MID_SAVE).await;
+    {
+        let mut app = state.write();
+        if let Some(changed) = app.plate.item(id).and_then(user) {
+            app.plate.replace(changed);
+        }
+    }
+    gate.execute_batch("COMMIT").change_context(StoreError)?;
+    answer
+        .await
+        .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?
+}
+
+#[rstest::rstest]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_plate_update_is_refused_when_the_user_closes_the_item_while_it_saves()
+-> Result<(), Report<StoreError>> {
+    // Given a review an agent added.
+    let (actor, state, _dir, path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // When an agent retitles it, and the user presses x while that saves.
+    let update = ApiPlateUpdate {
+        item: id,
+        change: PlateChange {
+            title: Some("review the new plan".to_owned()),
+            ..PlateChange::default()
+        },
+    };
+    let done = SystemTime::UNIX_EPOCH + Duration::from_secs(50);
+    let answer =
+        update_while_user_changes_it(&actor, &state, &path, update, |item| item.finished(done))
+            .await?;
+
+    // Then the agent is told the item is done, and it stays done as titled.
+    let shown = state
+        .read()
+        .plate
+        .item(id)
+        .map(|item| (item.title.clone(), item.state));
+    assert_eq!(
+        (answer, shown),
+        (
+            Err(PlateApiError::Done),
+            Some(("review the plan".to_owned(), ItemState::Done))
+        ),
+        "an update the user's x overtook should be refused, not dropped"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_plate_update_saves_a_park_the_user_made_while_it_saved()
+-> Result<(), Report<StoreError>> {
+    // Given a review an agent added.
+    let (actor, state, _dir, path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // When an agent retitles it, and the user parks it while that saves.
+    let update = ApiPlateUpdate {
+        item: id,
+        change: PlateChange {
+            title: Some("review the new plan".to_owned()),
+            ..PlateChange::default()
+        },
+    };
+    let answer = update_while_user_changes_it(&actor, &state, &path, update, |item| {
+        Some(PlateItem {
+            state: ItemState::Parked { by_user: true },
+            ..item.clone()
+        })
+    })
+    .await?;
+
+    // Then the store file has the new title and the park, before the
+    // user's own save is ever made.
+    let saved: Vec<(String, ItemState)> = Store::open(&path)?
+        .plate_items()?
+        .into_iter()
+        .map(|item| (item.title, item.state))
+        .collect();
+    assert_eq!(
+        (answer, saved),
+        (
+            Ok(()),
+            vec![(
+                "review the new plan".to_owned(),
+                ItemState::Parked { by_user: true }
+            )]
+        ),
+        "the store should hold the agent's change made to the user's item"
     );
     Ok(())
 }
@@ -2956,7 +3067,7 @@ async fn api_plate_update_of_an_unknown_item_is_not_found() -> Result<(), Report
     // Then it's refused as not found.
     assert_eq!(
         answer,
-        Err(PlateRefusal::NotFound(PlateItemId(9))),
+        Err(PlateApiError::NotFound),
         "an update needs a real item"
     );
     Ok(())

@@ -4,6 +4,7 @@
 
 use std::time::SystemTime;
 
+use error_stack::Report;
 use kameo::error::SendError;
 
 use crate::AppState;
@@ -14,8 +15,10 @@ use crate::feat::control::protocol::{
 use crate::feat::control::server::ControlDeps;
 use crate::feat::control::target::{self, Target};
 use crate::feat::plate::validator;
-use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, PlateRefusal, Verb};
-use crate::feat::sessions::sessions_actor::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate};
+use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, Verb};
+use crate::feat::sessions::sessions_actor::{
+    ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError,
+};
 use crate::ids::PaneId;
 
 /// What a plate request comes to, read from the state.
@@ -40,6 +43,9 @@ pub(crate) fn plan(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Pl
             waiting,
         } => {
             validator::open_item(app, *item)?;
+            if let Some(links) = links {
+                validator::links(links)?;
+            }
             let verb = verb.as_deref().map(validator::verb).transpose()?;
             Ok(PlateAsk::Update(ApiPlateUpdate {
                 item: *item,
@@ -61,9 +67,10 @@ pub(crate) fn plan(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Pl
     }
 }
 
-/// The item `plate add` asks for, from the caller's session. It comes from
-/// the caller's pane and agent, and ⏎ goes to `--pane` when given. An idea
-/// lands parked as the agent's offer, so it can't be waiting.
+/// The item `plate add` asks for. It comes from the caller's agent, and ⏎
+/// goes to `--pane` when given, else to the caller's pane; the item belongs
+/// to that pane's session. An idea lands parked as the agent's offer, so it
+/// can't be waiting.
 fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiError> {
     let Op::PlateAdd {
         title,
@@ -79,6 +86,7 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
     };
     let from = validator::adding_session(app, caller)?;
     let verb = validator::verb(verb)?;
+    validator::links(links)?;
     if verb == Verb::Idea && *waiting {
         return Err(ApiError::new(
             ErrorCode::BadRequest,
@@ -88,12 +96,12 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
     let caller_pane = from
         .pane
         .ok_or_else(|| ApiError::new(ErrorCode::NoTarget, "not inside an orb pane"))?;
-    let pane = match pane {
+    let (session, pane) = match pane {
         Some(pane) => {
-            target::resolve(app, Some(Target::Pane(*pane)), caller)?;
-            *pane
+            let target = target::resolve(app, Some(Target::Pane(*pane)), caller)?;
+            (target.session, *pane)
         }
-        None => caller_pane,
+        None => (from.session, caller_pane),
     };
     let state = match (verb, waiting) {
         (Verb::Idea, _) => ItemState::Parked { by_user: false },
@@ -108,10 +116,10 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
             what: what.clone(),
             links: links.clone(),
             urgent: *urgent,
-            session: from.session,
+            session,
             session_title: app
                 .sessions
-                .session(from.session)
+                .session(session)
                 .map(|session| app.sessions.title(session))
                 .unwrap_or_default(),
             pane,
@@ -131,7 +139,7 @@ pub(crate) fn ask(deps: &ControlDeps, ask: PlateAsk) -> Reply {
             .block_on(async { deps.sessions.ask(add).await })
         {
             Ok(item) => Reply::ok(&ItemResult { item }),
-            Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+            Err(error) => Reply::err(refused(error)),
         },
         PlateAsk::Update(update) => changed(
             deps.runtime
@@ -145,17 +153,29 @@ pub(crate) fn ask(deps: &ControlDeps, ask: PlateAsk) -> Reply {
 }
 
 /// The reply to the actor's `answer` to an update or a close.
-fn changed<M>(answer: Result<(), SendError<M, PlateRefusal>>) -> Reply {
+fn changed<M>(answer: Result<(), SendError<M, Report<PlateApiError>>>) -> Reply {
     match answer {
         Ok(()) => Reply::ok(&Done {}),
-        Err(SendError::HandlerError(refusal @ PlateRefusal::NotFound(_))) => {
-            Reply::err(ApiError::new(ErrorCode::NotFound, refusal.to_string()))
-        }
-        Err(SendError::HandlerError(refusal @ PlateRefusal::Done(_))) => {
-            Reply::err(ApiError::new(ErrorCode::BadRequest, refusal.to_string()))
-        }
-        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+        Err(error) => Reply::err(refused(error)),
     }
+}
+
+/// The API error for the actor's failed answer `error`: its code from why
+/// it failed, and the report's latest reason as the message.
+fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
+    let SendError::HandlerError(report) = error else {
+        return ApiError::new(ErrorCode::Failed, error.to_string());
+    };
+    let code = match report.current_context() {
+        PlateApiError::NotFound => ErrorCode::NotFound,
+        PlateApiError::Done => ErrorCode::BadRequest,
+        PlateApiError::Unsaved => ErrorCode::Failed,
+    };
+    let reason = report
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| format!("{:?}", report.current_context()));
+    ApiError::new(code, reason)
 }
 
 /// `plate list`'s reply: open items and those done since `today`, with each

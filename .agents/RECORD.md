@@ -149,8 +149,8 @@ Entries are added or amended **only with human approval**.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`<C-g>` for the leader), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
 - (keybinds) `<C-g> ?` in the sidebar or a pane, and `?` in the sidebar, open a searchable list of every key that works there, Alt and jump keys included.
 - (keybinds) which-key labels `<C-g> e` "toggle sidebar", `<C-g> h` "go to sidebar", `<C-g> l` "go to panes", `<C-g> t 1`–`9` "tab 1"–"tab 9", `<C-g> w` "session's worktree" and `<C-g> W` "all worktrees".
-- (dashboard) While no session whose panes orb holds is shown, the right-hand area shows the plate as the start screen: a list box titled Plate beside a preview of the selected item.
-- (dashboard) When a pane's client can't start, the reason shows in the message box as an error.
+- (plate) While no session whose panes orb holds is shown, the right-hand area shows the plate as the start screen: a list box titled Plate beside a preview of the selected item.
+- (pane) When a pane's client can't start, the reason shows in the message box as an error.
 - (pane) orb keeps a `zmx attach` client for every pane of each attached session, and showing another session leaves them running.
 - (pane) A session is attached from when it is entered, or from orb's start while it's unsettled, until it is settled, deleted or moved to another workspace, or a pane's client can't be reattached.
 - (tui) At start orb draws its first frame before it reconnects the panes of its unsettled sessions, so the sidebar shows while they reconnect.
@@ -458,9 +458,10 @@ Entries are added or amended **only with human approval**.
 - (docs) CHANGELOG.md lists each release in the Keep a Changelog format, grouped by area.
 - (plate) The plate is one list of what needs the user across all of orb, ignoring the project filter, grouped as Your move, Waiting on others, Parked and Done today (folded), never by session or colony.
 - (plate) Agents add, change, close and list plate items with `orb plate add|update|done|list`, and orb never reads transcripts for the plate.
-- (plate) A plate item has a verb from a fixed set of 11 (DECIDE, REVIEW, READ, WALK, PICK, APPROVE, ANSWER, REPLY, MERGE, NOTE, IDEA), a title, an optional description and links, an urgent flag, the session and agent that added it, and the pane `⏎` goes to.
+- (plate) A plate item has a verb from a fixed set of 11 (DECIDE, REVIEW, READ, WALK, PICK, APPROVE, ANSWER, REPLY, MERGE, NOTE, IDEA), a title, an optional description and links, an urgent flag, the agent that added it, and the pane `⏎` goes to (the adding pane unless `--pane` names another) with that pane's session.
 - (plate) `orb plate add` replies with the new item's ID as `{"item": N}`.
 - (plate) `orb plate add` from a colonist's pane is refused with `colonists report to their chief`.
+- (plate) `orb plate add` and `orb plate update` refuse a link holding a control character with `link N holds a control character`, and a line orb types into a pane's shell drops control characters.
 - (plate) An item added with the `idea` verb lands in Parked as an agent's offer.
 - (plate) orb adds its own Your move row, built from status alone, for each agent waiting for approval or an answer, colonists included; it leaves once the agent stops waiting, and `x` and `p` don't act on it.
 - (plate) Your move sorts urgent items first, then orb's approval rows, then its answer rows, then the rest oldest first; Waiting on others sorts oldest first, and Parked and Done today newest first.

