@@ -44,7 +44,8 @@ Another terminal works if it speaks the kitty keyboard protocol and its font has
 
 ### Notifications and sounds
 
-- **When orb isn't focused,** a desktop notification says an agent finished, needs approval or needs input.
+- **When orb isn't focused,** a desktop notification says an agent finished, needs approval or needs input. Clicking it brings orb forward and puts your keys in that agent's pane.
+- **When orb is focused,** an agent outside the tab you're looking at (and its floats) that starts needing approval or input is named in the message box: `orb/fix-login needs approval` or `needs input`, with the agent's name after the session when the session runs two or more agents. A finished turn gets no message; its sound and the mode line's green `✓N` tell you.
 - **macOS:** notifications go through [terminal-notifier](https://github.com/julienXX/terminal-notifier) when it's installed (allow it in System Settings → Notifications), else through `osascript`. For a click to bring kitty forward, turn on kitty's remote control in kitty.conf, then restart kitty (a reload doesn't apply these two):
 
   ```conf
@@ -52,7 +53,8 @@ Another terminal works if it speaks the kitty keyboard protocol and its font has
   listen_on unix:/tmp/kitty
   ```
 
-- **Linux:** notifications need a freedesktop notification server, which most desktops run. On niri a click brings orb's window forward.
+  A click on a terminal-notifier notification also opens the agent's pane; an `osascript` one can't.
+- **Linux:** notifications need a freedesktop notification server, which most desktops run. A click opens the agent's pane, and on niri it brings orb's window forward first.
 - **Sounds:** a sound plays when an agent needs you, and when one finishes unless you're looking at it. macOS uses `afplay`; Linux the first of paplay, pw-play, ffplay, mpg123 or mpv it finds.
 
 ### Research and Learn kits under pi
@@ -94,6 +96,7 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-g> r` / `<C-g> m` | Resize mode / move mode for the focused pane (`h/j/k/l` or arrows; `Esc` leaves) |
 | `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the pane out to a new tab (in a pane), go to N |
 | `<C-g> Space` | Session picker |
+| `<C-g> a` | Go to the next agent that needs you: approval, then input, then a finished chat you haven't read, longest waiting first; press again for the next, wrapping at the end. It reaches agents the project filter hides, leaves out failed agents and settled sessions, and with nobody waiting says `No agent needs you` |
 | `<C-g> n` | New session |
 | `<C-g> P` | Projects: `a` adds one, `d` removes one, `⏎` starts a session |
 | `<C-g> f` | Show one project's sessions (sidebar only) |
@@ -121,7 +124,7 @@ In the sidebar:
 
 Pickers: type to filter, `<C-j>`/`<C-k>` or arrows to move, `⏎` to pick, `Esc` to close. The projects, worlds, session and worktree pickers open as a list where letters are commands, listed at the bottom of the picker; `/` starts typing a filter there.
 
-`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, and a pick in the session or search picker are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
+`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, a pick in the session or search picker, and `<C-g> a` are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
 
 ## Mouse
 

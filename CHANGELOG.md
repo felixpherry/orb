@@ -12,10 +12,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The session, Colonists and search pickers keep their filter and typed text until orb quits.
 - When typed text in the session picker matches only settled agents, the empty list says how many (`N settled matches · s to show`).
 - A pane with no name and no agent title is called by the title its program sets (htop, vim, your shell's prompt) instead of `shell`.
+- `<C-g> a` takes you to the next agent that needs you: waiting for approval, then for input, then a finished chat you haven't read, longest waiting first. Press it again for the next one. It reaches agents the project filter hides, and says `No agent needs you` when nobody does.
+- Tabs and agent pane borders show the status icon of the agent that needs a look: working, waiting, failed or finished but unread.
+- The mode line counts the finished chats you haven't read, in green (`✓N`).
+- While orb is focused, an agent in another tab or session that starts needing approval or input is named in the message box, such as `orb/fix-login needs approval`.
+- Clicking a desktop notification opens that agent's pane with your keys in it, on macOS (with terminal-notifier) and on Linux.
+- Agent rows in the sidebar show a time before the `✳` or `π` mark: the turn so far while working, the wait while waiting, else the time since the last turn.
 
 ### Changed
 
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
+- A card's time counts how long its agent has waited for approval or input, instead of the time since its last turn. orb saves when each agent started waiting, so the times survive a restart; this upgrades orb's saved data, and orb keeps a copy of the old file first.
+- The mode line's input count is magenta, as in the sidebar.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 
 ## [0.1.0] - 2026-10-16
