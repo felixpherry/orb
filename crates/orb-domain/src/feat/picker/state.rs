@@ -841,19 +841,6 @@ impl PickerState {
         }
     }
 
-    /// The session the selected row opens: a session row's, or the one a
-    /// hit's agent runs or last ran in. `None` for any other row.
-    pub fn picked_session(&self, sessions: &Sessions) -> Option<SessionId> {
-        match *self.list.selected()? {
-            PickerItem::Session { id, .. } => Some(id),
-            PickerItem::Hit { agent, .. } => sessions
-                .all_agents()
-                .find(|shown| shown.id == agent)
-                .and_then(Agent::home),
-            _ => None,
-        }
-    }
-
     /// The selected worktree row's path; `None` unless one is selected.
     pub fn selected_worktree(&self) -> Option<&Path> {
         match self.list.selected() {

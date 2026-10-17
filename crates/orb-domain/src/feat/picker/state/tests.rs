@@ -1351,34 +1351,6 @@ fn hit_label_falls_back_to_the_agents_title() {
     );
 }
 
-#[rstest::rstest]
-fn picked_session_of_a_hit_is_its_ended_agents_session() {
-    // Given agent 1 that ended in session 1, and the search picker over a
-    // hit in it.
-    let sessions = {
-        let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
-        if let Some(agent) = sessions
-            .projects
-            .first_mut()
-            .and_then(|p| p.agents.first_mut())
-        {
-            agent.pane = None;
-        }
-        sessions
-    };
-    let picker = searching(vec![hit(1, 1)]);
-
-    // When asking which session the pick opens.
-    let session = picker.picked_session(&sessions);
-
-    // Then it is the session the agent ran in.
-    assert_eq!(
-        session,
-        Some(SessionId(1)),
-        "a hit on an ended agent should open its session"
-    );
-}
-
 fn other_picker(which: &str) -> PickerState {
     match which {
         "projects" => PickerState::projects(vec![], Focus::Sidebar),

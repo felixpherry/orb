@@ -55,6 +55,9 @@ pub enum SessionsCommand {
     StackPane(SessionId),
     /// Open a tab of one new pane in `session`.
     NewTab(SessionId),
+    /// Open a tab in `session` whose fresh shell resumes `agent`'s
+    /// conversation, and show it.
+    ResumeAgent { session: SessionId, agent: AgentId },
     /// Save `session`'s tabs, splits, focus and pane names as the app state
     /// has them.
     SaveLayout(SessionId),

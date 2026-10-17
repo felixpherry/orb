@@ -494,12 +494,13 @@ impl Message<SessionsCommand> for SessionsActor {
     ) -> impl Future<Output = Self::Reply> + Send {
         match msg {
             SessionsCommand::SplitPane { session, split } => {
-                self.add_pane(session, Placement::Split(split));
+                self.add_pane(session, Placement::Split(split), None);
             }
-            SessionsCommand::AddPane(session) => self.add_pane(session, Placement::Tile),
-            SessionsCommand::AddFloat(session) => self.add_pane(session, Placement::Float),
-            SessionsCommand::StackPane(session) => self.add_pane(session, Placement::Stack),
-            SessionsCommand::NewTab(session) => self.add_pane(session, Placement::Tab),
+            SessionsCommand::AddPane(session) => self.add_pane(session, Placement::Tile, None),
+            SessionsCommand::AddFloat(session) => self.add_pane(session, Placement::Float, None),
+            SessionsCommand::StackPane(session) => self.add_pane(session, Placement::Stack, None),
+            SessionsCommand::NewTab(session) => self.add_pane(session, Placement::Tab, None),
+            SessionsCommand::ResumeAgent { session, agent } => self.resume_agent(session, agent),
             SessionsCommand::SaveLayout(session) => self.save_layout(session),
             SessionsCommand::NewSession {
                 project,

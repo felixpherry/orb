@@ -8,9 +8,16 @@ impl SessionsActor {
     /// splitting the focused pane, in a new tab, or as a float. A session with no layout
     /// (its last pane closed) gets a first tab of that shell from
     /// [`Placement::Tab`] and is reported ready to open once it's saved; the other
-    /// placements do nothing there. Then saves the layout. A pane that can't
-    /// be saved shows why.
-    pub(super) fn add_pane(&mut self, session: SessionId, placement: Placement) {
+    /// placements do nothing there. `line`, if any, is typed into the new
+    /// shell once it first prints; it's kept in memory only, so a restart
+    /// never types it again. Then saves the layout. A pane that can't be
+    /// saved shows why.
+    pub(super) fn add_pane(
+        &mut self,
+        session: SessionId,
+        placement: Placement,
+        line: Option<String>,
+    ) {
         let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
             return;
         };
@@ -19,7 +26,10 @@ impl SessionsActor {
             return;
         }
         let entry = match self.shell_entry(session, dir) {
-            Ok(entry) => entry,
+            Ok(entry) => PaneEntry {
+                resume: line,
+                ..entry
+            },
             Err(error) => return self.report.report(Outcome::Failed(error)),
         };
         {
@@ -41,6 +51,24 @@ impl SessionsActor {
                 session,
                 if_active: Some(session),
             });
+        }
+    }
+
+    /// Opens a tab in `session` whose fresh shell types the command that
+    /// resumes `agent`'s conversation, and shows it, as [`Self::add_pane`]
+    /// does with [`Placement::Tab`]. Nothing happens for an agent or
+    /// harness orb no longer knows.
+    pub(super) fn resume_agent(&mut self, session: SessionId, agent: AgentId) {
+        let line = self
+            .rows
+            .iter()
+            .find(|row| row.id == agent)
+            .and_then(|row| {
+                let harness = self.services.harnesses.get(&row.harness)?;
+                Some(harness.resume_command(row.session_id.as_deref().unwrap_or(&row.short_id)))
+            });
+        if let Some(line) = line {
+            self.add_pane(session, Placement::Tab, Some(line));
         }
     }
 
@@ -157,7 +185,7 @@ impl SessionsActor {
         let Some((mut tabs, floats, active, mut names)) = saved else {
             let deleting = self.state.read().sessions.deleting.contains(&session);
             if self.sessions.contains_key(&session) && !deleting {
-                self.add_pane(session, Placement::Tab);
+                self.add_pane(session, Placement::Tab, None);
             }
             return;
         };

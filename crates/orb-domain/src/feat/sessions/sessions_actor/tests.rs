@@ -1077,11 +1077,11 @@ fn one_unread_tab(store: &Store) -> SeededSession {
 }
 
 #[rstest::rstest]
-#[case::split(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Split(Split::Right)))]
-#[case::stack(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Stack))]
-#[case::float(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Float))]
+#[case::split(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Split(Split::Right), None))]
+#[case::stack(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Stack, None))]
+#[case::float(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Float, None))]
 #[case::close(one_agent, |actor: &mut SessionsActor, state: &State, s| {
-        actor.add_pane(s, Placement::Split(Split::Right));
+        actor.add_pane(s, Placement::Split(Split::Right), None);
         let added = state.read().layouts.get(s).and_then(SessionLayout::focused);
         if let Some(added) = added {
             state.write().layouts.close_pane(added);
@@ -2525,7 +2525,7 @@ fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When splitting it right.
-    actor.add_pane(inserted.session, Placement::Split(Split::Right));
+    actor.add_pane(inserted.session, Placement::Split(Split::Right), None);
 
     // Then the store has a second pane, which the tab focuses.
     let saved = actor.store.layouts()?;
@@ -2552,7 +2552,7 @@ fn float_add_pane_shows_a_float_with_the_keys() -> Result<(), Report<StoreError>
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When adding a pane as a float.
-    actor.add_pane(inserted.session, Placement::Float);
+    actor.add_pane(inserted.session, Placement::Float, None);
 
     // Then a new pane, a float, has the keys.
     let shown = state.read().layouts.get(inserted.session).map(|layout| {
@@ -2576,7 +2576,7 @@ fn saving_a_layout_with_a_float_keeps_its_pane_row() -> Result<(), Report<StoreE
     let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-    actor.add_pane(inserted.session, Placement::Float);
+    actor.add_pane(inserted.session, Placement::Float, None);
     let float = state
         .read()
         .layouts
@@ -2608,7 +2608,7 @@ fn closing_the_last_tiled_pane_with_floats_adds_a_shell_tab() -> Result<(), Repo
     let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-    actor.add_pane(inserted.session, Placement::Float);
+    actor.add_pane(inserted.session, Placement::Float, None);
     state.write().layouts.close_pane(inserted.pane);
 
     // When saving the layout.
@@ -2637,7 +2637,7 @@ fn save_layout_writes_the_floats_mark() -> Result<(), Report<StoreError>> {
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
-    actor.add_pane(inserted.session, Placement::Float);
+    actor.add_pane(inserted.session, Placement::Float, None);
     state
         .write()
         .layouts
@@ -2665,7 +2665,7 @@ fn save_layout_writes_the_float_layout() -> Result<(), Report<StoreError>> {
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
-    actor.add_pane(inserted.session, Placement::Float);
+    actor.add_pane(inserted.session, Placement::Float, None);
     state
         .write()
         .layouts
@@ -2809,7 +2809,7 @@ fn new_tab_saves_a_new_tab() -> Result<(), Report<StoreError>> {
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When opening a tab.
-    actor.add_pane(inserted.session, Placement::Tab);
+    actor.add_pane(inserted.session, Placement::Tab, None);
 
     // Then the store has two tabs, the second shown.
     let saved = actor.store.layouts()?;
@@ -2839,7 +2839,7 @@ fn new_tab_on_a_session_without_a_layout_opens_one_shell_tab() -> Result<(), Rep
     let (mut actor, state, inserted) = emptied_session()?;
 
     // When opening a tab.
-    actor.add_pane(inserted.session, Placement::Tab);
+    actor.add_pane(inserted.session, Placement::Tab, None);
 
     // Then the session's layout holds one pane.
     assert_eq!(
@@ -2856,7 +2856,7 @@ fn new_tab_on_a_session_without_a_layout_asks_to_attach_it() -> Result<(), Repor
     let (mut actor, _state, inserted) = emptied_session()?;
 
     // When opening a tab.
-    actor.add_pane(inserted.session, Placement::Tab);
+    actor.add_pane(inserted.session, Placement::Tab, None);
 
     // Then the frontend is asked to attach it.
     assert_eq!(
@@ -2868,12 +2868,78 @@ fn new_tab_on_a_session_without_a_layout_asks_to_attach_it() -> Result<(), Repor
 }
 
 #[rstest::rstest]
+fn resume_agent_opens_a_shown_tab_whose_pane_resumes_the_chat() -> Result<(), Report<StoreError>> {
+    // Given Claude agent `abc` in its one-pane session.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "abc")?;
+    let host = listing(Vec::new());
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When resuming it in its session.
+    actor.resume_agent(inserted.session, inserted.agent);
+
+    // Then the shown tab's pane types Claude's resume line for its chat.
+    let resume = {
+        let app = state.read();
+        app.layouts
+            .get(inserted.session)
+            .and_then(SessionLayout::focused)
+            .filter(|&pane| pane != inserted.pane)
+            .and_then(|pane| app.layouts.entry(pane))
+            .and_then(|entry| entry.resume.clone())
+    };
+    assert_eq!(
+        resume.as_deref(),
+        Some("claude --resume abc"),
+        "the new shown tab's shell should resume the agent's chat"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn resume_agent_on_a_session_without_a_layout_reports_it_ready() -> Result<(), Report<StoreError>> {
+    // Given a session whose last pane closed.
+    let (mut actor, _state, inserted) = emptied_session()?;
+
+    // When resuming its agent there.
+    actor.resume_agent(inserted.session, inserted.agent);
+
+    // Then the frontend is asked to attach it.
+    assert_eq!(
+        ready_of(&actor),
+        Some(inserted.session),
+        "the resume tab should be attached as the session's first tab"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn resume_agent_for_an_unknown_agent_adds_no_pane() -> Result<(), Report<StoreError>> {
+    // Given an agent's one-pane session.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(Vec::new());
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When resuming an agent orb doesn't know.
+    actor.resume_agent(inserted.session, AgentId(999));
+
+    // Then the session still has its one pane.
+    assert_eq!(
+        state.read().layouts.session_panes(inserted.session).len(),
+        1,
+        "a gone agent has no chat to resume"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
 fn split_on_a_session_without_a_layout_does_nothing() -> Result<(), Report<StoreError>> {
     // Given a session whose last pane closed.
     let (mut actor, state, inserted) = emptied_session()?;
 
     // When splitting its pane.
-    actor.add_pane(inserted.session, Placement::Split(Split::Right));
+    actor.add_pane(inserted.session, Placement::Split(Split::Right), None);
 
     // Then it still has no layout and no pane is added to the store.
     assert_eq!(
@@ -2896,8 +2962,8 @@ fn tiled_add_pane_lays_the_tab_out_by_count() -> Result<(), Report<StoreError>> 
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When adding two tiled panes.
-    actor.add_pane(inserted.session, Placement::Tile);
-    actor.add_pane(inserted.session, Placement::Tile);
+    actor.add_pane(inserted.session, Placement::Tile, None);
+    actor.add_pane(inserted.session, Placement::Tile, None);
 
     // Then the shown tab holds one column then two, where two right
     // splits would make three columns.
@@ -2924,7 +2990,7 @@ fn tiled_add_pane_on_a_session_without_a_layout_does_nothing() -> Result<(), Rep
     let (mut actor, state, inserted) = emptied_session()?;
 
     // When adding a tiled pane.
-    actor.add_pane(inserted.session, Placement::Tile);
+    actor.add_pane(inserted.session, Placement::Tile, None);
 
     // Then it still has no layout and no pane is added to the store.
     assert_eq!(
@@ -2977,7 +3043,7 @@ fn save_layout_writes_each_tabs_swap_layout_and_mark() -> Result<(), Report<Stor
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.next_swap_layout(inserted.session);
-    actor.add_pane(inserted.session, Placement::Split(Split::Right));
+    actor.add_pane(inserted.session, Placement::Split(Split::Right), None);
 
     // When saving its layout.
     actor.save_layout(inserted.session);
@@ -9105,7 +9171,7 @@ fn saving_a_layout_logs_each_dropped_pane_row() -> Result<(), Report<StoreError>
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
-    actor.add_pane(inserted.session, Placement::Split(Split::Right));
+    actor.add_pane(inserted.session, Placement::Split(Split::Right), None);
     state.write().layouts.close_pane(inserted.pane);
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("orb.log");

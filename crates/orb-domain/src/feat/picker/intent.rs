@@ -25,7 +25,7 @@ use crate::feat::sessions::intent::{
     delete_session, filter_to, open_colony_name, pick_project, remove_project, settle_session,
     still_deletable,
 };
-use crate::feat::sessions::state::Project;
+use crate::feat::sessions::state::{PaneLaunch, Project};
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
 use crate::feat::sidebar;
 use crate::ids::{AgentId, PaneId, SessionId};
@@ -572,10 +572,9 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
         }
         Some(PickerKind::Search { .. }) => {
             let valid = validate_pick_session(state);
-            let session =
-                close_picker(state).and_then(|picker| picker.picked_session(&state.sessions));
-            match (valid, session) {
-                (Ok(()), Some(session)) => pick_session(state, session),
+            let agent = close_picker(state).and_then(|picker| picker.selected_agent_id());
+            match (valid, agent) {
+                (Ok(()), Some(agent)) => pick_hit(state, agent),
                 _ => vec![],
             }
         }
@@ -798,9 +797,38 @@ pub(crate) fn pick(
     commands
 }
 
-/// Jumps to `session`, picked in the search picker: puts the cursor on it
-/// and attaches like `⏎` on its row, recording the move as a jump to the
-/// agent in its focused pane, else its card.
+/// Jumps to `agent`, whose hit was picked in the search picker: to its own
+/// pane while it still runs there, else to the session it last ran in, with
+/// a new tab there that resumes its conversation. Nothing happens for an
+/// agent that's gone or never ran in a session.
+fn pick_hit(state: &mut AppState, agent: AgentId) -> Vec<Command> {
+    let Some(found) = state.sessions.all_agents().find(|shown| shown.id == agent) else {
+        return vec![];
+    };
+    let (launch, home) = (found.pane.clone(), found.home());
+    match (launch, home) {
+        (Some(PaneLaunch { pane, session }), _)
+            if state.sessions.runs_agent(session, pane, &state.layouts) =>
+        {
+            pick_agent(state, session, pane)
+        }
+        (_, Some(session)) => {
+            let resume = Command::Sessions(SessionsCommand::ResumeAgent { session, agent });
+            let mut commands = pick_session(state, session);
+            let new_tab = Command::Sessions(SessionsCommand::NewTab(session));
+            match commands.iter_mut().find(|command| **command == new_tab) {
+                Some(slot) => *slot = resume,
+                None => commands.push(resume),
+            }
+            commands
+        }
+        _ => vec![],
+    }
+}
+
+/// Jumps to `session`: puts the cursor on it and attaches like `⏎` on its
+/// row, recording the move as a jump to the agent in its focused pane, else
+/// its card.
 fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
     let from = state.jump_from();
     let entry = state.entry_row(session);

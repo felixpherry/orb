@@ -16,8 +16,9 @@ use crate::intent_handler::test_support::{
     close_agent_1s_pane, colony_with_colonists, highlight, in_root, jumping, left_pane,
     left_pane_showing_1, managing, named, on_agent, on_agent_in_another_tab, open_sessions,
     picked_worktree, picking_agent_1, project_row, removing_alpha, rename_text, renaming,
-    searching, settle, shown_tab_name, state_at, state_with, stopped, two_projects, with_layout,
-    with_projects, worktree_picker_after, worktree_state,
+    searching, settle, shown_focus, shown_tab_name, state_at, state_with, stopped,
+    two_agents_from_sidebar, two_projects, with_layout, with_projects, worktree_picker_after,
+    worktree_state,
 };
 use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 use std::path::{Path, PathBuf};
@@ -4431,34 +4432,84 @@ fn typing_in_the_session_picker_returns_no_search() {
     );
 }
 
+/// [`two_agents_from_sidebar`] on session 1's card with pane 1 focused,
+/// and the search picker on a hit in agent 2, whose pane 2 sits beside it.
+fn searching_a_live_agent_beside_the_focus() -> AppState {
+    let mut state = two_agents_from_sidebar(on_agent(1), &[]);
+    state.layouts.reveal(SessionId(1), PaneId(1));
+    IntentHandler::handle(&Intent::OpenSearch, &mut state);
+    let mut state = typed(state, &['f', 'i', 'x']);
+    if let Some(picker) = &mut state.picker {
+        picker.show_hits("fix", vec![search_hit(2, 2)], false);
+    }
+    state
+}
+
 #[rstest::rstest]
-fn picking_a_hit_moves_the_cursor_to_its_agent() {
-    // Given the search picker on a hit in agent 1, opened on agent 2.
-    let mut state = searching_a_hit_in(1);
+fn search_pick_on_a_live_agent_moves_the_keys_into_its_pane() {
+    // Given session 1 with pane 1 focused, and the search picker on a hit
+    // in agent 2, which runs in pane 2.
+    let mut state = searching_a_live_agent_beside_the_focus();
 
     // When confirming.
     IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then the cursor is on agent 1.
+    // Then the cursor is on agent 2's row and its pane has the keys.
     assert_eq!(
-        state.sessions.cursor,
-        Some(on_agent(1)),
-        "picking a hit should select its agent"
+        (state.sessions.cursor, state.focus, shown_focus(&state)),
+        (Some(agent_row(1, 2)), Focus::Pane, Some(PaneId(2))),
+        "picking a hit should move the keys into its agent's own pane"
     );
 }
 
 #[rstest::rstest]
-fn picking_a_hit_returns_attach_for_its_agent() {
-    // Given the search picker on a hit in agent 1, opened on agent 2.
-    let mut state = searching_a_hit_in(1);
+fn search_pick_on_a_live_agent_returns_attach_for_its_session() {
+    // Given the search picker on a hit in agent 2, which runs in pane 2 of
+    // session 1.
+    let mut state = searching_a_live_agent_beside_the_focus();
 
     // When confirming.
     let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then the loop attaches to agent 1.
+    // Then the loop attaches to session 1.
     assert!(
         commands.contains(&Command::Attach(SessionId(1))),
-        "picking a hit should attach to its agent"
+        "picking a hit should attach to its agent's session"
+    );
+}
+
+#[rstest::rstest]
+fn search_pick_on_a_live_agent_records_a_jump() {
+    // Given the search picker opened on session 1's card, on a hit in
+    // agent 2, which runs in pane 2 of session 1.
+    let mut state = searching_a_live_agent_beside_the_focus();
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the card left, then agent 2's row, are recorded.
+    assert_eq!(
+        state.jumps.entries(),
+        [on_agent(1), agent_row(1, 2)],
+        "picking a hit should record a jump to its agent"
+    );
+}
+
+#[rstest::rstest]
+fn search_pick_on_a_settled_agent_unsettles_its_session() {
+    // Given the search picker on a hit in agent 1, whose session is
+    // settled.
+    let mut state = settle(searching_a_hit_in(1), &[1]);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then session 1 comes back from the Settled shelf.
+    assert!(
+        commands.contains(&Command::Sessions(SessionsCommand::UnsettleSession(
+            SessionId(1)
+        ))),
+        "picking a hit in a settled session should un-settle it"
     );
 }
 
@@ -4516,6 +4567,51 @@ fn picking_a_hit_of_an_ended_agent_attaches_its_session() {
     assert!(
         commands.contains(&Command::Attach(SessionId(1))),
         "a hit on an ended agent should open its session"
+    );
+}
+
+#[rstest::rstest]
+fn search_pick_on_an_ended_agent_returns_resume_agent() {
+    // Given the search picker on a hit in agent 1, which ended in
+    // session 1, whose layout is still there.
+    let mut state = searching_an_ended_agent(Some(SessionId(1)));
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the last command resumes agent 1 in a new tab of session 1.
+    assert_eq!(
+        commands.last(),
+        Some(&Command::Sessions(SessionsCommand::ResumeAgent {
+            session: SessionId(1),
+            agent: AgentId(1),
+        })),
+        "a hit on an ended agent should resume its chat in its session"
+    );
+}
+
+#[rstest::rstest]
+fn search_pick_on_an_ended_agent_without_a_layout_asks_no_new_tab() {
+    // Given the search picker on a hit in agent 1, which ended in
+    // session 1, whose last pane has closed.
+    let mut state = searching_an_ended_agent(Some(SessionId(1)));
+    state.layouts.close_pane(PaneId(1));
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the resume tab is asked for instead of a plain shell tab.
+    let asks = |command: SessionsCommand| commands.contains(&Command::Sessions(command));
+    assert_eq!(
+        (
+            asks(SessionsCommand::ResumeAgent {
+                session: SessionId(1),
+                agent: AgentId(1),
+            }),
+            asks(SessionsCommand::NewTab(SessionId(1))),
+        ),
+        (true, false),
+        "the resume tab should be the session's first tab, with no stray shell"
     );
 }
 
