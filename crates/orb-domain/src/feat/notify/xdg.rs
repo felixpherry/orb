@@ -3,17 +3,18 @@
 //!
 //! Each agent has at most one notification on screen: a newer one about the
 //! same agent replaces the older instead of stacking. Clicking a
-//! notification takes the user back to orb, but only the latest one about its
-//! agent does; a click on one that has since been replaced does nothing.
+//! notification takes the user back to orb and shows the agent's pane, but
+//! only the latest one about its agent does; a click on one that has since
+//! been replaced does nothing.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use error_stack::Report;
 
-use super::click::{ClickRunner, ClickTarget, focus_orb};
+use super::click::{ClickRunner, ClickTarget, focus_orb, show_pane};
 use super::notifier::{Notifier, NotifyError, Urgency};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, PaneId};
 
 /// One notification as the desktop is asked to show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +66,7 @@ struct Ledger {
 
 /// Shows notifications on a freedesktop notification server: one per
 /// agent, a newer one replacing the older, whose click takes the user back
-/// to orb.
+/// to orb and the agent's pane.
 #[derive(Clone)]
 pub struct XdgNotifier {
     desktop: Arc<dyn Desktop>,
@@ -102,6 +103,7 @@ impl Notifier for XdgNotifier {
         body: &str,
         urgency: Urgency,
         agent: AgentId,
+        pane: Option<PaneId>,
     ) -> Result<(), Report<NotifyError>> {
         let (replaces, generation) = {
             let mut ledger = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
@@ -121,6 +123,7 @@ impl Notifier for XdgNotifier {
                     .is_some_and(|shown| shown.generation == generation);
                 if latest {
                     focus_orb(&click, runner.as_ref());
+                    show_pane(&click, pane, runner.as_ref());
                 }
             })
         };
@@ -204,10 +207,10 @@ mod tests {
     use error_stack::Report;
 
     use super::{Desktop, XdgNotification, XdgNotifier};
-    use crate::feat::notify::click::{ClickRunner, ClickTarget, NiriTarget};
+    use crate::feat::notify::click::{ClickRunner, ClickTarget, NiriTarget, OrbCli};
     use crate::feat::notify::notifier::{Notifier, NotifierService, NotifyError, Urgency};
     use crate::feat::sessions::state::{Notice, NoticeKind};
-    use crate::ids::AgentId;
+    use crate::ids::{AgentId, PaneId};
 
     /// One program run: the program and its arguments.
     type Call = (PathBuf, Vec<String>);
@@ -318,13 +321,17 @@ mod tests {
         }
     }
 
-    /// orb under niri, its terminal process 900.
+    /// orb at `/o/orb` under niri, its terminal process 900.
     fn click_target() -> ClickTarget {
         ClickTarget {
             kitty: None,
             niri: Some(NiriTarget {
                 niri: PathBuf::from("/n/niri"),
                 ancestors: vec![1200, 900, 1],
+            }),
+            orb: Some(OrbCli {
+                program: PathBuf::from("/o/orb"),
+                home: PathBuf::from("/h"),
             }),
         }
     }
@@ -339,6 +346,7 @@ mod tests {
             kind,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
+            pane: Some(PaneId(12)),
         }
     }
 
@@ -382,10 +390,16 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1))?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1), None)?;
 
         // When notifying about agent 1 again.
-        notifier.notify("orb · x", "Needs input", Urgency::Critical, AgentId(1))?;
+        notifier.notify(
+            "orb · x",
+            "Needs input",
+            Urgency::Critical,
+            AgentId(1),
+            None,
+        )?;
 
         // Then the second notification replaces the first.
         let replaces = desktop.shown().get(1).and_then(|shown| shown.replaces);
@@ -399,10 +413,10 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1))?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1), None)?;
 
         // When notifying about agent 2.
-        notifier.notify("orb · y", "Finished", Urgency::Normal, AgentId(2))?;
+        notifier.notify("orb · y", "Finished", Urgency::Normal, AgentId(2), None)?;
 
         // Then the second notification replaces nothing.
         let shown = desktop.shown();
@@ -418,7 +432,13 @@ mod tests {
         // Given an xdg notifier that has shown a notification about agent 1.
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
-        notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, AgentId(1))?;
+        notifier(&desktop, &runner).notify(
+            "orb · x",
+            "Finished",
+            Urgency::Normal,
+            AgentId(1),
+            None,
+        )?;
 
         // When the user clicks it.
         desktop.click(0);
@@ -433,11 +453,51 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn click_runs_orb_pane_focus_after_niri() -> Result<(), Report<NotifyError>> {
+        // Given an xdg notifier that has shown a notification about agent 1
+        // in pane 12.
+        let desktop = Arc::new(FakeDesktop::default());
+        let runner = Arc::new(RecordingRunner::default());
+        notifier(&desktop, &runner).notify(
+            "orb · x",
+            "Needs input",
+            Urgency::Critical,
+            AgentId(1),
+            Some(PaneId(12)),
+        )?;
+
+        // When the user clicks it.
+        desktop.click(0);
+
+        // Then niri raises orb's window, then orb shows pane 12.
+        let list_windows = (
+            PathBuf::from("/n/niri"),
+            ["msg", "--json", "windows"].map(str::to_owned).to_vec(),
+        );
+        let show_pane = (
+            PathBuf::from("/o/orb"),
+            ["pane", "focus", "12"].map(str::to_owned).to_vec(),
+        );
+        assert_eq!(
+            runner.calls(),
+            [list_windows, focus_window(), show_pane],
+            "the click's steps, in order"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn dismissed_notification_runs_no_click_steps() -> Result<(), Report<NotifyError>> {
         // Given an xdg notifier that has shown a notification about agent 1.
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
-        notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, AgentId(1))?;
+        notifier(&desktop, &runner).notify(
+            "orb · x",
+            "Finished",
+            Urgency::Normal,
+            AgentId(1),
+            None,
+        )?;
 
         // When the user dismisses it.
         desktop.drop_click(0);
@@ -457,8 +517,13 @@ mod tests {
         let runner = Arc::new(RecordingRunner::default());
 
         // When notifying about agent 1.
-        let result =
-            notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, AgentId(1));
+        let result = notifier(&desktop, &runner).notify(
+            "orb · x",
+            "Finished",
+            Urgency::Normal,
+            AgentId(1),
+            None,
+        );
 
         // Then it reports the failure and runs no click step.
         assert!(
@@ -474,8 +539,20 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1))?;
-        notifier.notify("orb · x", "Needs input", Urgency::Critical, AgentId(1))?;
+        notifier.notify(
+            "orb · x",
+            "Finished",
+            Urgency::Normal,
+            AgentId(1),
+            Some(PaneId(12)),
+        )?;
+        notifier.notify(
+            "orb · x",
+            "Needs input",
+            Urgency::Critical,
+            AgentId(1),
+            Some(PaneId(12)),
+        )?;
 
         // When the first notification's click arrives.
         desktop.click(0);

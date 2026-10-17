@@ -3,9 +3,13 @@
 //!
 //! A click makes macOS relaunch terminal-notifier, which runs the
 //! notification's `-execute` line with `/bin/sh` and a bare `PATH`. So the
-//! line names `kitten` by its full path: kitty focuses orb's window by its
-//! id. Without kitty's socket or orb's window there is no `-execute`. Every
-//! word of the line is quoted for `sh`, so no path can change what it runs.
+//! line names every program by its full path: kitty focuses orb's window by
+//! its id, then orb's own executable shows the agent's pane with `orb pane
+//! focus`, run through `/usr/bin/env` with the user's `HOME` so it finds
+//! orb's socket. A part orb can't name is left out (kitty without its socket
+//! or orb's window; orb without the pane or its own path), and with neither
+//! there is no `-execute`. Every word of the line is quoted for `sh`, so no
+//! path can change what it runs.
 //!
 //! terminal-notifier reads its options through `NSUserDefaults`, which parses
 //! a value starting with `(`, `{` or `"` as a property list and takes one
@@ -25,7 +29,7 @@ use error_stack::Report;
 
 use super::click::ClickTarget;
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, PaneId};
 
 /// Shows notifications with `terminal-notifier`, whose click runs a command,
 /// and through `fallback` when terminal-notifier exits unsuccessfully.
@@ -47,10 +51,10 @@ impl TerminalNotifierNotifier {
 
     /// terminal-notifier's arguments to show `title` and `body` about
     /// `agent`, replacing an earlier one about it, whose click goes back to
-    /// orb.
-    fn args(&self, title: &str, body: &str, agent: AgentId) -> Vec<OsString> {
+    /// orb and `pane`.
+    fn args(&self, title: &str, body: &str, agent: AgentId, pane: Option<PaneId>) -> Vec<OsString> {
         let group = format!("orb-{}", agent.0);
-        let execute = self.click_command();
+        let execute = self.click_command(pane);
         [
             ("-title", Some(title)),
             ("-message", Some(body)),
@@ -64,21 +68,34 @@ impl TerminalNotifierNotifier {
         .collect()
     }
 
-    /// The `sh` line a click runs: kitty focuses orb's window; `None` without
-    /// kitty or orb's window.
-    fn click_command(&self) -> Option<String> {
-        let kitty = self.click.kitty.as_ref()?;
-        let matching = format!("id:{}", kitty.window?);
-        let kitten = kitty.kitten.to_string_lossy();
-        Some(sh_words(&[
-            &kitten,
-            "@",
-            "--to",
-            &kitty.socket,
-            "focus-window",
-            "--match",
-            &matching,
-        ]))
+    /// The `sh` line a click runs: kitty focuses orb's window, then orb
+    /// shows `pane` with the keys in it. Each part needs what it names;
+    /// `None` when neither part can run.
+    fn click_command(&self, pane: Option<PaneId>) -> Option<String> {
+        let kitty = self.click.kitty.as_ref().and_then(|kitty| {
+            let matching = format!("id:{}", kitty.window?);
+            Some(sh_words(&[
+                &kitty.kitten.to_string_lossy(),
+                "@",
+                "--to",
+                &kitty.socket,
+                "focus-window",
+                "--match",
+                &matching,
+            ]))
+        });
+        let orb = self.click.orb.as_ref().zip(pane).map(|(orb, pane)| {
+            sh_words(&[
+                "/usr/bin/env",
+                &format!("HOME={}", orb.home.display()),
+                &orb.program.to_string_lossy(),
+                "pane",
+                "focus",
+                &pane.0.to_string(),
+            ])
+        });
+        let line = [kitty, orb].into_iter().flatten().collect::<Vec<_>>();
+        (!line.is_empty()).then(|| line.join("; "))
     }
 }
 
@@ -93,15 +110,16 @@ impl Notifier for TerminalNotifierNotifier {
         body: &str,
         urgency: Urgency,
         agent: AgentId,
+        pane: Option<PaneId>,
     ) -> Result<(), Report<NotifyError>> {
         let resend = {
             let fallback = Arc::clone(&self.fallback);
             let (title, body) = (title.to_owned(), body.to_owned());
             move || {
-                let _ = fallback.notify(&title, &body, urgency, agent);
+                let _ = fallback.notify(&title, &body, urgency, agent, pane);
             }
         };
-        spawn_detached(&self.program, self.args(title, body, agent), resend)
+        spawn_detached(&self.program, self.args(title, body, agent, pane), resend)
     }
 }
 
@@ -133,9 +151,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::TerminalNotifierNotifier;
-    use crate::feat::notify::click::{ClickTarget, Kitty};
+    use crate::feat::notify::click::{ClickTarget, Kitty, OrbCli};
     use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
-    use crate::ids::AgentId;
+    use crate::ids::{AgentId, PaneId};
 
     /// What a fallback notifier was asked to show: title, body and agent.
     type Resent = (String, String, AgentId);
@@ -155,6 +173,7 @@ mod tests {
             body: &str,
             _urgency: Urgency,
             agent: AgentId,
+            _pane: Option<PaneId>,
         ) -> Result<(), Report<NotifyError>> {
             let _ = self.0.send((title.to_owned(), body.to_owned(), agent));
             Ok(())
@@ -201,7 +220,7 @@ mod tests {
         let notifier = notifier(ClickTarget::default());
 
         // When building the arguments for agent 7.
-        let args = notifier.args("-orb · (x) \"y\"", "Finished", AgentId(7));
+        let args = notifier.args("-orb · (x) \"y\"", "Finished", AgentId(7), None);
 
         // Then title, body and the agent's group each carry one leading backslash.
         let expected: Vec<OsString> = [
@@ -224,10 +243,11 @@ mod tests {
         let notifier = notifier(ClickTarget {
             kitty: Some(kitty(Some(9))),
             niri: None,
+            orb: None,
         });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", AgentId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7), None);
 
         // Then the value after -execute starts with one backslash.
         let value = args
@@ -246,10 +266,11 @@ mod tests {
         let notifier = notifier(ClickTarget {
             kitty: Some(kitty(Some(9))),
             niri: None,
+            orb: None,
         });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", AgentId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7), None);
 
         // Then -execute has kitty focus window 9.
         assert_eq!(
@@ -264,13 +285,128 @@ mod tests {
     #[case::no_kitty(None)]
     fn click_command_is_left_out_without_orbs_kitty_window(#[case] kitty: Option<Kitty>) {
         // Given a notifier that can't name orb's kitty window.
-        let notifier = notifier(ClickTarget { kitty, niri: None });
+        let notifier = notifier(ClickTarget {
+            kitty,
+            ..ClickTarget::default()
+        });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", AgentId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7), None);
 
         // Then there is no -execute.
         assert_eq!(execute(&args), None, "no click command in {args:?}");
+    }
+
+    /// orb at `/o/orb`, under home `/h`.
+    fn orb() -> OrbCli {
+        OrbCli {
+            program: PathBuf::from("/o/orb"),
+            home: PathBuf::from("/h"),
+        }
+    }
+
+    /// kitty's focus of orb's window 9, as the `-execute` line says it.
+    const FOCUS_KITTY: &str =
+        "'/k/kitten' '@' '--to' 'unix:/tmp/kitty-1' 'focus-window' '--match' 'id:9'";
+
+    /// orb's focus of pane 12, as the `-execute` line says it.
+    const SHOW_PANE: &str = "'/usr/bin/env' 'HOME=/h' '/o/orb' 'pane' 'focus' '12'";
+
+    #[rstest::rstest]
+    fn click_line_focuses_kitty_then_shows_the_pane() {
+        // Given a notifier knowing orb's kitty window 9 and the running orb.
+        let notifier = notifier(ClickTarget {
+            kitty: Some(kitty(Some(9))),
+            orb: Some(orb()),
+            ..ClickTarget::default()
+        });
+
+        // When building the arguments for the agent in pane 12.
+        let args = notifier.args("orb · x", "Finished", AgentId(7), Some(PaneId(12)));
+
+        // Then -execute focuses kitty's window, then has orb show pane 12.
+        assert_eq!(
+            execute(&args),
+            Some(format!("{FOCUS_KITTY}; {SHOW_PANE}")),
+            "the -execute line in {args:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_line_without_kitty_only_shows_the_pane() {
+        // Given a notifier knowing the running orb but not orb's kitty.
+        let notifier = notifier(ClickTarget {
+            orb: Some(orb()),
+            ..ClickTarget::default()
+        });
+
+        // When building the arguments for the agent in pane 12.
+        let args = notifier.args("orb · x", "Finished", AgentId(7), Some(PaneId(12)));
+
+        // Then -execute only has orb show pane 12.
+        assert_eq!(
+            execute(&args).as_deref(),
+            Some(SHOW_PANE),
+            "the -execute line in {args:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_line_without_a_pane_is_kittys_alone() {
+        // Given a notifier knowing orb's kitty window 9 and the running orb.
+        let notifier = notifier(ClickTarget {
+            kitty: Some(kitty(Some(9))),
+            orb: Some(orb()),
+            ..ClickTarget::default()
+        });
+
+        // When building the arguments for an agent whose pane ended.
+        let args = notifier.args("orb · x", "Finished", AgentId(7), None);
+
+        // Then -execute only focuses kitty's window.
+        assert_eq!(
+            execute(&args).as_deref(),
+            Some(FOCUS_KITTY),
+            "the -execute line in {args:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_line_runs_orb_with_home_and_the_pane() -> std::io::Result<()> {
+        // Given a recording orb, and a home whose name needs quoting.
+        let root = TempDir::new()?;
+        let log = root.path().join("log");
+        let program = root.path().join("orb");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$HOME\" \"$@\" >> '{}'\n",
+                log.display()
+            ),
+        )?;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+        let home = root.path().join("it's $home");
+        let click = ClickTarget {
+            orb: Some(OrbCli {
+                program,
+                home: home.clone(),
+            }),
+            ..ClickTarget::default()
+        };
+        let args = notifier(click).args("orb · x", "Finished", AgentId(7), Some(PaneId(12)));
+
+        // When sh runs the -execute line with no HOME.
+        let line = execute(&args).unwrap_or_default();
+        Command::new("/bin/sh")
+            .args(["-c", &line])
+            .env_remove("HOME")
+            .status()?;
+
+        // Then orb ran under the user's home with `pane focus 12`.
+        let recorded = fs::read_to_string(&log)?;
+        let expected = format!("{}\npane\nfocus\n12\n", home.display());
+        assert_eq!(recorded, expected, "what orb got from the click");
+        Ok(())
     }
 
     /// Writes an executable `name` into `dir` that appends its arguments, one
@@ -304,9 +440,9 @@ mod tests {
                 socket: socket.to_owned(),
                 window: Some(9),
             }),
-            niri: None,
+            ..ClickTarget::default()
         };
-        let args = notifier(click).args("orb · x", "Finished", AgentId(7));
+        let args = notifier(click).args("orb · x", "Finished", AgentId(7), None);
 
         // When sh runs the -execute line in the temporary directory.
         let line = execute(&args).unwrap_or_default();
@@ -345,7 +481,7 @@ mod tests {
         );
 
         // When notifying that agent 7 finished.
-        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7))?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7), None)?;
 
         // Then the fallback is asked to show the same notification.
         assert_eq!(
@@ -369,7 +505,7 @@ mod tests {
         );
 
         // When notifying that agent 7 finished.
-        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7))?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7), None)?;
 
         // Then the fallback is asked to show nothing.
         assert!(

@@ -718,6 +718,7 @@ pub(super) fn notice(sessions: &Sessions, row: &AgentRow, status: AgentStatus) -
         kind: notice_kind(agent.status, status)?,
         project: project.title.clone(),
         title: display_title(row).unwrap_or_else(|| NEW_AGENT.to_owned()),
+        pane: row.pane_id,
     })
 }
 

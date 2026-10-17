@@ -214,6 +214,8 @@ pub struct Notice {
     pub project: String,
     /// The agent's title, else "New agent".
     pub title: String,
+    /// The agent's pane when the notice was made; `None` once its pane ended.
+    pub pane: Option<PaneId>,
 }
 
 /// One session orb started.

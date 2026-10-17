@@ -6866,7 +6866,10 @@ async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreE
 async fn turn_end_queues_a_finished_notice_naming_project_and_agent()
 -> Result<(), Report<StoreError>> {
     // Given orb's agent titled "Parser fix".
-    let (store, id) = store_with_agent("aa")?;
+    let store = Store::open_in_memory()?;
+    let Seeded {
+        agent: id, pane, ..
+    } = insert_agent(&store, "aa")?;
     resave(&store, "aa", |row| AgentRow {
         custom_title: Some("Parser fix".to_owned()),
         ..row
@@ -6885,9 +6888,33 @@ async fn turn_end_queues_a_finished_notice_naming_project_and_agent()
             kind: NoticeKind::Finished,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
+            pane: Some(pane),
         }],
         "the ended turn's notice"
     );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn notice_carries_the_agents_pane() -> Result<(), Report<StoreError>> {
+    // Given an agent running in its pane, whose turn is running.
+    let store = Store::open_in_memory()?;
+    let Seeded { pane, .. } = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+
+    // When a poll sees it start needing an approval.
+    host.set_running(Ok(vec![record("aa", AgentStatus::NeedsApproval)]));
+    actor.poll().await;
+
+    // Then the notice names the agent's pane.
+    let panes: Vec<Option<PaneId>> = notices_of(&actor)
+        .into_iter()
+        .map(|notice| notice.pane)
+        .collect();
+    assert_eq!(panes, [Some(pane)], "a click on it should open that pane");
     Ok(())
 }
 

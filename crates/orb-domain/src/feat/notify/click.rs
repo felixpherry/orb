@@ -1,5 +1,6 @@
 //! Where a click on a notification takes the user: the kitty window orb runs
-//! in, and on Linux the niri window showing it. On Linux orb runs the click's
+//! in, and on Linux the niri window showing it, then the agent's pane, which
+//! the running orb shows with `orb pane focus`. On Linux orb runs the click's
 //! steps itself.
 
 use std::ffi::{OsStr, OsString};
@@ -12,6 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::common::{Finished, run_within};
+use crate::ids::PaneId;
 
 /// Where a click on a notification takes the user: what orb found at startup.
 #[derive(Debug, Clone, Default)]
@@ -20,6 +22,17 @@ pub struct ClickTarget {
     pub kitty: Option<Kitty>,
     /// niri, the compositor orb's window is on; `None` without `NIRI_SOCKET` or `niri`.
     pub niri: Option<NiriTarget>,
+    /// The running orb; `None` when orb couldn't find its own executable.
+    pub orb: Option<OrbCli>,
+}
+
+/// The running orb, for a click to show an agent's pane with `orb pane focus`.
+#[derive(Debug, Clone)]
+pub struct OrbCli {
+    /// orb's own executable.
+    pub program: PathBuf,
+    /// The user's home, which the client finds orb's socket under.
+    pub home: PathBuf,
 }
 
 /// The kitty orb runs in, driven by its remote control.
@@ -95,6 +108,18 @@ pub fn focus_orb(click: &ClickTarget, runner: &dyn ClickRunner) {
     }
 }
 
+/// Shows `pane` with the keys in it, through the running orb's `orb pane
+/// focus <pane>`. Skipped without `pane` or the running orb; a pane orb no
+/// longer shows is refused by orb itself.
+pub fn show_pane(click: &ClickTarget, pane: Option<PaneId>, runner: &dyn ClickRunner) {
+    if let (Some(orb), Some(pane)) = (&click.orb, pane) {
+        runner.run(
+            &orb.program,
+            &os_args(&["pane", "focus", &pane.0.to_string()]),
+        );
+    }
+}
+
 /// `words` as a program's arguments.
 fn os_args(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
@@ -138,7 +163,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
-    use super::{ClickRunner, ClickTarget, NiriTarget, focus_orb, niri_window};
+    use super::{ClickRunner, ClickTarget, NiriTarget, OrbCli, focus_orb, niri_window, show_pane};
+    use crate::ids::PaneId;
 
     /// One program run: the program and its arguments.
     type Call = (PathBuf, Vec<String>);
@@ -207,6 +233,7 @@ mod tests {
                 niri: PathBuf::from("/n/niri"),
                 ancestors: ANCESTORS.to_vec(),
             }),
+            orb: None,
         }
     }
 
@@ -266,5 +293,59 @@ mod tests {
 
         // Then no step runs.
         assert!(runner.calls().is_empty(), "nothing to raise without niri");
+    }
+
+    /// orb at `/o/orb`, under home `/h`.
+    fn orb_click() -> ClickTarget {
+        ClickTarget {
+            orb: Some(OrbCli {
+                program: PathBuf::from("/o/orb"),
+                home: PathBuf::from("/h"),
+            }),
+            ..ClickTarget::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn show_pane_runs_orb_with_the_pane() {
+        // Given the running orb.
+        let runner = FakeRunner::new(WINDOWS);
+
+        // When the click shows pane 12.
+        show_pane(&orb_click(), Some(PaneId(12)), &runner);
+
+        // Then orb is asked to focus pane 12.
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                PathBuf::from("/o/orb"),
+                ["pane", "focus", "12"].map(str::to_owned).to_vec(),
+            )],
+            "the click runs `orb pane focus 12`"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_pane_without_orb_runs_nothing() {
+        // Given a click that doesn't know the running orb.
+        let runner = FakeRunner::new(WINDOWS);
+
+        // When the click shows pane 12.
+        show_pane(&ClickTarget::default(), Some(PaneId(12)), &runner);
+
+        // Then nothing runs.
+        assert!(runner.calls().is_empty(), "no orb to ask without its path");
+    }
+
+    #[rstest::rstest]
+    fn show_pane_without_a_pane_runs_nothing() {
+        // Given the running orb.
+        let runner = FakeRunner::new(WINDOWS);
+
+        // When the click has no pane to show.
+        show_pane(&orb_click(), None, &runner);
+
+        // Then nothing runs.
+        assert!(runner.calls().is_empty(), "no pane to show");
     }
 }

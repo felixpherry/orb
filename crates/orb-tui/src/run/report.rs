@@ -200,13 +200,15 @@ impl App {
 
     /// Plays `notice`'s sound on a thread of its own: a request always, a
     /// finished turn unless orb is focused and the agent's pane is on
-    /// screen. Then, while orb's terminal isn't focused, sends `notice` on a
-    /// thread of its own (the desktop's notification server can be slow to
-    /// answer); while it is, the sidebar already shows it and it's dropped.
+    /// screen. Then, while orb's terminal is focused, names an agent off
+    /// screen that started waiting on the user in the message box (see
+    /// [`AppState::ping_text`]); while it isn't, sends `notice` on a thread
+    /// of its own (the desktop's notification server can be slow to answer).
     /// A sound that can't play or a notice that can't be sent is logged and
     /// dropped.
-    fn announce(&self, notice: Notice) {
-        let looking = self.focused && self.state.read().agent_on_screen(notice.agent);
+    fn announce(&mut self, notice: Notice) {
+        let on_screen = self.state.read().agent_on_screen(notice.agent);
+        let looking = self.focused && on_screen;
         if let Some(sound) = sound_for(notice.kind, looking) {
             let sounds = self.sounds.clone();
             let log = self.log.clone();
@@ -222,6 +224,12 @@ impl App {
             }
         }
         if self.focused {
+            let ping = (!on_screen)
+                .then(|| self.state.read().ping_text(&notice))
+                .flatten();
+            if let Some(text) = ping {
+                self.toasts.notice(text, Instant::now());
+            }
             return;
         }
         let notifier = self.notifier.clone();

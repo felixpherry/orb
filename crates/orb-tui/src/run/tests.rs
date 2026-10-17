@@ -2017,6 +2017,7 @@ impl orb_domain::feat::notify::notifier::Notifier for FailingNotifier {
         _: &str,
         _: orb_domain::feat::notify::notifier::Urgency,
         _: AgentId,
+        _: Option<PaneId>,
     ) -> Result<(), error_stack::Report<orb_domain::feat::notify::notifier::NotifyError>> {
         Err(
             error_stack::Report::new(orb_domain::feat::notify::notifier::NotifyError)
@@ -2041,6 +2042,7 @@ fn a_failed_desktop_notification_is_logged() -> io::Result<()> {
             kind: orb_domain::feat::sessions::state::NoticeKind::Finished,
             project: "orb".to_owned(),
             title: "Fix it".to_owned(),
+            pane: None,
         },
     ));
 
@@ -2147,6 +2149,7 @@ fn notice_of(kind: orb_domain::feat::sessions::state::NoticeKind) -> Outcome {
         kind,
         project: "orb".to_owned(),
         title: "Fix it".to_owned(),
+        pane: Some(PaneId(1)),
     })
 }
 
@@ -2234,6 +2237,81 @@ fn a_sound_that_cant_play_is_logged() -> io::Result<()> {
     assert!(
         content.contains("couldn't play a sound"),
         "the failed sound should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+/// Names agent 1's session (see [`watching_agent`]) "fix-login".
+fn name_fix_login(test: &LoopTest) {
+    if let Some(session) = test.state.write().sessions.sessions.first_mut() {
+        session.name = Some("fix-login".to_owned());
+    }
+}
+
+#[rstest::rstest]
+fn focused_orb_names_an_agent_waiting_in_another_tab() -> io::Result<()> {
+    // Given a focused orb with agent 1's pane in a tab behind the shown one.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, false);
+    name_fix_login(&test);
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box names its project and session.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Info, "orb/fix-login needs approval", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "an agent waiting off screen is named in the info box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn focused_orb_names_no_agent_waiting_on_screen() -> io::Result<()> {
+    // Given a focused orb showing agent 1's pane.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, true);
+    name_fix_login(&test);
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box stays empty.
+    assert!(
+        test.app.toasts.shown(Instant::now()).is_none(),
+        "the user already sees an agent on screen"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn unfocused_orb_shows_no_in_app_notice() -> io::Result<()> {
+    // Given an unfocused orb with agent 1's pane in a tab behind the shown one.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, false);
+    name_fix_login(&test);
+    test.app.focused = false;
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box stays empty.
+    assert!(
+        test.app.toasts.shown(Instant::now()).is_none(),
+        "the desktop notification speaks while orb isn't focused"
     );
     Ok(())
 }
