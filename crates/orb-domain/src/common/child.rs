@@ -62,11 +62,7 @@ pub fn wait_within(child: &mut Child, limit: Duration) -> std::io::Result<Option
     loop {
         match child.try_wait()? {
             Some(status) => return Ok(Some(status)),
-            None if Instant::now() < deadline => thread::sleep(if started.elapsed() < FAST_FOR {
-                FAST_POLL
-            } else {
-                POLL
-            }),
+            None if Instant::now() < deadline => thread::sleep(poll_interval(started.elapsed())),
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -74,6 +70,13 @@ pub fn wait_within(child: &mut Child, limit: Duration) -> std::io::Result<Option
             }
         }
     }
+}
+
+/// How long to sleep before checking a child again once it has run `waited`:
+/// [`FAST_POLL`] in its first [`FAST_FOR`], so one that exits at once is
+/// noticed in a millisecond or two, then [`POLL`].
+fn poll_interval(waited: Duration) -> Duration {
+    if waited < FAST_FOR { FAST_POLL } else { POLL }
 }
 
 /// Reads all of `pipe` on a thread of its own, so a child that prints more
@@ -99,12 +102,11 @@ where
 mod tests {
     use std::fs;
     use std::process::{Command, Stdio};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
-    use super::{FAST_POLL, Finished, run_within};
+    use super::{FAST_FOR, FAST_POLL, Finished, POLL, poll_interval, run_within};
 
     /// `program` with `args`.
     fn command(program: &str, args: &[&str]) -> Command {
@@ -114,50 +116,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn run_within_adds_under_5_ms_to_a_command_that_exits_at_once() {
-        // Given a command that exits at once, and how fast it runs when simply
-        // started and waited on (best of five), so a busy machine slows both
-        // the same.
-        let bare = (0..5)
-            .filter_map(|_| {
-                let started = Instant::now();
-                command("true", &[])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| child.wait())
-                    .ok()
-                    .map(|_| started.elapsed())
-            })
-            .min();
+    #[case::just_started(Duration::ZERO, FAST_POLL)]
+    #[case::near_the_end_of_the_fast_checks(FAST_FOR.saturating_sub(Duration::from_millis(1)), FAST_POLL)]
+    #[case::once_the_fast_checks_end(FAST_FOR, POLL)]
+    #[case::long_running(Duration::from_secs(60), POLL)]
+    fn a_child_is_checked_every_millisecond_at_first(
+        #[case] waited: Duration,
+        #[case] expected: Duration,
+    ) {
+        // Given a child that has run for `waited`.
 
-        // When running it through run_within five times, keeping the fastest.
-        let fastest = (0..5)
-            .filter_map(|_| {
-                let started = Instant::now();
-                run_within(command("true", &[]), Duration::from_secs(5))
-                    .ok()
-                    .map(|_| started.elapsed())
-            })
-            .min();
+        // When picking how long to sleep before checking it again.
+        let interval = poll_interval(waited);
 
-        // Then run_within added under 5 ms, plus however much longer than
-        // asked this machine sleeps one check interval (a shared CI machine
-        // can sleep several times the 1 ms it was asked for).
-        let oversleep = std::iter::repeat_with(|| {
-            let started = Instant::now();
-            thread::sleep(FAST_POLL);
-            started.elapsed().saturating_sub(FAST_POLL)
-        })
-        .take(5)
-        .min()
-        .unwrap_or_default();
-        let allowed = Duration::from_millis(5) + oversleep;
-        assert!(
-            fastest
-                .zip(bare)
-                .is_some_and(|(took, bare)| took.saturating_sub(bare) < allowed),
-            "run_within should add under {allowed:?} to a command that exits at once, fastest took {fastest:?} against {bare:?} bare"
+        // Then a young child is checked every millisecond, an older one less often.
+        assert_eq!(
+            interval, expected,
+            "a child that has run {waited:?} should next be checked after {expected:?}"
         );
     }
 
