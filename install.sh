@@ -1,7 +1,7 @@
 #!/bin/sh
 # orb installer:
 #
-#   curl -fsSL https://raw.githubusercontent.com/zqccer/orb/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/felixpherry/orb/main/install.sh | sh
 #
 # Installs orb and zmx into ~/.local/bin, sets up orb's Claude Code and pi
 # integrations, offers to install kitty and (on macOS) to add orb's Cmd keys
@@ -16,8 +16,8 @@
 set -eu
 
 ORB_INSTALL_DIR=${ORB_INSTALL_DIR:-$HOME/.local/bin}
-ORB_RELEASE_BASE=${ORB_RELEASE_BASE:-https://github.com/zqccer/orb/releases}
-ORB_REPO=https://github.com/zqccer/orb
+ORB_RELEASE_BASE=${ORB_RELEASE_BASE:-https://github.com/felixpherry/orb/releases}
+ORB_REPO=https://github.com/felixpherry/orb
 ZMX_VERSION=0.8.1
 ZMX_BASE=https://github.com/neurosnap/zmx/releases/download
 
@@ -214,7 +214,7 @@ kitty_keys() {
     return
   fi
   if ! ask "Add orb's Cmd keys to $conf (Cmd+h/j/k/l and others send Alt to orb)?"; then
-    todo_line "Cmd keys: add the block from https://github.com/zqccer/orb/blob/main/docs/keys.md to $conf, or set macos_option_as_alt yes"
+    todo_line "Cmd keys: add the block from https://github.com/felixpherry/orb/blob/main/docs/keys.md to $conf, or set macos_option_as_alt yes"
     return
   fi
   mkdir -p "$(dirname "$conf")"
