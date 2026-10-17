@@ -8,13 +8,13 @@ use crate::feat::picker::intent::{open_picker, pick_agent};
 use crate::feat::picker::state::{PickTarget, PickerState};
 use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem, folder_slug};
 use crate::feat::sessions::validator::{
-    COLONIST_WORKING, FoldTarget, NOBODY_NEEDS_YOU, NewColonyError, SETTLE_IN_PROGRESS,
-    ToggleSettleError, validate_delete, validate_fold, validate_new_colony, validate_new_incognito,
-    validate_new_session, validate_next_needs_you, validate_settle_colonists, validate_toggle_pin,
-    validate_toggle_settle, validate_unfold,
+    COLONIST_WORKING, FoldTarget, NOBODY_NEEDS_YOU, NewColonyError, NextNeedsYouError,
+    SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete, validate_fold, validate_new_colony,
+    validate_new_incognito, validate_new_session, validate_next_needs_you,
+    validate_settle_colonists, validate_toggle_pin, validate_toggle_settle, validate_unfold,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
-use crate::ids::{PaneId, ProjectId, SessionId};
+use crate::ids::{ProjectId, SessionId};
 use crate::{AppState, Command, Focus, TextInput};
 
 /// Asks for a new Incognito session in its checkout, clearing a filter to
@@ -427,30 +427,15 @@ pub(crate) fn new_session(
 }
 
 /// `<C-g> a`: moves the keys into the pane of the next agent that needs the
-/// user (see [`Sessions::needs_you`](crate::feat::sessions::state::Sessions::needs_you)),
-/// as a session picker pick would. From an agent in that list it goes to the
-/// one after it, wrapping at the end; from anywhere else to the first. With
-/// no agent to go to, nothing moves and the message box says so.
+/// user (see [`validate_next_needs_you`]), as a session picker pick would.
+/// With no agent to go to, nothing moves and the message box says so.
 pub(crate) fn next_needs_you(state: &mut AppState) -> Vec<Command> {
-    if validate_next_needs_you(state).is_err() {
-        state.sessions.notice = Some(NOBODY_NEEDS_YOU.to_owned());
-        return vec![];
-    }
-    let targets: Vec<(SessionId, PaneId)> = state
-        .sessions
-        .needs_you()
-        .into_iter()
-        .filter_map(|agent| agent.pane.as_ref())
-        .map(|launch| (launch.session, launch.pane))
-        .collect();
-    let from = state.jump_from();
-    let next = targets
-        .iter()
-        .position(|&(session, pane)| from == Some(SidebarItem::Agent { session, pane }))
-        .map_or(0, |at| (at + 1) % targets.len());
-    match targets.get(next) {
-        Some(&(session, pane)) => pick_agent(state, session, pane),
-        None => vec![],
+    match validate_next_needs_you(state) {
+        Ok((session, pane)) => pick_agent(state, session, pane),
+        Err(NextNeedsYouError::NoneWaiting) => {
+            state.sessions.notice = Some(NOBODY_NEEDS_YOU.to_owned());
+            vec![]
+        }
     }
 }
 
@@ -1370,17 +1355,29 @@ mod tests {
         let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys and the cursor stay.
+        assert_eq!(
+            (state.focus, state.sessions.cursor),
+            (Focus::Sidebar, Some(SidebarItem::Session(SessionId(1)))),
+            "<C-g> a with nobody waiting should leave the keys and cursor as they were"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_with_nobody_waiting_returns_no_command() {
+        // Given one idle agent, its card under the cursor.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When handling NextNeedsYou.
         let commands = IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
 
-        // Then the keys and the cursor stay, and nothing is asked for.
+        // Then nothing is asked for.
         assert_eq!(
-            (state.focus, state.sessions.cursor, commands),
-            (
-                Focus::Sidebar,
-                Some(SidebarItem::Session(SessionId(1))),
-                vec![]
-            ),
-            "<C-g> a with nobody waiting should leave everything as it was"
+            commands,
+            vec![],
+            "<C-g> a with nobody waiting should ask the actors for nothing"
         );
     }
 }

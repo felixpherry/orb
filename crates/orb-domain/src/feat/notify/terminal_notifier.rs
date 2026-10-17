@@ -151,9 +151,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::TerminalNotifierNotifier;
+    use crate::common::run_within;
     use crate::feat::notify::click::{ClickTarget, Kitty, OrbCli};
     use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
     use crate::ids::{AgentId, PaneId};
+
+    /// How long sh may run a click line in a test.
+    const SH_LIMIT: Duration = Duration::from_secs(5);
 
     /// What a fallback notifier was asked to show: title, body and agent.
     type Resent = (String, String, AgentId);
@@ -397,10 +401,9 @@ mod tests {
 
         // When sh runs the -execute line with no HOME.
         let line = execute(&args).unwrap_or_default();
-        Command::new("/bin/sh")
-            .args(["-c", &line])
-            .env_remove("HOME")
-            .status()?;
+        let mut sh = Command::new("/bin/sh");
+        sh.args(["-c", &line]).env_remove("HOME");
+        run_within(sh, SH_LIMIT)?;
 
         // Then orb ran under the user's home with `pane focus 12`.
         let recorded = fs::read_to_string(&log)?;
@@ -446,10 +449,9 @@ mod tests {
 
         // When sh runs the -execute line in the temporary directory.
         let line = execute(&args).unwrap_or_default();
-        Command::new("/bin/sh")
-            .args(["-c", &line])
-            .current_dir(root.path())
-            .status()?;
+        let mut sh = Command::new("/bin/sh");
+        sh.args(["-c", &line]).current_dir(root.path());
+        run_within(sh, SH_LIMIT)?;
 
         // Then kitten got exactly its arguments, and nothing else ran.
         let recorded = fs::read_to_string(&log)?;

@@ -1160,6 +1160,36 @@ fn needs_you_includes_agents_the_filter_hides() {
 }
 
 #[rstest::rstest]
+fn needs_you_breaks_ties_in_sidebar_order() {
+    // Given agents 1 to 3 waiting for approval since the same second: agent
+    // 1 alone in project 1's session 1, and agents 2 and 3 in project 2's
+    // newer session 2, stored newest first.
+    let tied = |id, session, secs| Agent {
+        status: AgentStatus::NeedsApproval,
+        waiting_since: Some(at(100)),
+        ..agent(id, session, secs)
+    };
+    let sessions = fill(Sessions {
+        projects: vec![
+            project(1, vec![tied(1, 1, 10)]),
+            project(2, vec![tied(3, 2, 30), tied(2, 2, 20)]),
+        ],
+        ..Sessions::default()
+    });
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then they come as the sidebar lists them: session 2's card first, its
+    // agents oldest first, then session 1's.
+    assert_eq!(
+        order,
+        vec![2, 3, 1],
+        "tied waits should keep the sidebar's card and agent order"
+    );
+}
+
+#[rstest::rstest]
 fn spinning_while_a_session_starts() {
     // Given idle agents and a session being started.
     let sessions = Sessions {

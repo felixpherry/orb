@@ -63,7 +63,7 @@ use super::panes::{
 use super::report::{StartedAttach, show, started_attach};
 use super::{
     App, LoopEvent, PREVIEW_EVERY, Toasts, after_pane, cursor_style, handle_mouse_intents,
-    list_directories, preview_due, stale_preview,
+    list_directories, preview_due, stale_preview, tick_every,
 };
 
 /// Pane `id`, a shell in `orb-p<id>`.
@@ -249,6 +249,29 @@ fn cursor_shape_follows_where_the_keys_are(
 
     // Then it is the shape for that focus.
     assert_eq!(style, expected, "cursor shape in {focus:?}");
+}
+
+#[rstest::rstest]
+fn screen_ticks_every_second_while_an_agent_waits() {
+    // Given one agent waiting for an approval, and none working.
+    let mut project = project_active_at(1, "alpha", 0);
+    for agent in &mut project.agents {
+        agent.status = AgentStatus::NeedsApproval;
+    }
+    let sessions = Sessions {
+        projects: vec![project],
+        ..Sessions::default()
+    };
+
+    // When asking how often the screen must redraw with no event.
+    let every = tick_every(&sessions);
+
+    // Then it redraws every second, so the wait time counts up.
+    assert_eq!(
+        every,
+        Some(Duration::from_secs(1)),
+        "a wait should keep the screen ticking while nothing works"
+    );
 }
 
 #[rstest::rstest]

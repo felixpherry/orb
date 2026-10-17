@@ -226,8 +226,7 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
         Some(&PickerItem::Hit { agent, .. }) => (
             state
                 .sessions
-                .all_agents()
-                .find(|shown| shown.id == agent)
+                .agent(agent)
                 .ok_or(PickSessionError::Deleted)?
                 .home()
                 .ok_or(PickSessionError::NoSession)?,

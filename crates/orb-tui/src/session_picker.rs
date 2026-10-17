@@ -41,7 +41,7 @@ use crate::picker::{
 };
 use crate::sidebar::{
     BG_DARK, BLACK, BLUE, BORDER, BRANCH, COMMENT, COMPLETED_ICON, CYAN, DARK3, DARK5, FG, FG_DARK,
-    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, status, working_label,
+    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, duration_label, mark, render_split, status,
 };
 
 /// Draws the session picker over `area`: the list of `picker`'s rows with
@@ -316,7 +316,7 @@ fn render_row(
 fn when(agent: &Agent, now: SystemTime) -> String {
     match (agent.status, agent.turn_started_at) {
         (AgentStatus::Working, Some(at)) => {
-            working_label(now.duration_since(at).unwrap_or_default())
+            duration_label(now.duration_since(at).unwrap_or_default())
         }
         _ => ago_label(now.duration_since(agent.last_chat()).unwrap_or_default()),
     }

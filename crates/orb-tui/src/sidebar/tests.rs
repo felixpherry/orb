@@ -24,8 +24,8 @@ use super::{
     APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, COMMENT, COMPLETED_ICON, CYAN,
     DARK3, FAILED_ICON, FG, FG_DARK, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN,
     GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED,
-    STOPPED_ICON, SidebarScroll, USERS, VISUAL, YELLOW, ago_label, badge_colour, monogram, render,
-    working_label,
+    STOPPED_ICON, SidebarScroll, USERS, VISUAL, YELLOW, ago_label, badge_colour, duration_label,
+    monogram, render,
 };
 use crate::mouse::{Clicks, HitMap, MouseRoute};
 use crate::test_support::{layouts_for, sessions_for};
@@ -221,9 +221,9 @@ fn badge_colour_matches_t3(#[case] name: &str, #[case] expected: usize) {
 #[case(45, "45s")]
 #[case(134, "2m")]
 #[case(3900, "1h 5m")]
-fn working_label_is_t3s_duration(#[case] secs: u64, #[case] expected: &str) {
+fn duration_label_is_t3s_duration(#[case] secs: u64, #[case] expected: &str) {
     // Given / When formatting how long a turn has run.
-    let label = working_label(Duration::from_secs(secs));
+    let label = duration_label(Duration::from_secs(secs));
 
     // Then it uses T3's format.
     assert_eq!(label, expected, "{secs} s");

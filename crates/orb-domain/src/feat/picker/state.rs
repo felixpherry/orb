@@ -43,13 +43,7 @@ impl SessionFilter {
         match self {
             Self::All => !settled,
             Self::Settled => settled,
-            Self::Blocked => {
-                !settled
-                    && matches!(
-                        agent.status,
-                        AgentStatus::NeedsApproval | AgentStatus::NeedsInput
-                    )
-            }
+            Self::Blocked => !settled && agent.status.waiting(),
             Self::Working => !settled && agent.status == AgentStatus::Working,
             Self::Idle => {
                 !settled && matches!(agent.status, AgentStatus::Idle | AgentStatus::Unknown)
@@ -846,10 +840,7 @@ impl PickerState {
     pub fn picked_session(&self, sessions: &Sessions) -> Option<SessionId> {
         match *self.list.selected()? {
             PickerItem::Session { id, .. } => Some(id),
-            PickerItem::Hit { agent, .. } => sessions
-                .all_agents()
-                .find(|shown| shown.id == agent)
-                .and_then(Agent::home),
+            PickerItem::Hit { agent, .. } => sessions.agent(agent).and_then(Agent::home),
             _ => None,
         }
     }

@@ -603,7 +603,8 @@ fn update_row(
     row.turn_started_at = status
         .in_progress()
         .then(|| row.turn_started_at.unwrap_or(now_ms));
-    row.waiting_since = matches!(status, AgentStatus::NeedsApproval | AgentStatus::NeedsInput)
+    row.waiting_since = status
+        .waiting()
         .then(|| row.waiting_since.unwrap_or(now_ms));
     let (Some(session_id), Some(format)) = (&row.session_id, format) else {
         return false;

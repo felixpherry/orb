@@ -62,7 +62,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
   - sends a desktop notice for a status change while orb's terminal isn't focused, and names an agent that starts waiting off screen in the message box while it is;
   - re-lists an open worktree picker and re-sorts an open projects screen;
   - fills the search picker unless the rows are stale.
-- **There is no fixed tick.** Apart from the channel, the loop only wakes for a held pane screen update, a spinner frame, the message box timing out, or the session picker's preview being due.
+- **There is no fixed tick.** Apart from the channel, the loop only wakes for a held pane screen update, a spinner frame, a second passing while an agent waits on the user, the message box timing out, or the session picker's preview being due.
 - **Workers never touch the picker or the message box.** Those belong to the loop.
 
 ## Panes

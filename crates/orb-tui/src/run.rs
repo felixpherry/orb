@@ -96,7 +96,7 @@ use orb_domain::feat::picker::state::{PickerKind, worktree_items};
 use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::{pane_env, terminal_browser_env};
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
-use orb_domain::feat::sessions::state::Notice;
+use orb_domain::feat::sessions::state::{Notice, Sessions};
 use orb_domain::feat::sessions::validator::validate_new_session;
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
@@ -138,6 +138,10 @@ const EARLY_EXIT: Duration = Duration::from_secs(1);
 
 /// How often the session picker re-reads the same agent's growing transcript.
 const PREVIEW_EVERY: Duration = Duration::from_secs(1);
+
+/// How often the screen redraws while an agent waits on the user and none
+/// works, so its wait time, shown in whole seconds, counts up.
+const WAIT_TICK: Duration = Duration::from_secs(1);
 
 /// What the start screen says after an attached program exits within
 /// [`EARLY_EXIT`] of starting.
@@ -528,18 +532,12 @@ impl App {
     }
 
     /// When the loop must wake without an event: a pane's synchronized
-    /// update times out, a spinner frame passes while an agent is working
-    /// or a session is starting, so the spinners and elapsed time tick, or
+    /// update times out, the screen's tick passes (see [`tick_every`]), or
     /// the message box runs out, so it hides, or the session picker's preview
     /// waits to be read again, so a transcript that stopped growing still
     /// catches up; at once while pane image bytes wait for the next frame.
     fn deadline(&self) -> Option<Instant> {
-        let tick = self
-            .state
-            .read()
-            .sessions
-            .spinning()
-            .then(|| Instant::now() + SPINNER_FRAME);
+        let tick = tick_every(&self.state.read().sessions).map(|every| Instant::now() + every);
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
         let toast = self.toasts.deadline(Instant::now());
         let preview = stale_preview(&self.state.read())
@@ -936,8 +934,7 @@ impl App {
             .state
             .read()
             .sessions
-            .all_agents()
-            .find(|candidate| candidate.id == agent)
+            .agent(agent)
             .and_then(|found| self.harnesses.get(&found.harness).cloned());
         let (len, exchanges) = match harness.map(|harness| harness.exchanges(transcript)) {
             Some(Ok(read)) => read,
@@ -1077,14 +1074,23 @@ fn stale_preview(state: &AppState) -> Option<(AgentId, PathBuf)> {
         .as_ref()
         .filter(|picker| matches!(picker.kind(), PickerKind::Sessions { .. }))?;
     let id = picker.selected_agent_id()?;
-    let transcript = state
-        .sessions
-        .all_agents()
-        .find(|agent| agent.id == id)?
-        .transcript
-        .as_ref()?;
+    let transcript = state.sessions.agent(id)?.transcript.as_ref()?;
     let len = fs::metadata(transcript).ok()?.len();
     picker.wants_preview(len).then(|| (id, transcript.clone()))
+}
+
+/// How often the screen must redraw with no event for what it shows to stay
+/// true: every spinner frame while an agent works or a session starts, so
+/// the spinners and turn times tick; every [`WAIT_TICK`] while an agent
+/// waits for an approval or an answer, so its wait time counts up; else
+/// never.
+fn tick_every(sessions: &Sessions) -> Option<Duration> {
+    match (sessions.spinning(), sessions.any_in_progress()) {
+        (true, _) => Some(SPINNER_FRAME),
+        // A turn underway with nothing working is a wait.
+        (false, true) => Some(WAIT_TICK),
+        (false, false) => None,
+    }
 }
 
 /// When the preview of `agent` may be read: at once for an agent other than

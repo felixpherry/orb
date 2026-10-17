@@ -831,8 +831,7 @@ impl SessionsActor {
         self.state
             .read()
             .sessions
-            .all_agents()
-            .find(|agent| agent.id == id)
+            .agent(id)
             .map(|agent| agent.status)
     }
 }

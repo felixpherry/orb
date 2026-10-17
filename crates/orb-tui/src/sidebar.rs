@@ -920,10 +920,8 @@ fn spinner(agent: &Agent, now: SystemTime) -> &'static str {
 /// ended.
 fn when(agent: &Agent, now: SystemTime) -> String {
     match (agent.status, agent.turn_started_at, agent.waiting_since) {
-        (AgentStatus::NeedsApproval | AgentStatus::NeedsInput, _, Some(at)) => {
-            working_label(since(now, at))
-        }
-        (status, Some(at), _) if status.in_progress() => working_label(since(now, at)),
+        (status, _, Some(at)) if status.waiting() => duration_label(since(now, at)),
+        (status, Some(at), _) if status.in_progress() => duration_label(since(now, at)),
         _ => ago_label(since(now, agent.last_activity_at)),
     }
 }
@@ -970,8 +968,9 @@ fn since(now: SystemTime, at: SystemTime) -> Duration {
     now.duration_since(at).unwrap_or_default()
 }
 
-/// How long a turn has run, as T3 shows it: `45s`, `2m`, or `1h 5m`.
-pub(crate) fn working_label(elapsed: Duration) -> String {
+/// How long something has lasted so far, such as a turn or a wait, as T3
+/// shows a turn's: `45s`, `2m`, or `1h 5m`.
+pub(crate) fn duration_label(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     match secs {
         0..60 => format!("{secs}s"),

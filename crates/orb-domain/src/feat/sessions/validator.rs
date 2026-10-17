@@ -10,7 +10,7 @@ use wherror::Error;
 use crate::AppState;
 use crate::feat::sessions::state::{ProjectKind, SidebarItem, SidebarRow, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
-use crate::ids::SessionId;
+use crate::ids::{PaneId, SessionId};
 
 /// Why making a colony from the `New colony` box can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -240,19 +240,34 @@ pub enum NextNeedsYouError {
 /// What the message box says when `<C-g> a` finds no agent to go to.
 pub const NOBODY_NEEDS_YOU: &str = "No agent needs you";
 
-/// Allow going to the next agent that needs the user while one does.
+/// Allow going to the next agent that needs the user while one does, and
+/// name its session and pane: from an agent in
+/// [`Sessions::needs_you`](crate::feat::sessions::state::Sessions::needs_you)'s
+/// list (where a jump starts, [`AppState::jump_from`]), the one after it,
+/// wrapping at the end; from anywhere else, the first.
 ///
 /// # Errors
 ///
 /// Returns [`NextNeedsYouError::NoneWaiting`] when
 /// [`Sessions::needs_you`](crate::feat::sessions::state::Sessions::needs_you)
 /// lists no agent.
-pub fn validate_next_needs_you(state: &AppState) -> Result<(), NextNeedsYouError> {
-    if state.sessions.needs_you().is_empty() {
-        Err(NextNeedsYouError::NoneWaiting)
-    } else {
-        Ok(())
-    }
+pub fn validate_next_needs_you(state: &AppState) -> Result<(SessionId, PaneId), NextNeedsYouError> {
+    let targets: Vec<(SessionId, PaneId)> = state
+        .sessions
+        .needs_you()
+        .into_iter()
+        .filter_map(|agent| agent.pane.as_ref())
+        .map(|launch| (launch.session, launch.pane))
+        .collect();
+    let from = state.jump_from();
+    let next = targets
+        .iter()
+        .position(|&(session, pane)| from == Some(SidebarItem::Agent { session, pane }))
+        .map_or(0, |at| (at + 1) % targets.len());
+    targets
+        .get(next)
+        .copied()
+        .ok_or(NextNeedsYouError::NoneWaiting)
 }
 
 /// Why making an Incognito session can't proceed.
@@ -551,14 +566,18 @@ mod tests {
 
     #[rstest::rstest]
     fn next_needs_you_is_allowed_while_an_agent_waits() {
-        // Given one agent, waiting for an approval.
+        // Given agent 1 in pane 1 of session 1, waiting for an approval.
         let state = on_session(AgentStatus::NeedsApproval);
 
         // When validating `<C-g> a`.
         let result = validate_next_needs_you(&state);
 
-        // Then it is allowed.
-        assert_eq!(result, Ok(()), "<C-g> a can go to a waiting agent");
+        // Then it is allowed, and goes to agent 1's pane.
+        assert_eq!(
+            result,
+            Ok((SessionId(1), PaneId(1))),
+            "<C-g> a can go to a waiting agent"
+        );
     }
 
     #[rstest::rstest]

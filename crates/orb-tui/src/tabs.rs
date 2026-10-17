@@ -298,27 +298,31 @@ fn tab_bar(
     );
     let shown = Style::new().fg(BLACK).bg(BLUE).add_modifier(Modifier::BOLD);
     let rest = Style::new().fg(COMMENT).bg(GUTTER);
-    let icons: Vec<_> = layout
+    let tabs: Vec<Vec<Span<'static>>> = layout
         .tabs()
         .iter()
-        .map(|tab| tab_icon(state, tab, now))
-        .collect();
-    let labels: Vec<String> = icons
-        .iter()
         .enumerate()
-        .map(|(index, icon)| tab_text(*icon, &layout.tab_label(index)))
+        .map(|(index, tab)| {
+            let active = index == layout.active();
+            let style = if active { shown } else { rest };
+            let icon = tab_icon(state, tab, now);
+            tab_chevron(icon, &layout.tab_label(index), style, active)
+        })
         .collect();
-    let widths: Vec<u16> = labels.iter().map(|label| chevron_width(label)).collect();
+    let widths: Vec<u16> = tabs
+        .iter()
+        .map(|spans| spans.iter().map(span_width).fold(0, u16::saturating_add))
+        .collect();
     let room = bar
         .width
         .saturating_sub(span_width(&session))
         .saturating_sub(chevron_width(PLUS));
     let range = visible_tabs(&widths, layout.active(), room);
-    hits.record_tab_bar(bar, layout.active(), labels.len());
+    let count = tabs.len();
+    hits.record_tab_bar(bar, layout.active(), count);
     let mut x = bar.x.saturating_add(span_width(&session));
-    // The bar's cells the next chevron of `text` takes.
-    let mut next = |text: &str| {
-        let width = chevron_width(text);
+    // The bar's next `width` cells.
+    let mut next = |width: u16| {
         let area = Rect::new(x, bar.y, width, 1).intersection(bar);
         x = x.saturating_add(width);
         area
@@ -335,26 +339,25 @@ fn tab_bar(
     let mut spans = vec![session];
     if range.start > 0 {
         let chip = left_chip(range.start);
-        target(next(&chip), range.start - 1);
+        target(next(chevron_width(&chip)), range.start - 1);
         chevron(&mut spans, chip, rest);
     }
-    for (index, label) in labels.iter().enumerate().take(range.end).skip(range.start) {
-        let style = if index == layout.active() {
-            shown
-        } else {
-            rest
-        };
-        target(next(label), index);
-        let icon = icons.get(index).copied().flatten();
-        let text = layout.tab_label(index);
-        tab_chevron(&mut spans, icon, &text, style, index == layout.active());
+    for (index, (tab, &width)) in tabs
+        .into_iter()
+        .zip(&widths)
+        .enumerate()
+        .take(range.end)
+        .skip(range.start)
+    {
+        target(next(width), index);
+        spans.extend(tab);
     }
-    if range.end < labels.len() {
-        let chip = right_chip(labels.len() - range.end);
-        target(next(&chip), range.end);
+    if range.end < count {
+        let chip = right_chip(count - range.end);
+        target(next(chevron_width(&chip)), range.end);
         chevron(&mut spans, chip, rest);
     }
-    let plus = next(PLUS);
+    let plus = next(chevron_width(PLUS));
     if !plus.is_empty() {
         hits.record_new_tab(plus);
     }
@@ -407,28 +410,26 @@ fn chevron(spans: &mut Vec<Span<'static>>, text: String, style: Style) {
     spans.push(Span::styled(ARROW, Style::new().fg(bg).bg(BLACK)));
 }
 
-/// Pushes a tab's chevron onto `spans`: ` <label> ` on `style`'s background
-/// between two arrows, after a space and its status `icon` when it has one,
-/// the icon in `style` while the tab is `shown`, else in its status colour.
+/// A tab's chevron: ` <label> ` on `style`'s background between two arrows,
+/// after a space and its status `icon` when it has one, the icon in `style`
+/// while the tab is `shown`, else in its status colour.
 fn tab_chevron(
-    spans: &mut Vec<Span<'static>>,
     icon: Option<(&'static str, Color)>,
     label: &str,
     style: Style,
     shown: bool,
-) {
-    let Some((icon, colour)) = icon else {
-        return chevron(spans, format!(" {label} "), style);
-    };
+) -> Vec<Span<'static>> {
     let bg = style.bg.unwrap_or(BLACK);
-    let lit = if shown { style } else { style.fg(colour) };
+    let mut spans = vec![Span::styled(ARROW, Style::new().fg(BLACK).bg(bg))];
+    if let Some((icon, colour)) = icon {
+        let lit = if shown { style } else { style.fg(colour) };
+        spans.extend([Span::styled(" ", style), Span::styled(icon, lit)]);
+    }
     spans.extend([
-        Span::styled(ARROW, Style::new().fg(BLACK).bg(bg)),
-        Span::styled(" ", style),
-        Span::styled(icon, lit),
         Span::styled(format!(" {label} "), style),
         Span::styled(ARROW, Style::new().fg(bg).bg(BLACK)),
     ]);
+    spans
 }
 
 /// The status icon, and its colour, of the most urgent agent among `tab`'s
@@ -439,14 +440,6 @@ fn tab_icon(state: &AppState, tab: &Tab, now: SystemTime) -> Option<(&'static st
         .into_iter()
         .filter_map(|pane| state.sessions.agent_in(pane));
     attention(most_urgent(agents)?, now)
-}
-
-/// A tab chevron's text: ` <icon> <label> `, or ` <label> ` without an icon.
-fn tab_text(icon: Option<(&'static str, Color)>, label: &str) -> String {
-    match icon {
-        Some((icon, _)) => format!(" {icon} {label} "),
-        None => format!(" {label} "),
-    }
 }
 
 fn chevron_width(text: &str) -> u16 {

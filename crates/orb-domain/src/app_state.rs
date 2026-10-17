@@ -167,8 +167,7 @@ impl AppState {
     pub fn agent_on_screen(&self, agent: AgentId) -> bool {
         let Some(launch) = self
             .sessions
-            .all_agents()
-            .find(|candidate| candidate.id == agent)
+            .agent(agent)
             .and_then(|agent| agent.pane.as_ref())
         else {
             return false;
@@ -194,8 +193,7 @@ impl AppState {
         };
         let sessions = &self.sessions;
         let session = sessions
-            .all_agents()
-            .find(|agent| agent.id == notice.agent)
+            .agent(notice.agent)
             .and_then(Agent::session)
             .and_then(|id| sessions.session(id))?;
         let project = sessions.project(session.project)?;

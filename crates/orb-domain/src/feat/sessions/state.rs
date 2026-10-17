@@ -181,6 +181,11 @@ impl AgentStatus {
     pub fn in_progress(self) -> bool {
         matches!(self, Self::Working | Self::NeedsApproval | Self::NeedsInput)
     }
+
+    /// Whether it waits on the user: for an approval or an answer.
+    pub fn waiting(self) -> bool {
+        matches!(self, Self::NeedsApproval | Self::NeedsInput)
+    }
 }
 
 /// Why an agent needs the user, as a notification says it.
@@ -526,6 +531,11 @@ impl Sessions {
         self.projects.iter().find(|project| project.id == id)
     }
 
+    /// Agent `id`, if orb still lists it.
+    pub fn agent(&self, id: AgentId) -> Option<&Agent> {
+        self.all_agents().find(|agent| agent.id == id)
+    }
+
     /// The agents running in session `id`'s panes (its agent panes'
     /// conversations), oldest first; none while it is being deleted.
     pub fn agents(&self, id: SessionId) -> Vec<&Agent> {
@@ -599,7 +609,8 @@ impl Sessions {
             .is_some_and(|session| self.deleting.contains(&session))
     }
 
-    /// Every agent in sidebar order: project by project, newest first.
+    /// Every agent, project by project (oldest project first), newest agent
+    /// first.
     pub fn all_agents(&self) -> impl Iterator<Item = &Agent> {
         self.projects
             .iter()
@@ -943,19 +954,27 @@ impl Sessions {
     /// idle with a finished turn the user hasn't read, oldest turn end
     /// first. Only agents with a pane, in sessions that aren't settled or
     /// being deleted, whether or not the project filter lists them; ties
-    /// keep sidebar order.
+    /// keep sidebar order, those the filter hides after the rest.
     pub fn needs_you(&self) -> Vec<&Agent> {
-        let mut waiting: Vec<(u8, Option<SystemTime>, &Agent)> = self
-            .shown_agents()
-            .filter(|agent| agent.pane.is_some() && self.unsettled(agent))
+        let listed = self.tree_order();
+        let hidden = self
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .filter(|id| !listed.contains(id));
+        let mut waiting: Vec<(u8, Option<SystemTime>, &Agent)> = listed
+            .iter()
+            .copied()
+            .chain(hidden)
+            .flat_map(|id| self.agents(id))
+            .filter(|agent| self.unsettled(agent))
             .filter_map(|agent| {
-                let (group, since) = match agent.status {
-                    AgentStatus::NeedsApproval => (0, agent.waiting_since),
-                    AgentStatus::NeedsInput => (1, agent.waiting_since),
-                    AgentStatus::Idle if agent.unseen => (2, Some(agent.last_activity_at)),
+                let since = match agent.status {
+                    AgentStatus::NeedsApproval | AgentStatus::NeedsInput => agent.waiting_since,
+                    AgentStatus::Idle if agent.unseen => Some(agent.last_activity_at),
                     _ => return None,
                 };
-                Some((group, since, agent))
+                Some((agent.urgency(), since, agent))
             })
             .collect();
         waiting.sort_by_key(|&(group, since, _)| (group, since.is_none(), since));
