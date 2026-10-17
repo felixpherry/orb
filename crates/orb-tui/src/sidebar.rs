@@ -894,6 +894,14 @@ pub(crate) fn status(
     }
 }
 
+/// The agent's status icon and its colour while the agent needs a look: it
+/// waits, failed, is gone, works, or has a finished turn the user hasn't
+/// read. `None` while it is idle and read, or stopped.
+pub(crate) fn attention(agent: &Agent, now: SystemTime) -> Option<(&'static str, Color)> {
+    let (icon, _, colour) = status(agent, false, now);
+    (agent.urgency() <= 4).then_some((icon, colour))
+}
+
 /// The working spinner's frame: one per [`SPINNER_FRAME`] since the turn
 /// started, so it moves with the loop's redraw while an agent works.
 fn spinner(agent: &Agent, now: SystemTime) -> &'static str {

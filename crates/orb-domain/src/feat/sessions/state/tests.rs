@@ -906,6 +906,63 @@ fn status_count_skips_agents_being_deleted() {
     );
 }
 
+/// Agent `id`, idle with a finished turn the user hasn't read.
+fn unread(id: i64) -> Agent {
+    Agent {
+        unseen: true,
+        ..idle_agent(id)
+    }
+}
+
+#[rstest::rstest]
+fn unread_count_counts_idle_agents_with_an_unread_turn() {
+    // Given two agents with an unread finished turn and one read.
+    let sessions = sessions(vec![unread(1), unread(2), idle_agent(3)], None);
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then the two unread ones count.
+    assert_eq!(count, 2, "only unread finished turns count");
+}
+
+#[rstest::rstest]
+fn unread_count_leaves_out_settled_sessions() {
+    // Given two agents with an unread finished turn, session 1 settled.
+    let mut sessions = sessions(vec![unread(1), unread(2)], None);
+    for session in sessions
+        .sessions
+        .iter_mut()
+        .filter(|s| s.id == SessionId(1))
+    {
+        session.settled_at = Some(at(5));
+    }
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then only the unsettled one counts.
+    assert_eq!(
+        count, 1,
+        "a settled session's agents keep their unread mark but don't count"
+    );
+}
+
+#[rstest::rstest]
+fn unread_count_skips_agents_being_deleted() {
+    // Given two agents with an unread finished turn, one being deleted.
+    let sessions = Sessions {
+        deleting: [SessionId(1)].into(),
+        ..sessions(vec![unread(1), unread(2)], None)
+    };
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then only the other one counts.
+    assert_eq!(count, 1, "an agent being deleted shouldn't count as unread");
+}
+
 #[rstest::rstest]
 fn spinning_while_a_session_starts() {
     // Given idle agents and a session being started.

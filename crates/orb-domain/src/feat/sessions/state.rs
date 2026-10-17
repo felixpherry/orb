@@ -921,6 +921,20 @@ impl Sessions {
             .count()
     }
 
+    /// How many agents are idle with a finished turn the user hasn't read,
+    /// in sessions that aren't settled, not counting those being deleted.
+    pub fn unread_count(&self) -> usize {
+        self.shown_agents()
+            .filter(|agent| agent.status == AgentStatus::Idle && agent.unseen)
+            .filter(|agent| {
+                agent
+                    .home()
+                    .and_then(|id| self.session(id))
+                    .is_some_and(|session| session.settled_at.is_none())
+            })
+            .count()
+    }
+
     /// How many agents are running a turn right now, not counting those
     /// being deleted.
     pub fn working_count(&self) -> usize {
