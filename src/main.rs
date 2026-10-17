@@ -148,6 +148,10 @@ fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
 
 /// Everything after the log opens: integrations, store, actors, frontend,
 /// then the shutdown in order.
+#[expect(
+    clippy::too_many_lines,
+    reason = "start-up builds and wires every service, actor and the frontend in order"
+)]
 fn run(
     home: PathBuf,
     orb_root: PathBuf,
@@ -178,7 +182,8 @@ fn run(
         home,
         ..AppState::default()
     });
-    let frontend = Frontend::new(TimeZone::system());
+    let tz = TimeZone::system();
+    let frontend = Frontend::new(tz.clone());
     quit_on_signals(frontend.quitter(), log);
     let services = services(&env, claude_dir, pi_sessions, &orb_root, log);
     let git = services.git.clone();
@@ -193,6 +198,7 @@ fn run(
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
         report: frontend.reporter(),
         integration_missing: !integrations.any_installed(),
+        tz: tz.clone(),
     });
     runtime.block_on(sessions.wait_for_startup());
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
@@ -219,6 +225,7 @@ fn run(
             runtime: runtime.handle().clone(),
             panes: frontend.controller(),
             harnesses: harnesses.clone(),
+            tz,
         },
     );
     let ended = frontend

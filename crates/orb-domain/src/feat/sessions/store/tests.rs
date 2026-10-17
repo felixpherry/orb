@@ -1,11 +1,14 @@
 use crate::feat::harness::HarnessId;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use error_stack::{Report, ResultExt};
 use rusqlite::Connection;
 
 use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::tree::SwapLayout;
+use crate::feat::plate::{ItemState, NewPlateItem, PlateItem, Verb};
+use crate::ids::PlateItemId;
 
 use super::{
     AgentRow, FloatRow, MIGRATIONS, NewPaneAgent, PaneId, ProjectId, ProjectKind, SavedLayouts,
@@ -566,6 +569,25 @@ const LIVE_SCHEMA: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "plate_items",
+        &[
+            "id",
+            "verb",
+            "state",
+            "title",
+            "what",
+            "links",
+            "urgent",
+            "session_id",
+            "session_title",
+            "pane_id",
+            "harness",
+            "changed_at",
+            "done_at",
+            "created_at",
+        ],
+    ),
+    (
         "projects",
         &["id", "root", "title", "created_at", "removed_at", "kind"],
     ),
@@ -969,6 +991,59 @@ fn upgrading_a_v15_database_keeps_agents_with_no_wait_start() -> Result<(), Repo
     Ok(())
 }
 
+/// The v13 database of `v13_database`, brought up to version 16.
+fn v16_database(path: &Path) -> Result<(), Report<StoreError>> {
+    v13_database(path)?;
+    let conn = Connection::open(path).change_context(StoreError)?;
+    for migration in MIGRATIONS
+        .get(13..16)
+        .ok_or_else(|| Report::new(StoreError).attach("no such version"))?
+    {
+        migration.apply(&conn).change_context(StoreError)?;
+    }
+    conn.pragma_update(None, "user_version", 16)
+        .change_context(StoreError)
+}
+
+#[rstest::rstest]
+fn upgrading_a_v16_database_keeps_every_live_value() -> Result<(), Report<StoreError>> {
+    // Given a v16 database holding projects, sessions, tabs, panes and agents.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    v16_database(&path)?;
+    let before = live_values(&path)?;
+
+    // When opening the store.
+    drop(Store::open(&path)?);
+
+    // Then every live row keeps its id and values.
+    assert_eq!(
+        live_values(&path)?,
+        before,
+        "adding the plate should keep every session, tab and pane as it was"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn upgrading_a_v16_database_adds_an_empty_plate() -> Result<(), Report<StoreError>> {
+    // Given a v16 database.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    v16_database(&path)?;
+
+    // When opening the store and loading the plate.
+    let items = Store::open(&path)?.plate_items()?;
+
+    // Then the plate is there and empty.
+    assert_eq!(
+        items,
+        Vec::new(),
+        "an upgraded database starts with no plate items"
+    );
+    Ok(())
+}
+
 #[rstest::rstest]
 fn saved_wait_start_loads_back() -> Result<(), Report<StoreError>> {
     // Given a store with one agent.
@@ -1260,6 +1335,266 @@ fn deleting_a_session_clears_its_colonists_parent() -> Result<(), Report<StoreEr
         parents,
         vec![(child, None)],
         "deleting a session should clear its colonists' parent"
+    );
+    Ok(())
+}
+
+/// `ms` milliseconds past the Unix epoch.
+fn at_ms(ms: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(ms)
+}
+
+/// A new review titled `title`, the user's move, from pane 1 of session 1,
+/// added by claude.
+fn new_plate_item(title: &str) -> NewPlateItem {
+    NewPlateItem {
+        verb: Verb::Review,
+        state: ItemState::YourMove,
+        title: title.to_owned(),
+        what: None,
+        links: Vec::new(),
+        urgent: false,
+        session: SessionId(1),
+        session_title: "session 1".to_owned(),
+        pane: PaneId(1),
+        harness: Some(HarnessId::new("claude")),
+    }
+}
+
+/// Saves `item` closed at `done_at`.
+fn save_done(
+    store: &Store,
+    item: &PlateItem,
+    done_at: SystemTime,
+) -> Result<(), Report<StoreError>> {
+    store.save_plate_item(&PlateItem {
+        state: ItemState::Done,
+        done_at: Some(done_at),
+        ..item.clone()
+    })
+}
+
+/// The one saved plate item with id `id`.
+fn plate_item(store: &Store, id: PlateItemId) -> Result<PlateItem, Report<StoreError>> {
+    store
+        .plate_items()?
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| Report::new(StoreError).attach("the plate item wasn't saved"))
+}
+
+#[rstest::rstest]
+fn inserted_plate_items_get_increasing_ids() -> Result<(), Report<StoreError>> {
+    // Given an empty store.
+    let store = Store::open_in_memory()?;
+
+    // When adding two items.
+    let first = store.insert_plate_item(&new_plate_item("first"), at_ms(1_000))?;
+    let second = store.insert_plate_item(&new_plate_item("second"), at_ms(2_000))?;
+
+    // Then the second gets the larger id.
+    assert!(
+        second.0 > first.0,
+        "a later item should get a larger id: {first:?} then {second:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn plate_item_id_is_not_reused_after_a_delete() -> Result<(), Report<StoreError>> {
+    // Given an item that was closed and then deleted.
+    let store = Store::open_in_memory()?;
+    let old = store.insert_plate_item(&new_plate_item("old"), at_ms(1_000))?;
+    save_done(&store, &plate_item(&store, old)?, at_ms(2_000))?;
+    store.delete_done_before(at_ms(3_000))?;
+
+    // When adding another item.
+    let new = store.insert_plate_item(&new_plate_item("new"), at_ms(4_000))?;
+
+    // Then it gets an id the deleted item never had.
+    assert!(
+        new.0 > old.0,
+        "an id should never be given again: old {old:?}, new {new:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::added_by_an_agent(Some(HarnessId::new("pi")))]
+#[case::added_from_a_shell(None)]
+fn inserted_plate_item_loads_back(
+    #[case] harness: Option<HarnessId>,
+) -> Result<(), Report<StoreError>> {
+    // Given an item with every field set.
+    let store = Store::open_in_memory()?;
+    let item = NewPlateItem {
+        verb: Verb::Decide,
+        state: ItemState::Waiting,
+        title: "Pick the cache".to_owned(),
+        what: Some("Two options are written up.".to_owned()),
+        links: vec!["https://b.example/2".to_owned(), "/tmp/a.md".to_owned()],
+        urgent: true,
+        session: SessionId(7),
+        session_title: "cache work".to_owned(),
+        pane: PaneId(9),
+        harness,
+    };
+
+    // When saving it and loading the plate.
+    let id = store.insert_plate_item(&item, at_ms(5_000))?;
+
+    // Then it loads back as it was added.
+    assert_eq!(
+        store.plate_items()?,
+        vec![item.into_item(id, at_ms(5_000))],
+        "a saved item should load back with every field"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::offered_by_an_agent(ItemState::Parked { by_user: false })]
+#[case::parked_by_the_user(ItemState::Parked { by_user: true })]
+#[case::waiting(ItemState::Waiting)]
+#[case::your_move(ItemState::YourMove)]
+fn saved_plate_item_loads_back(#[case] state: ItemState) -> Result<(), Report<StoreError>> {
+    // Given a saved item.
+    let store = Store::open_in_memory()?;
+    let id = store.insert_plate_item(&new_plate_item("before"), at_ms(1_000))?;
+    let saved = PlateItem {
+        verb: Verb::Merge,
+        state,
+        title: "after".to_owned(),
+        what: Some("Ready to merge.".to_owned()),
+        links: vec![
+            "https://z.example".to_owned(),
+            "https://a.example".to_owned(),
+        ],
+        urgent: true,
+        changed_at: at_ms(2_000),
+        ..plate_item(&store, id)?
+    };
+
+    // When saving the changed item and loading the plate.
+    store.save_plate_item(&saved)?;
+
+    // Then the change loads back.
+    assert_eq!(
+        store.plate_items()?,
+        vec![saved],
+        "a saved change should load back, links in order"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn plate_item_saved_done_loads_back_done() -> Result<(), Report<StoreError>> {
+    // Given a saved open item.
+    let store = Store::open_in_memory()?;
+    let id = store.insert_plate_item(&new_plate_item("ship it"), at_ms(1_000))?;
+
+    // When saving it closed at 2 s.
+    save_done(&store, &plate_item(&store, id)?, at_ms(2_000))?;
+
+    // Then it loads back done at 2 s.
+    let item = plate_item(&store, id)?;
+    assert_eq!(
+        (item.state, item.done_at),
+        (ItemState::Done, Some(at_ms(2_000))),
+        "a closed item should load back done, with when it was closed"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn deleting_done_items_before_a_time_keeps_later_done_and_open_items()
+-> Result<(), Report<StoreError>> {
+    // Given an item closed at 5 s, one closed at 50 s, an open one and a
+    // parked one.
+    let store = Store::open_in_memory()?;
+    let early = store.insert_plate_item(&new_plate_item("early"), at_ms(1_000))?;
+    save_done(&store, &plate_item(&store, early)?, at_ms(5_000))?;
+    let late = store.insert_plate_item(&new_plate_item("late"), at_ms(1_000))?;
+    save_done(&store, &plate_item(&store, late)?, at_ms(50_000))?;
+    let open = store.insert_plate_item(&new_plate_item("open"), at_ms(1_000))?;
+    let parked = store.insert_plate_item(
+        &NewPlateItem {
+            state: ItemState::Parked { by_user: true },
+            ..new_plate_item("parked")
+        },
+        at_ms(1_000),
+    )?;
+
+    // When deleting the items closed before 30 s.
+    store.delete_done_before(at_ms(30_000))?;
+
+    // Then only the item closed at 5 s is gone.
+    let ids: Vec<PlateItemId> = store
+        .plate_items()?
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![late, open, parked],
+        "only items closed before the time should be deleted"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::unknown_verb("UPDATE plate_items SET verb = 'ponder'")]
+#[case::unknown_state("UPDATE plate_items SET state = 'someday'")]
+#[case::links_not_a_list("UPDATE plate_items SET links = '\"https://a.example\"'")]
+fn plate_row_that_does_not_read_is_skipped(#[case] spoil: &str) -> Result<(), Report<StoreError>> {
+    // Given a saved item whose row was changed to something orb doesn't know.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    Store::open(&path)?.insert_plate_item(&new_plate_item("spoilt"), at_ms(1_000))?;
+    Connection::open(&path)
+        .and_then(|conn| conn.execute_batch(spoil))
+        .change_context(StoreError)?;
+
+    // When loading the plate.
+    let items = Store::open(&path)?.plate_items()?;
+
+    // Then the row is left out.
+    assert_eq!(items, Vec::new(), "a row orb can't read should be skipped");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn deleting_a_session_leaves_its_plate_items() -> Result<(), Report<StoreError>> {
+    // Given a session and an item added from its pane.
+    let store = Store::open_in_memory()?;
+    let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+    let (session, pane) = store.insert_session(
+        project,
+        SessionKind::Plain,
+        Path::new("/tmp/orb"),
+        None,
+        None,
+        None,
+        1_000,
+    )?;
+    let id = store.insert_plate_item(
+        &NewPlateItem {
+            session,
+            pane,
+            ..new_plate_item("review the fix")
+        },
+        at_ms(2_000),
+    )?;
+
+    // When deleting the session.
+    store.delete_session(session)?;
+
+    // Then the item is still on the plate, pointing at the session and pane.
+    let item = plate_item(&store, id)?;
+    assert_eq!(
+        (item.session, item.pane),
+        (session, pane),
+        "a session's plate items should outlive it"
     );
     Ok(())
 }
@@ -1895,6 +2230,10 @@ fn log_text(path: &Path) -> String {
 #[case(10)]
 #[case(11)]
 #[case(12)]
+#[case(13)]
+#[case(14)]
+#[case(15)]
+#[case(16)]
 fn upgrading_a_past_version_leaves_its_copy(
     #[case] version: usize,
 ) -> Result<(), Report<StoreError>> {

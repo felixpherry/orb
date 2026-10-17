@@ -5,15 +5,17 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use error_stack::{Report, ResultExt};
+use jiff::tz::TimeZone;
 use ratatui::layout::Rect;
 
 use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
 use super::{
-    ApiAdd, ApiPlace, ApiStart, ApiStartError, ColonyFolderReady, ColonyJob, FAST_POLL, Placement,
-    RemoveFolder, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps, WorktreeJob,
-    WorktreeReady, current_branch, now_ms, spawn_sessions_actor,
+    ApiAdd, ApiPlace, ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, ApiStart, ApiStartError,
+    ColonyFolderReady, ColonyJob, FAST_POLL, Placement, RemoveFolder, SAVE_FAILED, SLOW_POLL,
+    SessionsActor, SessionsActorDeps, WorktreeJob, WorktreeReady, current_branch, now_ms,
+    spawn_sessions_actor,
 };
 use crate::Focus;
 use crate::TextInput;
@@ -29,6 +31,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
 use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
+use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, PlateRefusal, Verb};
 use crate::feat::sessions::state::{
     Agent, AgentStatus, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session, SessionKind,
     SidebarItem,
@@ -41,7 +44,7 @@ use crate::feat::sessions::validator::{COLONIST_WORKING, SETTLE_IN_PROGRESS};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::zmx::zmx_service::fake::FakeZmx;
 use crate::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxService, ZmxSession};
-use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
+use crate::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
 use kameo::error::SendError;
 use kameo::prelude::{ActorRef, Message};
 use std::ffi::OsString;
@@ -670,6 +673,7 @@ fn start_in(
         incognito_root: incognito_root.to_owned(),
         report: Reporter::new(|_| {}),
         integration_missing: false,
+        tz: TimeZone::UTC,
     });
     (actor, state)
 }
@@ -707,6 +711,7 @@ fn deps_beside(
         incognito_root: PathBuf::from(INCOGNITO_ROOT),
         report: Reporter::new(|_| {}),
         integration_missing: false,
+        tz: TimeZone::UTC,
     }
 }
 
@@ -2512,6 +2517,334 @@ fn restore_keeps_a_migrated_session_jump() -> Result<(), Report<StoreError>> {
         state.read().jumps.entries(),
         [SidebarItem::Session(inserted.session)],
         "a saved session jump should come back"
+    );
+    Ok(())
+}
+
+/// Saves a review titled `title` from pane 1 of session 1, added at 1 s
+/// past the epoch, and closed at `done_at` when given.
+fn seed_plate_item(
+    store: &Store,
+    title: &str,
+    done_at: Option<SystemTime>,
+) -> Result<(), Report<StoreError>> {
+    let added = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let item = NewPlateItem {
+        verb: Verb::Review,
+        state: ItemState::YourMove,
+        title: title.to_owned(),
+        what: None,
+        links: Vec::new(),
+        urgent: false,
+        session: SessionId(1),
+        session_title: "session 1".to_owned(),
+        pane: PaneId(1),
+        harness: None,
+    };
+    let id = store.insert_plate_item(&item, added)?;
+    match done_at {
+        Some(at) => store.save_plate_item(&PlateItem {
+            state: ItemState::Done,
+            done_at: Some(at),
+            changed_at: at,
+            ..item.into_item(id, added)
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The titles on `state`'s plate, in id order.
+fn plate_titles(state: &State) -> Vec<String> {
+    state
+        .read()
+        .plate
+        .items()
+        .iter()
+        .map(|item| item.title.clone())
+        .collect()
+}
+
+#[rstest::rstest]
+fn restore_deletes_items_done_before_today() -> Result<(), Report<StoreError>> {
+    // Given an item closed at 1 s past the epoch, long before today in UTC.
+    let store = Store::open_in_memory()?;
+    seed_plate_item(
+        &store,
+        "old",
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+    )?;
+
+    // When the actor starts.
+    let (actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+    // Then it is neither on the plate nor in the store.
+    assert!(
+        plate_titles(&state).is_empty(),
+        "an item closed before today shouldn't come back"
+    );
+    assert!(
+        actor.store.plate_items()?.is_empty(),
+        "an item closed before today should be deleted from the store"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn restore_loads_open_and_todays_done_items() -> Result<(), Report<StoreError>> {
+    // Given an open item and an item closed just now.
+    let store = Store::open_in_memory()?;
+    seed_plate_item(&store, "open", None)?;
+    seed_plate_item(&store, "closed today", Some(SystemTime::now()))?;
+
+    // When the actor starts.
+    let (actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+    // Then both are on the plate, oldest first, with no error shown.
+    assert_eq!(
+        plate_titles(&state),
+        ["open", "closed today"],
+        "open items and items closed today should come back"
+    );
+    assert_eq!(
+        error_of(&actor),
+        None,
+        "loading the plate shouldn't show an error"
+    );
+    Ok(())
+}
+
+/// A review titled `title`, the user's move, from pane 1 of session 1.
+fn new_review(title: &str) -> NewPlateItem {
+    NewPlateItem {
+        verb: Verb::Review,
+        state: ItemState::YourMove,
+        title: title.to_owned(),
+        what: None,
+        links: Vec::new(),
+        urgent: false,
+        session: SessionId(1),
+        session_title: "session 1".to_owned(),
+        pane: PaneId(1),
+        harness: None,
+    }
+}
+
+/// Asks `actor` to add `item` to the plate and waits, at most [`LIMIT`],
+/// for its id.
+async fn api_plate_add(
+    actor: &ActorRef<SessionsActor>,
+    item: NewPlateItem,
+) -> Result<PlateItemId, Report<StoreError>> {
+    tokio::time::timeout(LIMIT, actor.ask(ApiPlateAdd { item }))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't answer in time")?
+        .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
+}
+
+/// Asks `actor` for the plate change `msg` and waits, at most [`LIMIT`],
+/// for its answer, a refusal included.
+async fn api_plate_change<M>(
+    actor: &ActorRef<SessionsActor>,
+    msg: M,
+) -> Result<Result<(), PlateRefusal>, Report<StoreError>>
+where
+    SessionsActor: Message<M, Reply = Result<(), PlateRefusal>>,
+    M: std::fmt::Debug + Send + 'static,
+{
+    match tokio::time::timeout(LIMIT, actor.ask(msg))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't answer in time")?
+    {
+        Ok(()) => Ok(Ok(())),
+        Err(SendError::HandlerError(refusal)) => Ok(Err(refusal)),
+        Err(error) => Err(Report::new(StoreError).attach(format!("{error:?}"))),
+    }
+}
+
+/// The actor spawned over a store file in a fresh temp dir, with the dir
+/// and the file's path.
+async fn spawned_over_a_file()
+-> Result<(ActorRef<SessionsActor>, State, tempfile::TempDir, PathBuf), Report<StoreError>> {
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    let store = Store::open(&path)?;
+    let zmx = zmx_running(&store);
+    let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
+    Ok((actor, state, dir, path))
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_add_replies_with_the_saved_item() -> Result<(), Report<StoreError>> {
+    // Given the actor over a store file.
+    let (actor, _state, _dir, path) = spawned_over_a_file().await?;
+
+    // When an agent adds a review.
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // Then the item it replies with is saved in the store file.
+    let saved: Vec<(PlateItemId, String)> = Store::open(&path)?
+        .plate_items()?
+        .into_iter()
+        .map(|item| (item.id, item.title))
+        .collect();
+    assert_eq!(
+        saved,
+        [(id, "review the plan".to_owned())],
+        "the added item should be saved under the id it replies with"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_add_puts_the_item_in_the_state() -> Result<(), Report<StoreError>> {
+    // Given the actor over a store file.
+    let (actor, state, _dir, _path) = spawned_over_a_file().await?;
+
+    // When an agent adds a review.
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // Then the plate holds it, the user's move.
+    let shown = state
+        .read()
+        .plate
+        .item(id)
+        .map(|item| (item.title.clone(), item.state));
+    assert_eq!(
+        shown,
+        Some(("review the plan".to_owned(), ItemState::YourMove)),
+        "the added item should be on the plate at once"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_update_saves_the_change() -> Result<(), Report<StoreError>> {
+    // Given a review on the plate, saved in a store file.
+    let (actor, _state, _dir, path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // When an agent retitles it and moves it to Waiting.
+    let change = PlateChange {
+        title: Some("review the new plan".to_owned()),
+        waiting: Some(true),
+        ..PlateChange::default()
+    };
+    let answer = api_plate_change(&actor, ApiPlateUpdate { item: id, change }).await?;
+
+    // Then the store file holds the new title and state.
+    let saved: Vec<(String, ItemState)> = Store::open(&path)?
+        .plate_items()?
+        .into_iter()
+        .map(|item| (item.title, item.state))
+        .collect();
+    assert_eq!(
+        (answer, saved),
+        (
+            Ok(()),
+            vec![("review the new plan".to_owned(), ItemState::Waiting)]
+        ),
+        "an update should be saved"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_update_of_a_done_item_is_refused() -> Result<(), Report<StoreError>> {
+    // Given a review an agent closed.
+    let (actor, _state, _dir, _path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+    api_plate_change(&actor, ApiPlateDone { item: id })
+        .await?
+        .map_err(|refusal| Report::new(StoreError).attach(refusal.to_string()))?;
+
+    // When an agent retitles it.
+    let change = PlateChange {
+        title: Some("again".to_owned()),
+        ..PlateChange::default()
+    };
+    let answer = api_plate_change(&actor, ApiPlateUpdate { item: id, change }).await?;
+
+    // Then it's refused as done.
+    assert_eq!(
+        answer,
+        Err(PlateRefusal::Done(id)),
+        "a done item can't change"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_done_stamps_done_at() -> Result<(), Report<StoreError>> {
+    // Given a review on the plate.
+    let (actor, state, _dir, _path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+
+    // When an agent closes it.
+    let answer = api_plate_change(&actor, ApiPlateDone { item: id }).await?;
+
+    // Then it's done, with its close time stamped.
+    let shown = state
+        .read()
+        .plate
+        .item(id)
+        .map(|item| (item.state, item.done_at.is_some()));
+    assert_eq!(
+        (answer, shown),
+        (Ok(()), Some((ItemState::Done, true))),
+        "closing an item should mark it done now"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_done_of_a_done_item_keeps_its_close_time() -> Result<(), Report<StoreError>> {
+    // Given a review an agent closed.
+    let (actor, state, _dir, _path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+    api_plate_change(&actor, ApiPlateDone { item: id })
+        .await?
+        .map_err(|refusal| Report::new(StoreError).attach(refusal.to_string()))?;
+    let closed = state.read().plate.item(id).and_then(|item| item.done_at);
+
+    // When an agent closes it again.
+    let answer = api_plate_change(&actor, ApiPlateDone { item: id }).await?;
+
+    // Then that's no error, and its close time stays.
+    let after = state.read().plate.item(id).and_then(|item| item.done_at);
+    assert_eq!(
+        (answer, closed.is_some(), after),
+        (Ok(()), true, closed),
+        "a second close should change nothing"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_plate_update_of_an_unknown_item_is_not_found() -> Result<(), Report<StoreError>> {
+    // Given an empty plate.
+    let (actor, _state, _dir, _path) = spawned_over_a_file().await?;
+
+    // When an agent updates item 9.
+    let update = ApiPlateUpdate {
+        item: PlateItemId(9),
+        change: PlateChange::default(),
+    };
+    let answer = api_plate_change(&actor, update).await?;
+
+    // Then it's refused as not found.
+    assert_eq!(
+        answer,
+        Err(PlateRefusal::NotFound(PlateItemId(9))),
+        "an update needs a real item"
     );
     Ok(())
 }
@@ -8447,6 +8780,7 @@ impl PaneStatus {
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
             report: Reporter::new(|_| {}),
             integration_missing: false,
+            tz: TimeZone::UTC,
         });
         Ok(Self {
             dir,
@@ -8861,6 +9195,7 @@ async fn spawned_reporting(
         incognito_root: PathBuf::from(INCOGNITO_ROOT),
         report: report.clone(),
         integration_missing: false,
+        tz: TimeZone::UTC,
     });
     tokio::time::timeout(LIMIT, actor.wait_for_startup())
         .await

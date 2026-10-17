@@ -8,6 +8,7 @@ use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::{PickerMemory, PickerState};
+use crate::feat::plate::Plate;
 use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Agent, Notice, NoticeKind, Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -81,6 +82,10 @@ pub struct AppState {
     /// session) and by the sessions actor, its owner (restoring the saved
     /// list).
     pub jumps: JumpList,
+    /// What needs the user across all of orb (see [`Plate`]). Written by the
+    /// sessions actor, its owner: loaded at start, then each agent's add,
+    /// update and done.
+    pub plate: Plate,
     /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
     /// its owner; the intent handler also clears `notice` on the next intent.
     pub worktrees: Worktrees,

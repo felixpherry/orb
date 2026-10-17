@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::feat::layout::tree::Split;
+use crate::feat::plate::Verb;
 use crate::feat::sessions::state::AgentStatus;
-use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
+use crate::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
 
 /// The socket's file name inside orb's folder (`~/.orb`).
 pub const SOCKET_FILE: &str = "orb.sock";
@@ -189,6 +190,54 @@ pub enum Op {
     /// The last reply in a pane's agent's transcript.
     #[serde(rename = "agent.reply")]
     AgentReply { pane: PaneId },
+    /// A new item on the user's plate.
+    #[serde(rename = "plate.add")]
+    PlateAdd {
+        /// The user's next step.
+        title: String,
+        /// One of the 11 verbs, lowercase; checked by orb.
+        verb: String,
+        /// What happened, a sentence or two.
+        #[serde(default)]
+        what: Option<String>,
+        /// URLs or file paths, in order.
+        #[serde(default)]
+        links: Vec<String>,
+        #[serde(default)]
+        urgent: bool,
+        /// Waiting on someone other than the user.
+        #[serde(default)]
+        waiting: bool,
+        /// Where ⏎ goes, else the caller's pane.
+        #[serde(default)]
+        pane: Option<PaneId>,
+    },
+    /// Changes an open item; a field left out stays.
+    #[serde(rename = "plate.update")]
+    PlateUpdate {
+        item: PlateItemId,
+        #[serde(default)]
+        title: Option<String>,
+        /// One of the 11 verbs, lowercase; checked by orb.
+        #[serde(default)]
+        verb: Option<String>,
+        #[serde(default)]
+        what: Option<String>,
+        /// Replaces every link when given.
+        #[serde(default)]
+        links: Option<Vec<String>>,
+        #[serde(default)]
+        urgent: Option<bool>,
+        /// Waiting on others (true) or the user's move (false).
+        #[serde(default)]
+        waiting: Option<bool>,
+    },
+    /// Closes an item.
+    #[serde(rename = "plate.done")]
+    PlateDone { item: PlateItemId },
+    /// Open items and those done today.
+    #[serde(rename = "plate.list")]
+    PlateList,
 }
 
 /// The program `agent start` types.
@@ -230,6 +279,8 @@ pub enum ErrorCode {
     NotFound,
     /// The session is settled, so nothing in it may change.
     Settled,
+    /// A colonist asked to add a plate item; colonists report to their chief.
+    Colonist,
     /// A session is already starting.
     Starting,
     /// The agent waits for an approval or an answer.
@@ -451,4 +502,35 @@ pub struct ReplyResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentsResult {
     pub agents: Vec<AgentRow>,
+}
+
+/// What `plate add` replies: the new item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemResult {
+    pub item: PlateItemId,
+}
+
+/// One item in `plate list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlateItemRow {
+    pub id: PlateItemId,
+    pub verb: Verb,
+    /// `your_move`, `waiting`, `parked` or `done`.
+    pub state: &'static str,
+    pub title: String,
+    pub what: Option<String>,
+    pub links: Vec<String>,
+    pub urgent: bool,
+    /// The session it was added from; it may since be gone.
+    pub session: SessionId,
+    /// Where ⏎ goes.
+    pub pane: PaneId,
+    /// Whole seconds since the item last changed state.
+    pub age_s: u64,
+}
+
+/// `plate list`'s result.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlateResult {
+    pub items: Vec<PlateItemRow>,
 }

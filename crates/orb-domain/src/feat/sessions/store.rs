@@ -13,6 +13,10 @@
 //! focused pane, swap layout and whether it was changed by hand, and each
 //! pane its directory, zmx session, name and the command that brings its
 //! agent back; an agent keeps the pane it runs in.
+//! It keeps the plate's items: each one's verb, state, title, description,
+//! links and urgency, the session and pane it came from, that session's
+//! title then, the harness that added it, and when it was made, last moved
+//! and closed. An item's row outlives its session.
 //! The schema grows through an ordered list of migrations. Before any
 //! upgrade the database is copied aside to `<file>.bak-v<old version>`, and
 //! only the three newest copies are kept. A database from a newer orb is
@@ -41,6 +45,7 @@ use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
 mod agents;
 mod migrate;
+mod plate;
 mod projects;
 mod sessions;
 mod ui;

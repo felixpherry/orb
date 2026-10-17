@@ -89,6 +89,9 @@
 //! It reports a notice for the frontend to announce when an agent it has
 //! polled since orb started finishes a turn, or starts needing an approval or
 //! an answer, in any project, unless the agent is being deleted.
+//!
+//! It keeps the plate's items: at start it deletes those closed before
+//! today, and it adds, changes and closes items for agents.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -98,6 +101,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
+use jiff::tz::TimeZone;
 use kameo::mailbox;
 use kameo::prelude::{
     Actor, ActorRef, Context, DelegatedReply, Message, Reply, ReplySender, Spawn,
@@ -134,12 +138,15 @@ use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
 mod panes;
+mod plate;
 mod poll;
 mod projects;
 mod restore;
 mod settle;
 mod start;
 
+use self::plate::restore_plate;
+pub use self::plate::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate};
 use self::poll::{agent_mut, display_title, show};
 use self::projects::{KitCopy, own_folder};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
@@ -179,6 +186,8 @@ pub struct SessionsActorDeps {
     /// Neither orb's Claude hook nor its pi extension is installed; the mode
     /// line says how to install them.
     pub integration_missing: bool,
+    /// The user's time zone: where today starts for the plate's done items.
+    pub tz: TimeZone,
 }
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend

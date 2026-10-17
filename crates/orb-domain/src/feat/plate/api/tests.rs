@@ -1,0 +1,389 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::{PlateAsk, list, plan};
+use crate::AppState;
+use crate::feat::control::protocol::{ErrorCode, Op};
+use crate::feat::harness::HarnessId;
+use crate::feat::plate::state::test_item;
+use crate::feat::plate::{ItemState, NewPlateItem, Plate, Verb};
+use crate::feat::sessions::state::AgentStatus;
+use crate::ids::{PaneId, PlateItemId, SessionId};
+use crate::intent_handler::test_support::{agent, colony_with_colonists, settle, state_with};
+
+/// A `plate add` of a review titled `t`, waiting when `waiting`, with ⏎
+/// going to `pane` when given.
+fn add_op(verb: &str, waiting: bool, pane: Option<PaneId>) -> Op {
+    Op::PlateAdd {
+        title: "t".into(),
+        verb: verb.into(),
+        what: None,
+        links: vec![],
+        urgent: false,
+        waiting,
+        pane,
+    }
+}
+
+/// The item an add from `caller` plans in `app`, or the refusal's code;
+/// `failed` when it plans anything but an add.
+fn planned_item(
+    app: &AppState,
+    op: &Op,
+    caller: Option<PaneId>,
+) -> Result<NewPlateItem, ErrorCode> {
+    match plan(app, op, caller) {
+        Ok(PlateAsk::Add(add)) => Ok(add.item),
+        Ok(_) => Err(ErrorCode::Failed),
+        Err(error) => Err(error.code),
+    }
+}
+
+/// Session 1 named `fix login`, with idle agent 1 in pane 1.
+fn one_session() -> AppState {
+    let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+    for session in &mut app.sessions.sessions {
+        session.name = Some("fix login".into());
+    }
+    app
+}
+
+#[rstest::rstest]
+fn add_from_a_normal_pane_comes_from_its_session_pane_and_agent() {
+    // Given session 1 named `fix login`, with idle agent 1 in pane 1.
+    let app = one_session();
+
+    // When planning a review added from pane 1.
+    let item = planned_item(&app, &add_op("review", false, None), Some(PaneId(1)));
+
+    // Then it's the user's move, from session 1, pane 1 and claude.
+    assert_eq!(
+        item,
+        Ok(NewPlateItem {
+            verb: Verb::Review,
+            state: ItemState::YourMove,
+            title: "t".into(),
+            what: None,
+            links: vec![],
+            urgent: false,
+            session: SessionId(1),
+            session_title: "fix login".into(),
+            pane: PaneId(1),
+            harness: Some(HarnessId::new("claude")),
+        }),
+        "an item comes from the caller's session, pane and agent"
+    );
+}
+
+#[rstest::rstest]
+fn add_with_another_live_pane_goes_there() {
+    // Given sessions 1 and 2 with agents in panes 1 and 2.
+    let app = state_with(
+        vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+        1,
+    );
+
+    // When planning an add from pane 1 with --pane 2.
+    let item = planned_item(
+        &app,
+        &add_op("review", false, Some(PaneId(2))),
+        Some(PaneId(1)),
+    );
+
+    // Then ⏎ goes to pane 2 while the item stays session 1's.
+    assert_eq!(
+        item.map(|item| (item.session, item.pane)),
+        Ok((SessionId(1), PaneId(2))),
+        "--pane only changes where ⏎ goes"
+    );
+}
+
+#[rstest::rstest]
+fn add_with_an_unknown_pane_is_not_found() {
+    // Given session 1 with agent 1 in pane 1.
+    let app = one_session();
+
+    // When planning an add from pane 1 with --pane 9.
+    let item = planned_item(
+        &app,
+        &add_op("review", false, Some(PaneId(9))),
+        Some(PaneId(1)),
+    );
+
+    // Then it's refused with not_found.
+    assert_eq!(item, Err(ErrorCode::NotFound), "--pane must be a live pane");
+}
+
+#[rstest::rstest]
+fn add_from_a_colonist_is_refused() {
+    // Given colony 1 and its colonist 2.
+    let app = colony_with_colonists([AgentStatus::Idle; 3]);
+
+    // When planning an add from the colonist's pane 2.
+    let refused = plan(&app, &add_op("review", false, None), Some(PaneId(2)))
+        .map(drop)
+        .map_err(|error| (error.code, error.message));
+
+    // Then it's refused with colonist, and the colonist is told why.
+    assert_eq!(
+        refused,
+        Err((
+            ErrorCode::Colonist,
+            "colonists report to their chief".to_owned()
+        )),
+        "a colonist reports to its chief instead"
+    );
+}
+
+#[rstest::rstest]
+fn add_from_a_colony_is_planned() {
+    // Given colony 1 and its colonist 2.
+    let app = colony_with_colonists([AgentStatus::Idle; 3]);
+
+    // When planning an add from the colony's pane 1.
+    let item = planned_item(&app, &add_op("review", false, None), Some(PaneId(1)));
+
+    // Then the chief's item comes from session 1.
+    assert_eq!(
+        item.map(|item| item.session),
+        Ok(SessionId(1)),
+        "a colony's chief may add items"
+    );
+}
+
+#[rstest::rstest]
+fn add_from_a_settled_session_is_settled() {
+    // Given session 1, settled.
+    let app = settle(one_session(), &[1]);
+
+    // When planning an add from pane 1.
+    let item = planned_item(&app, &add_op("review", false, None), Some(PaneId(1)));
+
+    // Then it's refused with settled.
+    assert_eq!(
+        item,
+        Err(ErrorCode::Settled),
+        "a settled session adds nothing"
+    );
+}
+
+#[rstest::rstest]
+fn add_without_a_caller_is_no_target() {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning an add from outside orb.
+    let item = planned_item(&app, &add_op("review", false, None), None);
+
+    // Then it's refused with no_target.
+    assert_eq!(
+        item,
+        Err(ErrorCode::NoTarget),
+        "an item needs a session to come from"
+    );
+}
+
+#[rstest::rstest]
+fn add_with_an_unknown_verb_names_every_verb() {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning an add with the verb `fix`.
+    let refused = plan(&app, &add_op("fix", false, None), Some(PaneId(1)))
+        .map(drop)
+        .map_err(|error| (error.code, error.message));
+
+    // Then it's a bad request naming all 11 verbs.
+    assert_eq!(
+        refused,
+        Err((
+            ErrorCode::BadRequest,
+            "unknown verb fix; use one of decide, review, read, walk, pick, approve, \
+             answer, reply, merge, note, idea"
+                .to_owned()
+        )),
+        "an unknown verb is refused with the verbs orb takes"
+    );
+}
+
+#[rstest::rstest]
+fn idea_add_lands_parked_as_an_offer() {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning an idea.
+    let item = planned_item(&app, &add_op("idea", false, None), Some(PaneId(1)));
+
+    // Then it lands parked, not by the user.
+    assert_eq!(
+        item.map(|item| item.state),
+        Ok(ItemState::Parked { by_user: false }),
+        "an idea is the agent's offer"
+    );
+}
+
+#[rstest::rstest]
+fn waiting_add_lands_waiting() {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning a review with --waiting.
+    let item = planned_item(&app, &add_op("review", true, None), Some(PaneId(1)));
+
+    // Then it waits on others.
+    assert_eq!(
+        item.map(|item| item.state),
+        Ok(ItemState::Waiting),
+        "--waiting lands the item in Waiting"
+    );
+}
+
+#[rstest::rstest]
+fn idea_add_that_waits_is_a_bad_request() {
+    // Given session 1 with agent 1.
+    let app = one_session();
+
+    // When planning an idea with --waiting.
+    let item = planned_item(&app, &add_op("idea", true, None), Some(PaneId(1)));
+
+    // Then it's a bad request.
+    assert_eq!(item, Err(ErrorCode::BadRequest), "an idea can't be waiting");
+}
+
+/// A `plate update` of `item` that moves it to Waiting.
+fn update_op(item: i64) -> Op {
+    Op::PlateUpdate {
+        item: PlateItemId(item),
+        title: None,
+        verb: None,
+        what: None,
+        links: None,
+        urgent: None,
+        waiting: Some(true),
+    }
+}
+
+#[rstest::rstest]
+#[case::update(update_op(9))]
+#[case::done(Op::PlateDone { item: PlateItemId(9) })]
+fn change_of_an_unknown_item_is_not_found(#[case] op: Op) {
+    // Given a plate holding only item 1.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::YourMove)]);
+
+    // When planning the change of item 9.
+    let planned = plan(&app, &op, None).map(drop).map_err(|error| error.code);
+
+    // Then it's refused with not_found.
+    assert_eq!(
+        planned,
+        Err(ErrorCode::NotFound),
+        "{op:?} needs a real item"
+    );
+}
+
+#[rstest::rstest]
+fn update_of_a_done_item_is_a_bad_request() {
+    // Given item 1, done.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::Done)]);
+
+    // When planning an update of item 1.
+    let refused = plan(&app, &update_op(1), None)
+        .map(drop)
+        .map_err(|error| (error.code, error.message));
+
+    // Then it's a bad request saying the item is done.
+    assert_eq!(
+        refused,
+        Err((ErrorCode::BadRequest, "item is done".to_owned())),
+        "a done item can't change"
+    );
+}
+
+#[rstest::rstest]
+fn update_from_anywhere_is_planned() {
+    // Given item 1, the user's move.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::YourMove)]);
+
+    // When planning an update of item 1 from outside orb.
+    let planned = plan(&app, &update_op(1), None);
+
+    // Then it asks the actor for the change.
+    assert!(
+        matches!(&planned, Ok(PlateAsk::Update(update)) if update.item == PlateItemId(1)),
+        "any agent may update any item, got {planned:?}"
+    );
+}
+
+#[rstest::rstest]
+fn list_shows_open_items_and_those_done_today() {
+    // Given an open item, an item closed at 20 s and one closed at 120 s.
+    let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+    let mut app = one_session();
+    let late = {
+        let mut item = test_item(3, ItemState::Done);
+        item.done_at = Some(at(120));
+        item
+    };
+    app.plate = Plate::from_saved(vec![
+        test_item(1, ItemState::Waiting),
+        test_item(2, ItemState::Done),
+        late,
+    ]);
+
+    // When listing with today starting at 100 s.
+    let reply = list(&app, at(200), at(100));
+
+    // Then the open item and the one closed after 100 s are listed.
+    let ids: Vec<i64> = reply
+        .result
+        .as_ref()
+        .and_then(|result| result.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(serde_json::Value::as_i64))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(ids, [1, 3], "items closed before today aren't listed");
+}
+
+#[rstest::rstest]
+fn list_row_carries_its_state_and_age() {
+    // Given an item waiting since 10 s.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::Waiting)]);
+
+    // When listing at 70 s.
+    let reply = list(
+        &app,
+        UNIX_EPOCH + Duration::from_secs(70),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    // Then its row reads waiting, 60 s old, with its verb in lowercase.
+    let row = reply
+        .result
+        .as_ref()
+        .and_then(|result| result.get("items"))
+        .and_then(|items| items.get(0))
+        .map(|row| {
+            (
+                row.get("state").cloned(),
+                row.get("age_s").cloned(),
+                row.get("verb").cloned(),
+            )
+        });
+    assert_eq!(
+        row,
+        Some((
+            Some("waiting".into()),
+            Some(60.into()),
+            Some("review".into())
+        )),
+        "a row says where the item stands and how long it has"
+    );
+}

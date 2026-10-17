@@ -1,4 +1,4 @@
-//! The `orb session|tab|pane|agent …` commands: turn the words typed into one
+//! The `orb session|tab|pane|agent|plate …` commands: turn the words typed into one
 //! request, send it to the running orb, print its reply and pick the exit code
 //! (0 done, 1 refused or orb not running, 2 typed wrong).
 
@@ -13,10 +13,10 @@ use crate::feat::control::agent::Timing;
 use crate::feat::control::protocol::{
     AgentKind, ApiError, Direction, ErrorCode, Op, Reply, Request,
 };
-use crate::ids::{PaneId, ProjectId, SessionId};
+use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
 
 /// The first arguments that make `orb` a client.
-pub const NOUNS: [&str; 4] = ["session", "tab", "pane", "agent"];
+pub const NOUNS: [&str; 5] = ["session", "tab", "pane", "agent", "plate"];
 
 /// What the commands accept, shown when they're typed wrong.
 const USAGE: &str = "usage:
@@ -44,7 +44,11 @@ const USAGE: &str = "usage:
   orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
   orb agent wait <pane> [--timeout <ms>]
   orb agent get <pane>
-  orb agent reply <pane>";
+  orb agent reply <pane>
+  orb plate add <title> --verb <verb> [--what <text>] [--link <url>]... [--urgent] [--waiting] [--pane <id>]
+  orb plate update <item> [--title <text>] [--verb <verb>] [--what <text>] [--link <url>]... [--urgent|--not-urgent] [--waiting|--your-move]
+  orb plate done <item>
+  orb plate list";
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
 /// pane `caller` when it runs inside orb. The reply's result goes to `out`, an
@@ -171,8 +175,79 @@ fn parse(args: &[OsString]) -> Option<Op> {
         }),
         ("pane", "send" | "keys" | "run" | "read", rest) => pane_io(verb, rest),
         ("agent", verb, rest) => agent_words(verb, rest),
+        ("plate", verb, rest) => plate_words(verb, rest),
         _ => None,
     }
+}
+
+/// The plate request `verb` and its words ask for.
+fn plate_words(verb: &str, rest: &[&str]) -> Option<Op> {
+    match verb {
+        "add" => {
+            let words = Words::split_repeating(
+                rest,
+                &[
+                    ("--verb", true),
+                    ("--what", true),
+                    ("--link", true),
+                    ("--urgent", false),
+                    ("--waiting", false),
+                    ("--pane", true),
+                ],
+                &["--link"],
+            )?;
+            let &[title] = words.positional.as_slice() else {
+                return None;
+            };
+            Some(Op::PlateAdd {
+                title: title.to_owned(),
+                verb: words.value("--verb")?.to_owned(),
+                what: words.value("--what").map(str::to_owned),
+                links: owned(&words.values("--link")),
+                urgent: words.flags.contains_key("--urgent"),
+                waiting: words.flags.contains_key("--waiting"),
+                pane: words.id("--pane").ok()?.map(PaneId),
+            })
+        }
+        "update" => {
+            let words = Words::split_repeating(
+                rest,
+                &[
+                    ("--title", true),
+                    ("--verb", true),
+                    ("--what", true),
+                    ("--link", true),
+                    ("--urgent", false),
+                    ("--not-urgent", false),
+                    ("--waiting", false),
+                    ("--your-move", false),
+                ],
+                &["--link"],
+            )?;
+            Some(Op::PlateUpdate {
+                item: PlateItemId(words.target().ok()??),
+                title: words.value("--title").map(str::to_owned),
+                verb: words.value("--verb").map(str::to_owned),
+                what: words.value("--what").map(str::to_owned),
+                links: words
+                    .lists
+                    .contains_key("--link")
+                    .then(|| owned(&words.values("--link"))),
+                urgent: words.either("--urgent", "--not-urgent").ok()?,
+                waiting: words.either("--waiting", "--your-move").ok()?,
+            })
+        }
+        "done" => Some(Op::PlateDone {
+            item: PlateItemId(one_id(rest)?),
+        }),
+        "list" if rest.is_empty() => Some(Op::PlateList),
+        _ => None,
+    }
+}
+
+/// `words`, each as an owned string.
+fn owned(words: &[&str]) -> Vec<String> {
+    words.iter().map(|&word| word.to_owned()).collect()
 }
 
 /// The agent request `verb` and its words ask for.
@@ -294,6 +369,8 @@ struct Words<'a> {
     positional: Vec<&'a str>,
     /// Each flag given, with its value when it takes one.
     flags: HashMap<&'a str, Option<&'a str>>,
+    /// Each flag that may be given more than once, with its values in order.
+    lists: HashMap<&'a str, Vec<&'a str>>,
     /// Every word after `--`, kept as typed.
     after: Vec<&'a str>,
 }
@@ -304,6 +381,16 @@ impl<'a> Words<'a> {
     /// is among the known flags, it ends the flags and every word after it goes
     /// to `after`.
     fn split(rest: &[&'a str], known: &[(&str, bool)]) -> Option<Self> {
+        Self::split_repeating(rest, known, &[])
+    }
+
+    /// [`Words::split`], except that each flag named in `repeating` may be
+    /// given more than once; its values collect in order.
+    fn split_repeating(
+        rest: &[&'a str],
+        known: &[(&str, bool)],
+        repeating: &[&str],
+    ) -> Option<Self> {
         let mut words = Self::default();
         let mut rest = rest.iter().copied();
         while let Some(word) = rest.next() {
@@ -321,6 +408,10 @@ impl<'a> Words<'a> {
             } else {
                 None
             };
+            if repeating.contains(&word) {
+                words.lists.entry(word).or_default().extend(value);
+                continue;
+            }
             if words.flags.insert(word, value).is_some() {
                 return None;
             }
@@ -331,6 +422,22 @@ impl<'a> Words<'a> {
     /// Flag `flag`'s value, if it was given one.
     fn value(&self, flag: &str) -> Option<&'a str> {
         self.flags.get(flag).copied().flatten()
+    }
+
+    /// Every value repeating flag `flag` was given, in order.
+    fn values(&self, flag: &str) -> Vec<&'a str> {
+        self.lists.get(flag).cloned().unwrap_or_default()
+    }
+
+    /// Which of the opposite flags `yes` and `no` was given: `Ok(Some(true))`
+    /// or `Ok(Some(false))`, `Ok(None)` for neither, `Err` for both.
+    fn either(&self, yes: &str, no: &str) -> Result<Option<bool>, ()> {
+        match (self.flags.contains_key(yes), self.flags.contains_key(no)) {
+            (true, true) => Err(()),
+            (true, false) => Ok(Some(true)),
+            (false, true) => Ok(Some(false)),
+            (false, false) => Ok(None),
+        }
     }
 
     /// Flag `flag`'s value as an ID: `Ok(None)` when absent, `Err` when it
@@ -440,7 +547,7 @@ mod tests {
 
     use super::{parse, reply_limit, run};
     use crate::feat::control::protocol::{AgentKind, Direction, Op};
-    use crate::ids::PaneId;
+    use crate::ids::{PaneId, PlateItemId};
 
     /// `words` as command-line arguments.
     fn args(words: &[&str]) -> Vec<OsString> {
@@ -605,6 +712,103 @@ mod tests {
         // Then it exits 2 with the usage.
         assert_eq!(code, 2, "a timeout only goes with --wait");
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn plate_add_words_carry_two_links_in_order() {
+        // Given / When parsing an add with two links and --urgent.
+        let op = parse(&args(&[
+            "plate", "add", "t", "--verb", "review", "--link", "a", "--link", "b", "--urgent",
+        ]));
+
+        // Then it asks for one urgent review with both links, in order.
+        assert_eq!(
+            op,
+            Some(Op::PlateAdd {
+                title: "t".into(),
+                verb: "review".into(),
+                what: None,
+                links: vec!["a".into(), "b".into()],
+                urgent: true,
+                waiting: false,
+                pane: None,
+            }),
+            "--link may repeat and keeps its order"
+        );
+    }
+
+    /// The exit code of running `words` against a socket nothing listens on.
+    fn exit_code(words: &[&str]) -> Result<u8, Box<dyn Error + Send + Sync>> {
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("orb.sock");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        Ok(run(&args(words), None, &socket, &mut out, &mut err))
+    }
+
+    #[rstest::rstest]
+    fn repeated_verb_flag_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running an add that gives --verb twice.
+        let code = exit_code(&["plate", "add", "t", "--verb", "review", "--verb", "read"])?;
+
+        // Then it exits 2 with the usage.
+        assert_eq!(code, 2, "only --link may repeat");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn plate_update_with_urgent_and_not_urgent_is_a_usage_error()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running an update that is both urgent and not.
+        let code = exit_code(&["plate", "update", "3", "--urgent", "--not-urgent"])?;
+
+        // Then it exits 2 with the usage.
+        assert_eq!(code, 2, "--urgent and --not-urgent can't go together");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn plate_add_without_a_verb_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running an add with no --verb.
+        let code = exit_code(&["plate", "add", "t"])?;
+
+        // Then it exits 2 with the usage.
+        assert_eq!(code, 2, "an add needs its verb");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::update(
+        &["plate", "update", "3", "--title", "t", "--link", "a", "--waiting", "--not-urgent"],
+        Op::PlateUpdate {
+            item: PlateItemId(3),
+            title: Some("t".into()),
+            verb: None,
+            what: None,
+            links: Some(vec!["a".into()]),
+            urgent: Some(false),
+            waiting: Some(true),
+        },
+    )]
+    #[case::update_bare(
+        &["plate", "update", "3"],
+        Op::PlateUpdate {
+            item: PlateItemId(3),
+            title: None,
+            verb: None,
+            what: None,
+            links: None,
+            urgent: None,
+            waiting: None,
+        },
+    )]
+    #[case::done(&["plate", "done", "3"], Op::PlateDone { item: PlateItemId(3) })]
+    #[case::list(&["plate", "list"], Op::PlateList)]
+    fn plate_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing the words.
+        let op = parse(&args(words));
+
+        // Then they make the request they spell.
+        assert_eq!(op, Some(expected), "{words:?} parse to their request");
     }
 
     #[rstest::rstest]
