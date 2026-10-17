@@ -229,6 +229,9 @@ pub struct Agent {
     pub status: AgentStatus,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<SystemTime>,
+    /// When orb first saw the agent waiting for an approval or an answer;
+    /// `None` while it isn't waiting.
+    pub waiting_since: Option<SystemTime>,
     /// How its pane runs; `None` for a harness orb doesn't know.
     pub pane: Option<PaneLaunch>,
     /// The session it runs in, or ran in before its pane ended; `None` for

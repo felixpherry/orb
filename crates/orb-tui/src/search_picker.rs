@@ -718,6 +718,7 @@ mod tests {
                         transcript: None,
                         status: AgentStatus::Idle,
                         turn_started_at: None,
+                        waiting_since: None,
                         pane: None,
                         branch: Some("fix-parser".to_owned()),
                         created_at: UNIX_EPOCH,

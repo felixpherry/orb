@@ -920,6 +920,7 @@ fn agent(row: &AgentRow, status: AgentStatus, pane: Option<PaneLaunch>) -> Agent
         transcript: row.transcript_path.clone(),
         status,
         turn_started_at: row.turn_started_at.map(from_ms),
+        waiting_since: row.waiting_since.map(from_ms),
         pane,
         last_session: row.orb_session,
         branch: row.branch.clone(),

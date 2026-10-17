@@ -628,6 +628,7 @@ const LIVE_SCHEMA: &[(&str, &[&str])] = &[
             "harness",
             "pane_id",
             "orb_session_id",
+            "waiting_since",
         ],
     ),
     ("ui", &["id", "sidebar_width", "project_filter"]),
@@ -932,6 +933,72 @@ fn upgrading_a_v14_database_leaves_every_session_top_level() -> Result<(), Repor
 }
 
 #[rstest::rstest]
+fn upgrading_a_v15_database_keeps_agents_with_no_wait_start() -> Result<(), Report<StoreError>> {
+    // Given a v15 database with two agents, one mid-turn.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    database_at(&path, 15)?;
+    Connection::open(&path)
+        .and_then(|conn| {
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/work/orb', 'orb', 100);
+                 INSERT INTO threads (id, project_id, short_id, cwd, created_at, turn_started_at)
+                 VALUES (7, 1, 'aa11', '/work/orb', 1000, 1500),
+                        (8, 1, 'bb22', '/work/orb', 1100, NULL);",
+            )
+        })
+        .change_context(StoreError)?;
+
+    // When opening the store and loading.
+    let (_, agents) = Store::open(&path)?.load()?;
+
+    // Then both agents are kept as they were, with no wait start.
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| (
+                agent.id.0,
+                agent.short_id.as_str(),
+                agent.turn_started_at,
+                agent.waiting_since
+            ))
+            .collect::<Vec<_>>(),
+        vec![(8, "bb22", None, None), (7, "aa11", Some(1_500), None)],
+        "the upgrade should keep every agent and give none a wait start"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn saved_wait_start_loads_back() -> Result<(), Report<StoreError>> {
+    // Given a store with one agent.
+    let store = Store::open_in_memory()?;
+    let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+    insert_agent(&store, project_id)?;
+    let inserted = store
+        .load()?
+        .1
+        .pop()
+        .ok_or_else(|| Report::new(StoreError).attach("the agent wasn't saved"))?;
+
+    // When saving when it started waiting.
+    store.save_agent(&AgentRow {
+        waiting_since: Some(2_500),
+        ..inserted
+    })?;
+
+    // Then loading returns that wait start.
+    let waits: Vec<_> = store
+        .load()?
+        .1
+        .into_iter()
+        .map(|row| row.waiting_since)
+        .collect();
+    assert_eq!(waits, vec![Some(2_500)], "the wait start should load back");
+    Ok(())
+}
+
+#[rstest::rstest]
 fn reopening_a_migrated_database_keeps_its_schema_version() -> Result<(), Report<StoreError>> {
     // Given a database that was already migrated.
     let dir = tempfile::tempdir().change_context(StoreError)?;
@@ -981,6 +1048,7 @@ fn inserted_agent_loads_back_after_reopening() -> Result<(), Report<StoreError>>
         transcript_offset: 0,
         created_at: 1_000,
         turn_started_at: None,
+        waiting_since: None,
         branch: None,
         last_activity_at: 1_000,
         last_visited_at: 1_000,
@@ -1330,6 +1398,7 @@ fn saved_agent_updates_load_back() -> Result<(), Report<StoreError>> {
         transcript_offset: 4_096,
         created_at: 1_000,
         turn_started_at: Some(2_000),
+        waiting_since: None,
         branch: None,
         last_activity_at: 1_000,
         last_visited_at: 1_000,

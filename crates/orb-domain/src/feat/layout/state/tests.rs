@@ -3001,6 +3001,7 @@ fn titled(title: Option<&str>) -> Agent {
         transcript: None,
         status: AgentStatus::Idle,
         turn_started_at: None,
+        waiting_since: None,
         pane: None,
         last_session: None,
         branch: None,

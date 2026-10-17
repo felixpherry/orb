@@ -679,7 +679,7 @@ fn render_card(
     let (glyph, colour) = tree_status(sessions, session.id, attached, now);
     let pin = if session.pinned_at.is_some() { PIN } else { "" };
     let time = match most_urgent(sessions.agents(session.id)) {
-        Some(agent) if agent.status == AgentStatus::Working => when(agent, now),
+        Some(agent) if agent.status.in_progress() => when(agent, now),
         _ => ago_label(since(now, session.last_activity_at)),
     };
     let title = sessions.title(session);
@@ -736,7 +736,8 @@ fn render_card(
 
 /// An agent pane's row under its tree `guide`: its status icon (the idle
 /// circle filled while `attached`), `label` with where the search matched
-/// it (blue and bold while `active`), and its harness mark on the right.
+/// it (blue and bold while `active`), and on the right its time, then its
+/// harness's mark when the harness has one.
 #[expect(
     clippy::too_many_arguments,
     reason = "the row's parts plus the frame inputs every node takes"
@@ -769,7 +770,15 @@ fn render_agent(
             .chain(title_spans(label, &matched, active))
             .collect::<Vec<_>>(),
         ),
-        Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
+        Line::from(
+            [span(when(agent, now), COMMENT)]
+                .into_iter()
+                .chain(
+                    mark.into_iter()
+                        .flat_map(|mark| [span(" ", COMMENT), span(mark, LOGO)]),
+                )
+                .collect::<Vec<_>>(),
+        ),
         area,
         buf,
     );
@@ -898,11 +907,15 @@ fn spinner(agent: &Agent, now: SystemTime) -> &'static str {
         .unwrap_or_default()
 }
 
-/// How long the turn has run while working, else how long ago the last turn
+/// How long the agent has waited for an approval or an answer, else how long
+/// the turn has run while it works or waits, else how long ago the last turn
 /// ended.
 fn when(agent: &Agent, now: SystemTime) -> String {
-    match (agent.status, agent.turn_started_at) {
-        (AgentStatus::Working, Some(at)) => working_label(since(now, at)),
+    match (agent.status, agent.turn_started_at, agent.waiting_since) {
+        (AgentStatus::NeedsApproval | AgentStatus::NeedsInput, _, Some(at)) => {
+            working_label(since(now, at))
+        }
+        (status, Some(at), _) if status.in_progress() => working_label(since(now, at)),
         _ => ago_label(since(now, agent.last_activity_at)),
     }
 }

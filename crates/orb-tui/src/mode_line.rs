@@ -229,6 +229,7 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
+            waiting_since: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
