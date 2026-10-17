@@ -12,9 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The session, Colonists and search pickers keep their filter and typed text until orb quits.
 - When typed text in the session picker matches only settled agents, the empty list says how many (`N settled matches · s to show`).
 - A pane with no name and no agent title is called by the title its program sets (htop, vim, your shell's prompt) instead of `shell`.
+- `<C-g> [` in a pane opens its history as plain text in a float running `$EDITOR`, else `less`, at the bottom in vi, vim, nvim and less; quitting the editor closes the float.
+- `<C-g> y` in a pane lists the other agents of unsettled sessions; picking one pastes the pane's selection, else its screen, into that agent's prompt without sending it, and moves you there. An agent waiting for approval or an answer is refused.
+- `<C-g> ?`, and `?` in the sidebar, list every key that works where you are, Alt and jump keys included; typing filters the list.
 
 ### Changed
 
+- `⏎` in the search picker (`<C-g> /`) opens the found agent's own pane instead of its session, and resumes its chat in a new tab if it ended.
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 

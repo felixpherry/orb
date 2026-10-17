@@ -92,6 +92,8 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-g> p d/r/s/f/x/c` | Pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> p w/e/i` | Floats: show / hide, pane to float or float to tab, pin a float |
 | `<C-g> r` / `<C-g> m` | Resize mode / move mode for the focused pane (`h/j/k/l` or arrows; `Esc` leaves) |
+| `<C-g> [` | Open the pane's history in `$EDITOR` (else `less`) in a float; quitting closes it (in a pane) |
+| `<C-g> y` | Paste the pane's selection, or its screen, into a picked agent's prompt and go there (in a pane) |
 | `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the pane out to a new tab (in a pane), go to N |
 | `<C-g> Space` | Session picker |
 | `<C-g> n` | New session |
@@ -102,8 +104,9 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-g> c` | New colony: pick a world, then name it |
 | `<C-g> C` | Worlds: add a folder as a shared or fresh world, remove one, or start a colony |
 | `<C-g> ,` | On a colony, list its colonists' agents |
-| `<C-g> /` | Search every prompt and reply (`⏎` jumps to its session) |
+| `<C-g> /` | Search every prompt and reply (`⏎` opens the found agent's pane, or resumes its chat in a new tab if it ended) |
 | `<C-g> W` | Worktrees under `~/.orb/worktrees/`, with size, changes and users (`d` deletes one after a confirm) |
+| `<C-g> ?` / `?` | List every key that works here; type to filter (`?` in the sidebar) |
 | `<C-g> <C-g>` | Send Ctrl g to the pane |
 
 In the sidebar:
@@ -119,9 +122,9 @@ In the sidebar:
 | `/` or `i` | Search |
 | `l` / `h` | Show / fold a card's agent rows or a colony's colonists, or open / close the Settled shelf |
 
-Pickers: type to filter, `<C-j>`/`<C-k>` or arrows to move, `⏎` to pick, `Esc` to close. The projects, worlds, session and worktree pickers open as a list where letters are commands, listed at the bottom of the picker; `/` starts typing a filter there.
+Pickers: type to filter, `<C-j>`/`<C-k>` or arrows to move, `⏎` to pick, `Esc` to close. The projects, worlds, session, `Send to` and worktree pickers open as a list where letters are commands, listed at the bottom of the picker; `/` starts typing a filter there.
 
-`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, and a pick in the session or search picker are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
+`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, and a pick in the session, search or `Send to` picker are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
 
 ## Mouse
 
