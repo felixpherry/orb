@@ -279,9 +279,13 @@ mod tests {
             .spawn()
             .change_context(IntegrationError)?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(input.as_bytes())
-                .change_context(IntegrationError)?;
+            // A hook may exit without reading its input, closing the pipe first.
+            match stdin.write_all(input.as_bytes()) {
+                Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+                    return Err(Report::new(error).change_context(IntegrationError));
+                }
+                _ => {}
+            }
         }
         wait_within(&mut child, HOOK_LIMIT)
             .change_context(IntegrationError)?
