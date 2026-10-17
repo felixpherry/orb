@@ -420,15 +420,14 @@ mod tests {
         validate_remove_project, validate_send_to_agent, validate_send_to_pick,
     };
     use crate::feat::layout::state::Layouts;
-    use crate::intent_handler::test_support::{agent, state_with};
-    use crate::{Intent, IntentHandler};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{
         Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, sessions_for,
     };
     use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
-    use crate::{AppState, Focus};
+    use crate::intent_handler::test_support::{agent, state_with};
+    use crate::{AppState, Focus, Intent, IntentHandler};
 
     const HOME: &str = "/home/me";
 

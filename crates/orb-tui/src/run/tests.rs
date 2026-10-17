@@ -2931,9 +2931,8 @@ fn send_text_pastes_the_screen_without_a_selection() -> io::Result<()> {
 fn send_text_waits_while_bracketed_paste_is_off() -> io::Result<()> {
     // Given pane 1 showing `hello world`, and pane 2, whose program has
     // printed without turning bracketed paste on.
-    let mut test = hello_beside(|session| {
-        hello_or(session, "printf ready; exec /bin/cat > typed")
-    })?;
+    let mut test =
+        hello_beside(|session| hello_or(session, "printf ready; exec /bin/cat > typed"))?;
     if !test.pane_until(pane(2), Pane::has_output) {
         return Err(io::Error::other("pane 2 printed nothing within 5 s"));
     }
