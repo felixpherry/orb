@@ -1,8 +1,9 @@
 //! Checks whether the user's sidebar actions can proceed: making a new
 //! session, naming a new colony, pinning,
 //! settling or deleting the selected session (pin and settle are refused on
-//! an agent row), folding and unfolding a card or the Settled shelf, and
-//! making an Incognito session.
+//! an agent row), folding and unfolding a card or the Settled shelf,
+//! making an Incognito session, and going to the next agent that needs the
+//! user.
 
 use wherror::Error;
 
@@ -227,6 +228,33 @@ pub fn validate_new_session(state: &AppState) -> Result<(), NewSessionError> {
     }
 }
 
+/// Why `<C-g> a` can't go to an agent that needs the user.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum NextNeedsYouError {
+    /// No agent waits for an approval or an answer, nor has a finished turn
+    /// the user hasn't read.
+    NoneWaiting,
+}
+
+/// What the message box says when `<C-g> a` finds no agent to go to.
+pub const NOBODY_NEEDS_YOU: &str = "No agent needs you";
+
+/// Allow going to the next agent that needs the user while one does.
+///
+/// # Errors
+///
+/// Returns [`NextNeedsYouError::NoneWaiting`] when
+/// [`Sessions::needs_you`](crate::feat::sessions::state::Sessions::needs_you)
+/// lists no agent.
+pub fn validate_next_needs_you(state: &AppState) -> Result<(), NextNeedsYouError> {
+    if state.sessions.needs_you().is_empty() {
+        Err(NextNeedsYouError::NoneWaiting)
+    } else {
+        Ok(())
+    }
+}
+
 /// Why making an Incognito session can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
@@ -378,9 +406,9 @@ mod tests {
 
     use super::{
         DeleteError, FoldError, FoldTarget, NewColonyError, NewIncognitoError, NewSessionError,
-        TogglePinError, ToggleSettleError, UnfoldError, validate_delete, validate_fold,
-        validate_new_colony, validate_new_incognito, validate_new_session, validate_toggle_pin,
-        validate_toggle_settle, validate_unfold,
+        NextNeedsYouError, TogglePinError, ToggleSettleError, UnfoldError, validate_delete,
+        validate_fold, validate_new_colony, validate_new_incognito, validate_new_session,
+        validate_next_needs_you, validate_toggle_pin, validate_toggle_settle, validate_unfold,
     };
     use crate::feat::sessions::state::{
         Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, layouts_for,
@@ -503,6 +531,34 @@ mod tests {
         state.sessions.sessions = sessions_for(&state.sessions.projects);
         state.layouts = layouts_for(&state.sessions.projects);
         state
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_is_refused_when_nobody_waits() {
+        // Given one agent, running a turn.
+        let state = on_session(AgentStatus::Working);
+
+        // When validating `<C-g> a`.
+        let result = validate_next_needs_you(&state);
+
+        // Then validation fails with NoneWaiting.
+        assert_eq!(
+            result,
+            Err(NextNeedsYouError::NoneWaiting),
+            "<C-g> a needs an agent that waits on the user"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_is_allowed_while_an_agent_waits() {
+        // Given one agent, waiting for an approval.
+        let state = on_session(AgentStatus::NeedsApproval);
+
+        // When validating `<C-g> a`.
+        let result = validate_next_needs_you(&state);
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "<C-g> a can go to a waiting agent");
     }
 
     #[rstest::rstest]

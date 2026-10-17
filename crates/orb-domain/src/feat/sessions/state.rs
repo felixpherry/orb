@@ -411,8 +411,8 @@ pub struct Search {
 /// cursor on a new session, removing a session from `deleting`) and by the
 /// intent handler (the cursor on navigation, settle and delete, `active`,
 /// `shelf_open`, `folded`, `colonists_open`, `starting` when a start begins, adding a session
-/// to `deleting`, `filter`, `error`). The frontend loop moves `error` into
-/// the message box.
+/// to `deleting`, `filter`, `error`, `notice`). The frontend loop moves
+/// `error` and `notice` into the message box.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -444,6 +444,11 @@ pub struct Sessions {
     /// intent) and the frontend loop, which moves it into the message box
     /// after each turn. Workers report their errors instead.
     pub error: Option<String>,
+    /// What the intent just handled has to tell the user that isn't an
+    /// error, for the message box. Written like `error`: only by the intent
+    /// handler (it clears it first on every intent) and the frontend loop,
+    /// which moves it into the message box after each turn.
+    pub notice: Option<String>,
     /// Sessions hidden while they are removed. The intent handler inserts,
     /// the sessions actor removes.
     pub deleting: HashSet<SessionId>,
@@ -926,13 +931,42 @@ impl Sessions {
     pub fn unread_count(&self) -> usize {
         self.shown_agents()
             .filter(|agent| agent.status == AgentStatus::Idle && agent.unseen)
-            .filter(|agent| {
-                agent
-                    .home()
-                    .and_then(|id| self.session(id))
-                    .is_some_and(|session| session.settled_at.is_none())
-            })
+            .filter(|agent| self.unsettled(agent))
             .count()
+    }
+
+    /// The agents that need the user, in the order `<C-g> a` visits them:
+    /// those waiting for an approval, then those waiting for an answer, each
+    /// longest waiting first (one with no wait start yet last), then those
+    /// idle with a finished turn the user hasn't read, oldest turn end
+    /// first. Only agents with a pane, in sessions that aren't settled or
+    /// being deleted, whether or not the project filter lists them; ties
+    /// keep sidebar order.
+    pub fn needs_you(&self) -> Vec<&Agent> {
+        let mut waiting: Vec<(u8, Option<SystemTime>, &Agent)> = self
+            .shown_agents()
+            .filter(|agent| agent.pane.is_some() && self.unsettled(agent))
+            .filter_map(|agent| {
+                let (group, since) = match agent.status {
+                    AgentStatus::NeedsApproval => (0, agent.waiting_since),
+                    AgentStatus::NeedsInput => (1, agent.waiting_since),
+                    AgentStatus::Idle if agent.unseen => (2, Some(agent.last_activity_at)),
+                    _ => return None,
+                };
+                Some((group, since, agent))
+            })
+            .collect();
+        waiting.sort_by_key(|&(group, since, _)| (group, since.is_none(), since));
+        waiting.into_iter().map(|(_, _, agent)| agent).collect()
+    }
+
+    /// Whether `agent`'s session, or the one it last ran in, still exists
+    /// and isn't settled.
+    fn unsettled(&self, agent: &Agent) -> bool {
+        agent
+            .home()
+            .and_then(|id| self.session(id))
+            .is_some_and(|session| session.settled_at.is_none())
     }
 
     /// How many agents are running a turn right now, not counting those

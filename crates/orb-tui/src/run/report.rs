@@ -174,14 +174,27 @@ impl App {
         }
     }
 
-    /// Moves the refusal the last intents or the loop's own work left in
-    /// the state into the message box.
-    pub(super) fn take_error(&mut self) {
-        if self.state.read().sessions.error.is_none() {
+    /// Moves the refusal and the notice the last intents or the loop's own
+    /// work left in the state into the message box: the refusal first, so a
+    /// notice never hides it.
+    pub(super) fn take_messages(&mut self) {
+        let waiting = {
+            let state = self.state.read();
+            state.sessions.error.is_some() || state.sessions.notice.is_some()
+        };
+        if !waiting {
             return;
         }
-        if let Some(error) = self.state.write().sessions.error.take() {
-            self.toasts.error(error, Instant::now());
+        let (error, notice) = {
+            let mut state = self.state.write();
+            (state.sessions.error.take(), state.sessions.notice.take())
+        };
+        let now = Instant::now();
+        if let Some(error) = error {
+            self.toasts.error(error, now);
+        }
+        if let Some(notice) = notice {
+            self.toasts.notice(notice, now);
         }
     }
 

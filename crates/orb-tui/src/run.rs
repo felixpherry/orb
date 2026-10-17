@@ -518,7 +518,7 @@ impl App {
             self.refresh_preview();
             self.reconcile();
             self.open_ready();
-            self.take_error();
+            self.take_messages();
             self.sync_focus();
             let now = Instant::now();
             for pane in self.panes.values() {

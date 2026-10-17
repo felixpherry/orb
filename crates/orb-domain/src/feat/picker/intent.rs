@@ -810,7 +810,7 @@ fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
 /// Jumps to agent `pane` of `session`, picked in the session picker: shows
 /// the pane in its tab, puts the cursor on its agent row and moves the keys
 /// into it like `⏎` on that row, recording the move as a jump to the agent.
-fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
+pub(crate) fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
     let from = state.jump_from();
     state.layouts.reveal(session, pane);
     let agent = SidebarItem::Agent { session, pane };

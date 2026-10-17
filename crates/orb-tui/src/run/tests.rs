@@ -53,6 +53,7 @@ use tokio::runtime::Runtime;
 use crate::mouse::HitMap;
 use crate::outer_terminal::OuterTerminal;
 use crate::test_support::{FakeZmx, NoGit, layouts_for, pane, session as session_id, sessions_for};
+use crate::toast::{Toast, ToastKind};
 
 use super::panes::{
     AttachPlan, ExitOutcome, PaneExit, attach_at_start, attach_or_restore, broken_pane_message,
@@ -2238,6 +2239,58 @@ fn a_sound_that_cant_play_is_logged() -> io::Result<()> {
 }
 
 #[rstest::rstest]
+fn a_notice_from_an_intent_shows_in_the_message_box() -> io::Result<()> {
+    // Given an intent that left a notice.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    test.state.write().sessions.notice = Some("No agent needs you".to_owned());
+
+    // When the loop ends its turn.
+    test.app.take_messages();
+
+    // Then the message box shows it as info.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Info, "No agent needs you", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "a notice isn't an error, so it shows in the info box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn an_error_and_a_notice_from_one_turn_show_the_error() -> io::Result<()> {
+    // Given intents that left an error and a notice in one turn.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    {
+        let mut state = test.state.write();
+        state.sessions.error = Some("boom".to_owned());
+        state.sessions.notice = Some("No agent needs you".to_owned());
+    }
+
+    // When the loop ends its turn.
+    test.app.take_messages();
+
+    // Then the message box shows the error.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Error, "boom", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "a notice shouldn't hide an error from the same turn"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
 fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()> {
     // Given the loop, and an agent asking it to close pane 99, which no
     // session holds.
@@ -2248,7 +2301,7 @@ fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()>
     // When the loop handles the request and ends its turn.
     test.app
         .handle(LoopEvent::Control(close, tx), &mut io::sink())?;
-    test.app.take_error();
+    test.app.take_messages();
 
     // Then the agent hears not_found and the message box shows nothing.
     let answer = rx
