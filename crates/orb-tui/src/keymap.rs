@@ -328,7 +328,9 @@ fn walk(scope: Scope) -> Vec<(String, Option<Intent>, String)> {
 /// keys that don't start with `<C-g>` (the sidebar's letters), then the
 /// `<C-g>` keys, each sorted by their text, then the Alt keys and the jump
 /// keys. Groups of keys aren't rows; the keys under them are. In the
-/// sidebar, `Alt +` and `Alt -` read as widening and narrowing it.
+/// sidebar, `Alt +` and `Alt -` read as widening and narrowing it, and the
+/// Alt keys that need the keys in a pane (`Alt h/j/k/l`, `Alt n`, `Alt x`,
+/// `Alt f`) aren't rows.
 pub(crate) fn key_rows(scope: Scope) -> Vec<(String, String)> {
     let leader = LEADER.display();
     let mut rows: Vec<(String, String)> = walk(scope)
@@ -336,14 +338,18 @@ pub(crate) fn key_rows(scope: Scope) -> Vec<(String, String)> {
         .filter_map(|(keys, action, label)| action.map(|_| (keys, label)))
         .collect();
     rows.sort_by(|(a, _), (b, _)| (a.starts_with(&leader), a).cmp(&(b.starts_with(&leader), b)));
-    let alt = ALT_KEYS.iter().map(|(keys, _, intent)| {
+    let alt = ALT_KEYS.iter().filter_map(|(keys, _, intent)| {
         let label = match (intent, scope.side) {
+            (
+                Intent::MoveFocus(_) | Intent::AddPane | Intent::ClosePane | Intent::ToggleFloats,
+                Side::Sidebar,
+            ) => return None,
             (Intent::GoToTab(_), _) => "tab 1…9".to_owned(),
             (Intent::GrowFocused, Side::Sidebar) => "widen sidebar".to_owned(),
             (Intent::ShrinkFocused, Side::Sidebar) => "narrow sidebar".to_owned(),
             (other, _) => other.to_string(),
         };
-        ((*keys).to_owned(), label)
+        Some(((*keys).to_owned(), label))
     });
     let jump = JUMP_KEYS
         .iter()
@@ -2060,10 +2066,41 @@ mod tests {
         // Then a letter comes before a `<C-g>` key, which comes before an Alt
         // key.
         let at = |keys: &str| rows.iter().position(|(k, _)| k == keys);
-        let order = [at("j"), at("<C-g> q"), at("Alt h")];
+        let order = [at("j"), at("<C-g> q"), at("Alt +")];
         assert!(
             order.iter().all(Option::is_some) && order.is_sorted(),
-            "j, <C-g> q and Alt h were at {order:?}"
+            "j, <C-g> q and Alt + were at {order:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::focus_left("Alt h")]
+    #[case::focus_down("Alt j")]
+    #[case::focus_up("Alt k")]
+    #[case::focus_right("Alt l")]
+    #[case::add_pane("Alt n")]
+    #[case::close_pane("Alt x")]
+    #[case::floats("Alt f")]
+    fn key_rows_in_the_sidebar_skip_the_pane_only_alt_keys(#[case] keys: &str) {
+        // Given / When listing the keys that work on a session in the sidebar.
+        let rows = key_rows(Scope::SIDEBAR);
+
+        // Then the Alt key that does nothing there isn't listed.
+        assert!(
+            rows.iter().all(|(k, _)| k != keys),
+            "{keys} does nothing in the sidebar, rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn key_rows_in_a_pane_hold_the_focus_keys() {
+        // Given / When listing the keys that work in a pane.
+        let rows = key_rows(Scope::PANE);
+
+        // Then `Alt h` is listed with its label.
+        assert!(
+            has_row(&rows, "Alt h", "focus left"),
+            "the pane's rows were {rows:?}"
         );
     }
 
