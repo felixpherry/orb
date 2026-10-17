@@ -833,4 +833,24 @@ mod tests {
         // Then it outlasts what the request may take.
         assert_eq!(limit, expected, "{op:?} waits for its reply that long");
     }
+
+    #[rstest::rstest]
+    fn the_orb_skill_lists_every_command() {
+        // Given the orb skill's Commands block.
+        let skill = include_str!("../integration/assets/skills/orb/SKILL.md");
+        let block: Vec<&str> = skill
+            .split_once("## Commands\n\n```\n")
+            .and_then(|(_, rest)| rest.split_once("```"))
+            .map(|(block, _)| block.lines().collect())
+            .unwrap_or_default();
+
+        // When reading the client's usage, line by line.
+        let usage: Vec<&str> = super::USAGE.lines().skip(1).map(str::trim).collect();
+
+        // Then the skill lists the same commands in the same order.
+        assert_eq!(
+            block, usage,
+            "the orb skill's Commands block should match USAGE"
+        );
+    }
 }

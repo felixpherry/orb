@@ -1,6 +1,6 @@
 ---
 name: orb
-description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply; start a new session, or colonists from a colony. Use when the user mentions orb, asks to split a pane or run something in another pane, asks you to start, prompt, wait on or collect work from another agent, or asks you to spawn colonists. Works only inside an orb pane (ORB_PANE_ID set).
+description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply; start a new session, or colonists from a colony. Use when the user mentions orb, asks to split a pane or run something in another pane, asks you to start, prompt, wait on or collect work from another agent, or asks you to spawn colonists, or to add, update or close an item on the user's plate (`orb plate`). Works only inside an orb pane (ORB_PANE_ID set).
 ---
 
 # orb
@@ -18,7 +18,7 @@ description: Drive orb, the terminal multiplexer you run in. List sessions, pane
 - **Success:** exit 0, the result as JSON on stdout. A change with nothing to report prints `{}`.
 - **Refused:** exit 1, `{"code": "...", "message": "..."}` on stderr. Read the code (see "When orb says no").
 - **Typed wrong:** exit 2 and the usage on stderr. Check your command against "Commands" below.
-- **IDs are numbers.** A `[<pane>]` or `[<session>]` left out means your own pane or session.
+- **IDs are numbers,** plate item IDs too. A `[<pane>]` or `[<session>]` left out means your own pane or session.
 
 ## Rules
 
@@ -116,14 +116,54 @@ orb session create --project 4 --worktree --name "fix payout"    # a worktree of
 - **Two refusals (`bad_request`):** `--worktree` without `--project` from a fresh world (its folders aren't git repositories), and `--project` naming a fresh world, from anywhere (its colonies come from `<C-g> c`).
 - **Settling a colony doesn't settle its colonists.** `orb session settle` acts on one session only.
 
+## The plate
+
+```sh
+orb plate add "Review PR #42: fix login" --verb review --link https://github.com/o/r/pull/42   # {"item": 7}
+orb plate add "Try the new picker" --verb walk --what "Built on orb/picker; run just run." --link ./notes.md
+orb plate add "Add a retry to payouts?" --verb idea
+orb plate update 7 --waiting         # the next move is someone else's
+orb plate done 7                     # {}
+orb plate list                       # {"items": [...]}
+```
+
+- **The plate is the user's one list of what needs them,** across all of orb. orb shows it on the start screen and with `<C-g> o`.
+- **Add one item when you end a turn that needs the user:** a decision, a review, something to read or try, a pick, an answer. Don't add items for work in progress, or for a permission or question prompt you're stuck on. orb adds its own row for an agent waiting for approval or an answer.
+- **The title is the user's next step, as an action** ("Review PR #42: fix login"). `--what` says what happened in a sentence or two.
+- **Pick the verb that fits.** Anything else is refused with the list.
+
+| Verb | For |
+| --- | --- |
+| `decide` | Pick a direction. |
+| `review` | A diff or PR. |
+| `read` | A report or doc. |
+| `walk` | Try it by hand. |
+| `pick` | Choose among options. |
+| `approve` | A plan or a step. |
+| `answer` | A question you asked. |
+| `reply` | Someone else's message. |
+| `merge` | A branch that's ready. |
+| `note` | An FYI. |
+| `idea` | A follow-up you offer. |
+
+- **Put the ticket, PR and page links on the item** with `--link`, which you can repeat. A web link needs its full address (`https://…`). Anything without `://` is a file, opened in `$EDITOR` (else `less`), except `.html` files, which open in the browser. A relative path starts at your session's folder.
+- **One item per thing.** Update yours (`orb plate update <id>`) instead of adding a second. Find an ID with `orb plate list`. `--link` on update replaces all links; left out, they stay.
+- **`--waiting`** when the next move is someone else's (CI, a reviewer). `--your-move` moves it back.
+- **`--verb idea`** offers a follow-up. It lands in Parked until the user takes it up. An idea can't be `--waiting`.
+- **`--urgent`** only when it blocks other work. Urgent items sort first.
+- **Close your own item** with `orb plate done <id>` once the user's step is done. Nothing closes items by itself, not even settling or deleting the session.
+- **Colonists don't add items.** orb refuses them with `colonist`. Put it in your report to your chief instead.
+- **`--pane <id>`** sends the user's ⏎ to another pane, such as a tab running a prototype. By default it's your own pane.
+
 ## When orb says no
 
 | Code | What it means | What to do |
 | --- | --- | --- |
 | `not_running` | No orb answers. | Tell the user and stop. |
 | `no_target` | You left the target out and aren't in an orb pane. | Name the pane or session. |
-| `not_found` | That pane, session or agent doesn't exist. | `orb pane list` or `orb agent list` and pick a real one. |
+| `not_found` | That pane, session, agent or plate item doesn't exist. | `orb pane list`, `orb agent list` or `orb plate list` and pick a real one. |
 | `settled` | The session is settled. | Leave it alone; the user can un-settle it. |
+| `colonist` | You're a colonist; colonists don't add plate items. | Put it in your report to your chief. |
 | `starting` | Another session is being made. | Try again in a few seconds. |
 | `pane_busy` | An agent already runs in that pane. | Split a new pane and start there. |
 | `no_agent` | No live agent in that pane (or it stopped). | `orb agent get <pane>` to check; start one if you meant to. |
@@ -162,6 +202,10 @@ orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
 orb agent wait <pane> [--timeout <ms>]
 orb agent get <pane>
 orb agent reply <pane>
+orb plate add <title> --verb <verb> [--what <text>] [--link <url>]... [--urgent] [--waiting] [--pane <id>]
+orb plate update <item> [--title <text>] [--verb <verb>] [--what <text>] [--link <url>]... [--urgent|--not-urgent] [--waiting|--your-move]
+orb plate done <item>
+orb plate list
 ```
 
 - **An empty name in `rename`** goes back to the usual name.

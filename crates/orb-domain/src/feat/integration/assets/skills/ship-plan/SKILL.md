@@ -55,5 +55,6 @@ Put these at the top, before the repo's usual template:
 
 One line: `<plan name>: PR <link>. CI <green|red>. <N> divergences, <M> open findings.` (or what stopped you, if you stopped early).
 
+- **Put the PR on the user's plate (in orb only).** When a PR was opened and `$ORB_PANE_ID` is set, run `orb plate add "Review PR #<n>: <title>" --verb review --link <PR url>` before sending the line. If orb refuses with `colonist`, you run in a colony: skip it, since your report back covers it. With no PR (you stopped early), add nothing.
 - **With a `report-to` pane:** send it with `orb agent prompt <pane> "<line>"`. That agent tells the user and updates their status board.
 - **Without one:** end your final message with it.
