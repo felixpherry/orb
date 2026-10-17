@@ -21,7 +21,7 @@ use orb_domain::AppState;
 use orb_domain::feat::layout::floats::FloatLayout;
 use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList, Tab};
 use orb_domain::feat::layout::tree::SwapLayout;
-use orb_domain::feat::sessions::state::most_urgent;
+use orb_domain::feat::sessions::state::{AgentStatus, most_urgent};
 use orb_domain::ids::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -433,12 +433,14 @@ fn tab_chevron(
 }
 
 /// The status icon, and its colour, of the most urgent agent among `tab`'s
-/// tiled panes while that agent needs a look.
+/// tiled panes while that agent needs a look. A working agent doesn't count:
+/// the tab shows no spinner.
 fn tab_icon(state: &AppState, tab: &Tab, now: SystemTime) -> Option<(&'static str, Color)> {
     let agents = tab
         .pane_ids()
         .into_iter()
-        .filter_map(|pane| state.sessions.agent_in(pane));
+        .filter_map(|pane| state.sessions.agent_in(pane))
+        .filter(|agent| agent.status != AgentStatus::Working);
     attention(most_urgent(agents)?, now)
 }
 

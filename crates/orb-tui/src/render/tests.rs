@@ -1556,6 +1556,56 @@ fn tab_with_an_idle_read_agent_has_no_icon() {
 }
 
 #[rstest::rstest]
+fn tab_with_a_working_agent_has_no_icon() {
+    // Given a second tab whose agent is working.
+    let state = second_tab_running(AgentStatus::Working, false, false);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label is its number alone: no spinner.
+    let bar = tab_bar(&buffer);
+    assert!(bar.contains("\u{e0b0} 2 \u{e0b0}"), "tab bar was '{bar}'");
+}
+
+#[rstest::rstest]
+fn tab_icon_passes_over_a_working_agent() {
+    // Given a second tab, not shown, with a working agent beside one whose
+    // finished turn is unread.
+    let state = laid_out(|state| {
+        state.layouts.new_tab(SessionId(1), entry(2));
+        state.layouts.split(SessionId(1), Split::Right, entry(3));
+        state.layouts.go_to_tab(SessionId(1), 1);
+        for (id, status, unseen) in [
+            (2, AgentStatus::Working, false),
+            (3, AgentStatus::Idle, true),
+        ] {
+            let agent = Agent {
+                pane: Some(PaneLaunch {
+                    pane: PaneId(id),
+                    session: SessionId(1),
+                }),
+                unseen,
+                ..agent(id, status)
+            };
+            for project in &mut state.sessions.projects {
+                project.agents.push(agent.clone());
+            }
+        }
+    });
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label starts with the finished icon.
+    let bar = tab_bar(&buffer);
+    assert!(
+        bar.contains(&format!("{COMPLETED_ICON} 2 ")),
+        "tab bar was '{bar}'"
+    );
+}
+
+#[rstest::rstest]
 fn shown_tab_icon_takes_the_tab_colour() {
     // Given the second tab shown, its agent waiting for an answer.
     let state = second_tab_running(AgentStatus::NeedsInput, false, true);

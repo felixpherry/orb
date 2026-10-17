@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - When typed text in the session picker matches only settled agents, the empty list says how many (`N settled matches · s to show`).
 - A pane with no name and no agent title is called by the title its program sets (htop, vim, your shell's prompt) instead of `shell`.
 - `<C-g> a` takes you to the next agent that needs you: waiting for approval, then for input, then a finished chat you haven't read, longest waiting first. Press it again for the next one. It reaches agents the project filter hides, and says `No agent needs you` when nobody does.
-- Tabs and agent pane borders show the status icon of the agent that needs a look: working, waiting, failed or finished but unread.
+- Agent pane borders show the agent's status icon while it works, waits, failed or has a finished turn you haven't read. Tabs show the icon of the agent that needs a look: waiting, failed or finished but unread, never the working spinner.
 - The mode line counts the finished chats you haven't read, in green (`✓N`).
 - While orb is focused, an agent in another tab or session that starts needing approval or input is named in the message box, such as `orb/fix-login needs approval`.
 - Clicking a desktop notification opens that agent's pane with your keys in it, on macOS (with terminal-notifier) and on Linux.

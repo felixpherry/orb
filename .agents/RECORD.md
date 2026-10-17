@@ -286,7 +286,7 @@ Entries are added or amended **only with human approval**.
 - (layout) `Alt -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
 - (layout) `Alt +` restores the tab's tree from before its last `Alt -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
-- (layout) A tab's label starts with the status icon of the most urgent agent among its tiled panes while that agent works, waits, failed, is gone or has an unread finished turn.
+- (layout) A tab's label starts with the status icon of the most urgent agent among its tiled panes, working agents left out, while that agent waits, failed, is gone or has an unread finished turn: a tab never shows the spinner.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
 - (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Alt ]` and `Alt [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
