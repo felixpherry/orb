@@ -15,7 +15,7 @@ use super::osascript::OsascriptNotifier;
 use super::terminal_notifier::TerminalNotifierNotifier;
 use crate::common::wait_within;
 use crate::feat::sessions::state::{Notice, NoticeKind};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, PaneId};
 
 /// How long a notifier program may run before it's stopped and counted as
 /// failed.
@@ -42,7 +42,8 @@ pub trait Notifier: Send + Sync {
     /// Shows a notification titled `title` saying `body` about `agent`,
     /// without waiting for it to be shown, asking at `urgency` where the
     /// notifier can say how insistently. A notifier that can replaces an
-    /// earlier notification about `agent`, and takes a click back to orb.
+    /// earlier notification about `agent`, and takes a click back to orb
+    /// and to `pane`, the agent's pane.
     ///
     /// # Errors
     ///
@@ -53,6 +54,7 @@ pub trait Notifier: Send + Sync {
         body: &str,
         urgency: Urgency,
         agent: AgentId,
+        pane: Option<PaneId>,
     ) -> Result<(), Report<NotifyError>>;
 }
 
@@ -81,7 +83,8 @@ impl NotifierService {
     }
 
     /// Announces `notice`: titled `<project> · <agent title>`, saying why
-    /// the agent needs the user. A click goes back to orb.
+    /// the agent needs the user. A click goes back to orb and the agent's
+    /// pane.
     ///
     /// # Errors
     ///
@@ -93,6 +96,7 @@ impl NotifierService {
             notice.kind.label(),
             urgency(notice.kind),
             notice.agent,
+            notice.pane,
         )
     }
 }
@@ -202,7 +206,7 @@ mod tests {
     use super::{Notifier, NotifierService, NotifyError, Urgency};
     use crate::feat::notify::click::ClickTarget;
     use crate::feat::sessions::state::{Notice, NoticeKind};
-    use crate::ids::AgentId;
+    use crate::ids::{AgentId, PaneId};
 
     /// What the fake notifier was asked to show.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +215,7 @@ mod tests {
         body: String,
         urgency: Urgency,
         agent: AgentId,
+        pane: Option<PaneId>,
     }
 
     /// A notifier that records each notification it was asked to show.
@@ -239,6 +244,7 @@ mod tests {
             body: &str,
             urgency: Urgency,
             agent: AgentId,
+            pane: Option<PaneId>,
         ) -> Result<(), Report<NotifyError>> {
             self.shown
                 .lock()
@@ -248,6 +254,7 @@ mod tests {
                     body: body.to_owned(),
                     urgency,
                     agent,
+                    pane,
                 });
             Ok(())
         }
@@ -259,6 +266,7 @@ mod tests {
             kind,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
+            pane: Some(PaneId(12)),
         }
     }
 
@@ -343,6 +351,24 @@ mod tests {
             .map(|shown| shown.agent)
             .collect();
         assert_eq!(heard, [AgentId(1)], "the agent");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn announce_tells_the_notifier_the_pane() -> Result<(), Report<NotifyError>> {
+        // Given a notifier.
+        let notifier = Arc::new(FakeNotifier::default());
+
+        // When announcing a notice about the agent in pane 12.
+        NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished))?;
+
+        // Then the notifier hears of pane 12, for its click to show.
+        let heard: Vec<Option<PaneId>> = notifier
+            .shown()
+            .into_iter()
+            .map(|shown| shown.pane)
+            .collect();
+        assert_eq!(heard, [Some(PaneId(12))], "the agent's pane");
         Ok(())
     }
 

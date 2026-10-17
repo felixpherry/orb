@@ -43,7 +43,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-g> t b` in a pane moves the focused pane to a new tab of its own after the last one and shows it; a tab's only pane stays put.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
-- (pane) orb redraws when input, pane output, a pane's exit, a worker's report, a pane's held update timing out or the message box hiding wakes the loop, and every 100 ms while an agent is working or a session is starting (the spinner's frame); there is no other tick.
+- (pane) orb redraws when input, pane output, a pane's exit, a worker's report, a pane's held update timing out or the message box hiding wakes the loop, every 100 ms while an agent is working or a session is starting (the spinner's frame), and every second while an agent waits for an approval or an answer and none is working (so wait times count up); there is no other tick.
 - (pane) While a pane has the keys, every key but orb's own (the Alt keys, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
@@ -87,8 +87,9 @@ Entries are added or amended **only with human approval**.
 - (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells, except the cells over a pane's shown image, which keep the outer terminal's own background.
 - (tui) When the outer terminal's own background is exactly `#222436`, orb paints `#222437` in its place and answers a pane's background question with it, since kitty draws pane images over any cell of its own background colour.
-- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, and the local time on the right.
-- (tui) The mode line's running, approval and input counts include every agent, even ones the project filter hides.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval, input and unread-finished counts, and the local time on the right.
+- (tui) The mode line's approval count is yellow, its input count magenta and its unread-finished count (`✓N`) green.
+- (tui) The mode line's running, approval, input and unread-finished counts include every agent, even ones the project filter hides; the unread-finished count leaves out settled sessions.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule (a / prompt in the projects and worlds screens), numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
 - (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project or a world, `⏎ new colony · Esc close` in the world picker, `⏎ filter · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, close-pane, delete-worktree and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the search picker shows no keys.
@@ -123,13 +124,14 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the projects screen, `d` removes the highlighted project after a `No`/`Yes` confirm that returns to the list, `a` opens the directory picker to add one, and `⏎` starts a new session in it.
 - (sessions) Deleting a session hides it at once, then removes it; a failed store write or folder removal shows the reason in the message box.
 - (notify) While orb's terminal isn't focused, orb sends a desktop notification on macOS and Linux when an agent finishes a turn, needs approval, or needs input.
+- (notify) While orb's terminal is focused, an agent that starts needing approval or input outside the shown tab and floats is named in the message box as `<project>/<session> needs approval` or `needs input`, with ` · <agent title>` after the session while the session runs two or more agents.
 - (notify) On macOS, notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
 - (notify) On macOS, a terminal-notifier or osascript still running 5 s after a notification is sent is stopped, and a stopped terminal-notifier counts as failed.
-- (notify) Clicking a `terminal-notifier` notification brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
+- (notify) Clicking a `terminal-notifier` notification brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`), then shows that agent's pane with the keys in it.
 - (notify) On Linux, notifications are delivered over D-Bus to the freedesktop notification server, and nothing is shown when there is none.
 - (notify) On Linux, approval and input notifications are sent at critical urgency and finished-turn notifications at normal urgency.
 - (notify) On Linux, a later notification about the same agent replaces the earlier one.
-- (notify) On Linux, clicking a notification focuses orb's niri window when niri is running.
+- (notify) On Linux, clicking a notification focuses orb's niri window when niri is running, then shows that agent's pane with the keys in it.
 - (notify) orb plays herdr's "request" sound, built into orb, each time an agent starts needing approval or input, whether or not the user is looking at it.
 - (notify) orb plays herdr's "done" sound, built into orb, when an agent finishes a turn, unless orb's terminal is focused and the agent's pane is in the shown session's shown tab or a showing float.
 - (notify) On macOS, sounds play through `afplay`.
@@ -175,7 +177,8 @@ Entries are added or amended **only with human approval**.
 - (settle) Settling a session is refused with `Can't settle while a session is working` while any of its agent panes has a turn underway.
 - (picker) `d` on a session asks `Delete <name>?`, or `Delete <name> and its folder?` for a colony in a fresh world, and on an agent row `Close <name>?`.
 - (keybinds) In the sidebar or a pane, `<C-[>`/`<C-]>` move back/forward through the jump list, as `<C-o>`/`<C-i>` do in neovim.
-- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
+- (keybinds) `<C-g> a`, in the sidebar or a pane, moves the keys into the pane of the next agent that needs the user (waiting for approval, then input, then finished but unread, each longest-waiting first, ties in sidebar order), ignoring the project filter and wrapping at the end.
+- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, a session or search picker pick, or `<C-g> a`; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
 - (jumps) Each agent is its own jump target: entering a session or picking it records the agent in its focused pane (its card when that pane is a shell), a session picker pick records the picked agent, a move between panes records the agent left and the agent entered (a shell pane records nothing), and a jump pressed in a pane starts from its focused agent.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one, and landing on an agent shows that agent's own pane; it never attaches or clears the project filter.
 - (jumps) Deleted rows, closed agents, rows hidden by the project filter, and the Settled header are skipped; a jump that lands under a folded card or colonists row opens it, and a jump to the agent of a one-agent colonist lands on the colonist.
@@ -262,7 +265,9 @@ Entries are added or amended **only with human approval**.
 - (sessions) A pi agent's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New agent".
 - (sessions) A pi agent's branch is read from git in its directory after each turn.
 - (pane) An attach pane whose program exits within about a second of starting shows `session <title> exited at start`, naming its session, and writes that text to the log; with no title it shows `session exited at start`.
-- (sidebar) An agent row ends with its harness's mark: `✳` for Claude, `π` for pi.
+- (sidebar) An agent row ends with its time, then its harness's mark: `✳` for Claude, `π` for pi.
+- (sidebar) An agent's time is its turn so far while it works, how long it has waited while it waits for approval or input, and otherwise the time since its last turn ended.
+- (sidebar) A card's time is its most urgent own agent's time while that agent works or waits, and otherwise the time since the session's last turn ended.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `<C-g> /` searches pi session files alongside Claude transcripts.
 - (layout) Adding a pane with `Alt n` or closing one in a tab not changed by hand re-tiles it in the tab's swap layout, where vertical is `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
@@ -275,6 +280,7 @@ Entries are added or amended **only with human approval**.
 - (layout) Move mode's direction keys swap the focused tiled pane with the pane a focus move that way would reach inside its tab.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane, or its whole stack, and share the space evenly among the panes split in that direction.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else the title its program last set, else `shell`, in the top edge.
+- (layout) An agent pane's frame title starts with its agent's status icon while the agent works, waits, failed, is gone or has an unread finished turn.
 - (layout) A stack's list names each pane the way its frame does.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
@@ -285,6 +291,7 @@ Entries are added or amended **only with human approval**.
 - (layout) `Alt -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
 - (layout) `Alt +` restores the tab's tree from before its last `Alt -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
+- (layout) A tab's label starts with the status icon of the most urgent agent among its tiled panes, working agents left out, while that agent waits, failed, is gone or has an unread finished turn: a tab never shows the spinner.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
 - (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Alt ]` and `Alt [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
@@ -434,6 +441,7 @@ Entries are added or amended **only with human approval**.
 - (settle) Settling with colonists is refused with `Can't settle while a colonist is working` while any of them has a turn underway.
 - (settle) A settle a turn beat to the sessions worker shows the same refusal the key shows: `Can't settle while a session is working`, or `Can't settle while a colonist is working`.
 - (store) Schema v15 records which session made each colonist and turns Research and Learn sessions into colonies; deleting a session clears its colonists' link.
+- (store) Schema v16 records when each agent started waiting for approval or input, so wait times survive a restart.
 - (start) `orb --version` and `orb -V` print `orb <version>` and exit 0 before orb reads its environment, opens its log or store, or touches the terminal.
 - (repo) orb is licensed Apache-2.0 (LICENSE holds the full text), every package's manifest carries the license, description, repository `https://github.com/zqccer/orb` and author `zqccer`, and NOTICE credits herdr.
 - (store) orb links SQLite statically (rusqlite `bundled`, SQLite 3.53.2 with FTS5), so no system libsqlite3 is used in tests, CI, release builds or `cargo install`.

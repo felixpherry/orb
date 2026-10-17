@@ -3537,6 +3537,104 @@ async fn poll_saves_a_new_turn_stamp() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 #[tokio::test]
+async fn agent_starting_to_wait_gets_a_wait_start() -> Result<(), Report<StoreError>> {
+    // Given an agent a poll saw working.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+    let before = now_ms();
+
+    // When a poll sees it waiting for an approval.
+    host.set_running(Ok(vec![record("aa", AgentStatus::NeedsApproval)]));
+    actor.poll().await;
+
+    // Then its wait start is that poll's time, saved.
+    let after = now_ms();
+    let wait = saved(&actor.store, "aa")?.waiting_since;
+    assert!(
+        wait.is_some_and(|at| (before..=after).contains(&at)),
+        "the wait should start at the poll that saw it, got {wait:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn waiting_agent_keeps_its_wait_start() -> Result<(), Report<StoreError>> {
+    // Given an agent saved waiting since 1 s after the epoch, still waiting.
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
+        waiting_since: Some(1_000),
+        ..row
+    })?;
+    let host = listing(vec![record("aa", AgentStatus::NeedsApproval)]);
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When polling after the relaunch.
+    actor.poll().await;
+
+    // Then the sidebar's agent keeps the saved wait start.
+    assert_eq!(
+        shown(&state, id).and_then(|agent| agent.waiting_since),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        "a relaunch mid-wait should keep the saved wait start"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn approval_then_input_keeps_one_wait_start() -> Result<(), Report<StoreError>> {
+    // Given an agent waiting for an approval since 1 s after the epoch.
+    let (store, _) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
+        waiting_since: Some(1_000),
+        ..row
+    })?;
+    let host = listing(vec![record("aa", AgentStatus::NeedsApproval)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+
+    // When the next poll sees it waiting for an answer.
+    host.set_running(Ok(vec![record("aa", AgentStatus::NeedsInput)]));
+    actor.poll().await;
+
+    // Then it is still the same wait.
+    assert_eq!(
+        saved(&actor.store, "aa")?.waiting_since,
+        Some(1_000),
+        "an approval followed by a question should count as one wait"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn agent_that_stops_waiting_loses_its_wait_start() -> Result<(), Report<StoreError>> {
+    // Given an agent saved waiting since 1 s after the epoch, now working again.
+    let (store, _) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
+        waiting_since: Some(1_000),
+        ..row
+    })?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When polling.
+    actor.poll().await;
+
+    // Then the wait start is gone.
+    assert_eq!(
+        saved(&actor.store, "aa")?.waiting_since,
+        None,
+        "an agent that stopped waiting should have no wait start"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
 async fn poll_waits_five_seconds_when_nothing_is_underway() -> Result<(), Report<StoreError>> {
     // Given an idle agent and orb detached.
     let (store, _) = store_with_agent("aa")?;
@@ -6913,7 +7011,10 @@ async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreE
 async fn turn_end_queues_a_finished_notice_naming_project_and_agent()
 -> Result<(), Report<StoreError>> {
     // Given orb's agent titled "Parser fix".
-    let (store, id) = store_with_agent("aa")?;
+    let store = Store::open_in_memory()?;
+    let Seeded {
+        agent: id, pane, ..
+    } = insert_agent(&store, "aa")?;
     resave(&store, "aa", |row| AgentRow {
         custom_title: Some("Parser fix".to_owned()),
         ..row
@@ -6932,9 +7033,33 @@ async fn turn_end_queues_a_finished_notice_naming_project_and_agent()
             kind: NoticeKind::Finished,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
+            pane: Some(pane),
         }],
         "the ended turn's notice"
     );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn notice_carries_the_agents_pane() -> Result<(), Report<StoreError>> {
+    // Given an agent running in its pane, whose turn is running.
+    let store = Store::open_in_memory()?;
+    let Seeded { pane, .. } = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.poll().await;
+
+    // When a poll sees it start needing an approval.
+    host.set_running(Ok(vec![record("aa", AgentStatus::NeedsApproval)]));
+    actor.poll().await;
+
+    // Then the notice names the agent's pane.
+    let panes: Vec<Option<PaneId>> = notices_of(&actor)
+        .into_iter()
+        .map(|notice| notice.pane)
+        .collect();
+    assert_eq!(panes, [Some(pane)], "a click on it should open that pane");
     Ok(())
 }
 

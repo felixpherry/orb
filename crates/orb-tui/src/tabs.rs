@@ -1,24 +1,27 @@
 //! The right-hand area while a session is shown: a one-row tab bar, then the
 //! shown tab's panes laid out by its tree, each in a rounded frame titled
 //! with its name, else its agent's title, else its program's title, else
-//! `shell`. The frame shows where the focus is: blue while the pane
-//! has the keys, grey while it has the focus and the keys are elsewhere,
-//! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
-//! centred list naming its panes, one row each between two dim bars and a
-//! `>` outside the left bar on the shown one, above the shown pane. Floats
-//! are drawn last, over the tiled panes and stack lists; a pinned float
-//! stays drawn while the floats are hidden. While a float has the keys, the
-//! tab bar names the floats' layout instead of the tab's. Each drawn pane's
-//! images are recorded for the compositor, which places them on the outer
-//! screen.
+//! `shell`, after its agent's status icon while the agent works, waits,
+//! failed or has a finished turn the user hasn't read. The frame shows where
+//! the focus is: blue while the pane has the keys, grey while it has the
+//! focus and the keys are elsewhere, dim otherwise. A zoomed tab shows only
+//! its focused pane. Each stack is a centred list naming its panes, one row
+//! each between two dim bars and a `>` outside the left bar on the shown
+//! one, above the shown pane. Floats are drawn last, over the tiled panes
+//! and stack lists; a pinned float stays drawn while the floats are hidden.
+//! While a float has the keys, the tab bar names the floats' layout instead
+//! of the tab's. Each drawn pane's images are recorded for the compositor,
+//! which places them on the outer screen.
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::SystemTime;
 
 use orb_domain::AppState;
 use orb_domain::feat::layout::floats::FloatLayout;
-use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList};
+use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList, Tab};
 use orb_domain::feat::layout::tree::SwapLayout;
+use orb_domain::feat::sessions::state::{AgentStatus, most_urgent};
 use orb_domain::ids::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -31,7 +34,7 @@ use crate::graphics::DrawnImages;
 use crate::mouse::HitMap;
 use crate::render::IMAGE_HOLE;
 use crate::session_picker::cut_right;
-use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, PIN};
+use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, PIN, attention};
 
 /// The trailing chevron's text.
 const PLUS: &str = " + ";
@@ -58,18 +61,30 @@ pub(crate) fn render(
     layout: &SessionLayout,
     panes: &HashMap<PaneId, Pane>,
     keys_in_pane: bool,
+    now: SystemTime,
     right: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
     images: &mut Vec<DrawnImages>,
 ) -> Option<Position> {
     let [bar, body] = areas(right);
-    tab_bar(state, layout, keys_in_pane, bar, buf, hits);
+    tab_bar(state, layout, keys_in_pane, now, bar, buf, hits);
     let placement = placement(state, panes, layout, body);
     let mut cursor = None;
     let ranked = || placement.panes.iter().enumerate();
     for (rank, place) in ranked().filter(|(_, place)| !place.floating) {
-        cursor = draw_pane(state, place, rank, panes, keys_in_pane, buf, hits, images).or(cursor);
+        cursor = draw_pane(
+            state,
+            place,
+            rank,
+            panes,
+            keys_in_pane,
+            now,
+            buf,
+            hits,
+            images,
+        )
+        .or(cursor);
     }
     for stack in &placement.stacks {
         let lit = keys_in_pane
@@ -88,22 +103,35 @@ pub(crate) fn render(
     for (rank, place) in ranked().filter(|(_, place)| place.floating) {
         Clear.render(place.area, buf);
         hits.record_float(place.area, place.pane);
-        cursor = draw_pane(state, place, rank, panes, keys_in_pane, buf, hits, images).or(cursor);
+        cursor = draw_pane(
+            state,
+            place,
+            rank,
+            panes,
+            keys_in_pane,
+            now,
+            buf,
+            hits,
+            images,
+        )
+        .or(cursor);
     }
     cursor
 }
 
 /// Draws one placed pane's client (when `panes` has one) inside its frame,
-/// records its screen in `hits` and its images, at `rank`, in `images`, and
-/// marks the cells over its visible images that have no background of their
-/// own as holes the images show through. Returns its cursor while it has the
-/// keys.
+/// titled with its agent's status icon (in the status colour) while that
+/// agent needs a look, then its name. Records its screen in `hits` and its
+/// images, at `rank`, in `images`, and marks the cells over its visible
+/// images that have no background of their own as holes the images show
+/// through. Returns its cursor while it has the keys.
 fn draw_pane(
     state: &AppState,
     place: &Placed,
     rank: usize,
     panes: &HashMap<PaneId, Pane>,
     keys_in_pane: bool,
+    now: SystemTime,
     buf: &mut Buffer,
     hits: &mut HitMap,
     images: &mut Vec<DrawnImages>,
@@ -132,13 +160,18 @@ fn draw_pane(
         (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
         (false, false) => (GUTTER, Style::new().fg(DARK3)),
     };
+    let icon = state
+        .sessions
+        .agent_in(place.pane)
+        .and_then(|agent| attention(agent, now))
+        .map(|(icon, colour)| [Span::raw(" "), Span::styled(icon, Style::new().fg(colour))]);
+    let name = Span::raw(format!(" {} ", pane_title(state, panes, place.pane)));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(border))
-        .title(Line::styled(
-            format!(" {} ", pane_title(state, panes, place.pane)),
-            title,
-        ));
+        .title(
+            Line::from(icon.into_iter().flatten().chain([name]).collect::<Vec<_>>()).style(title),
+        );
     let block = if place.pinned {
         block.title_top(Line::styled(format!(" {PIN} "), title).right_aligned())
     } else {
@@ -236,8 +269,11 @@ pub(crate) fn pane_title(state: &AppState, panes: &HashMap<PaneId, Pane>, pane: 
 }
 
 /// The tab bar: the shown session's name, then a chevron per
-/// tab with the shown one bold on blue, then a ` + ` chevron. Tabs that
-/// don't fit are counted in `← +N` / `+N →` chips, keeping the shown tab.
+/// tab with the shown one bold on blue, each led by the status icon of the
+/// most urgent agent among its tiled panes while that agent needs a look (in
+/// the shown tab's black, else in the status colour), then a ` + ` chevron.
+/// Tabs that don't fit are counted in `← +N` / `+N →` chips, keeping the
+/// shown tab.
 /// Then, right-aligned, the `Alt <[]>` hint and the shown tab's swap layout
 /// name, lit while the tab is untouched and dim once it's changed by hand; a
 /// 1-pane tab has none, and it's dropped when the tabs leave no room for it.
@@ -250,6 +286,7 @@ fn tab_bar(
     state: &AppState,
     layout: &SessionLayout,
     keys_in_pane: bool,
+    now: SystemTime,
     bar: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
@@ -261,20 +298,31 @@ fn tab_bar(
     );
     let shown = Style::new().fg(BLACK).bg(BLUE).add_modifier(Modifier::BOLD);
     let rest = Style::new().fg(COMMENT).bg(GUTTER);
-    let labels: Vec<String> = (0..layout.tabs().len())
-        .map(|index| format!(" {} ", layout.tab_label(index)))
+    let tabs: Vec<Vec<Span<'static>>> = layout
+        .tabs()
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let active = index == layout.active();
+            let style = if active { shown } else { rest };
+            let icon = tab_icon(state, tab, now);
+            tab_chevron(icon, &layout.tab_label(index), style, active)
+        })
         .collect();
-    let widths: Vec<u16> = labels.iter().map(|label| chevron_width(label)).collect();
+    let widths: Vec<u16> = tabs
+        .iter()
+        .map(|spans| spans.iter().map(span_width).fold(0, u16::saturating_add))
+        .collect();
     let room = bar
         .width
         .saturating_sub(span_width(&session))
         .saturating_sub(chevron_width(PLUS));
     let range = visible_tabs(&widths, layout.active(), room);
-    hits.record_tab_bar(bar, layout.active(), labels.len());
+    let count = tabs.len();
+    hits.record_tab_bar(bar, layout.active(), count);
     let mut x = bar.x.saturating_add(span_width(&session));
-    // The bar's cells the next chevron of `text` takes.
-    let mut next = |text: &str| {
-        let width = chevron_width(text);
+    // The bar's next `width` cells.
+    let mut next = |width: u16| {
         let area = Rect::new(x, bar.y, width, 1).intersection(bar);
         x = x.saturating_add(width);
         area
@@ -291,24 +339,25 @@ fn tab_bar(
     let mut spans = vec![session];
     if range.start > 0 {
         let chip = left_chip(range.start);
-        target(next(&chip), range.start - 1);
+        target(next(chevron_width(&chip)), range.start - 1);
         chevron(&mut spans, chip, rest);
     }
-    for (index, label) in labels.iter().enumerate().take(range.end).skip(range.start) {
-        let style = if index == layout.active() {
-            shown
-        } else {
-            rest
-        };
-        target(next(label), index);
-        chevron(&mut spans, label.clone(), style);
+    for (index, (tab, &width)) in tabs
+        .into_iter()
+        .zip(&widths)
+        .enumerate()
+        .take(range.end)
+        .skip(range.start)
+    {
+        target(next(width), index);
+        spans.extend(tab);
     }
-    if range.end < labels.len() {
-        let chip = right_chip(labels.len() - range.end);
-        target(next(&chip), range.end);
+    if range.end < count {
+        let chip = right_chip(count - range.end);
+        target(next(chevron_width(&chip)), range.end);
         chevron(&mut spans, chip, rest);
     }
-    let plus = next(PLUS);
+    let plus = next(chevron_width(PLUS));
     if !plus.is_empty() {
         hits.record_new_tab(plus);
     }
@@ -359,6 +408,40 @@ fn chevron(spans: &mut Vec<Span<'static>>, text: String, style: Style) {
     spans.push(Span::styled(ARROW, Style::new().fg(BLACK).bg(bg)));
     spans.push(Span::styled(text, style));
     spans.push(Span::styled(ARROW, Style::new().fg(bg).bg(BLACK)));
+}
+
+/// A tab's chevron: ` <label> ` on `style`'s background between two arrows,
+/// after a space and its status `icon` when it has one, the icon in `style`
+/// while the tab is `shown`, else in its status colour.
+fn tab_chevron(
+    icon: Option<(&'static str, Color)>,
+    label: &str,
+    style: Style,
+    shown: bool,
+) -> Vec<Span<'static>> {
+    let bg = style.bg.unwrap_or(BLACK);
+    let mut spans = vec![Span::styled(ARROW, Style::new().fg(BLACK).bg(bg))];
+    if let Some((icon, colour)) = icon {
+        let lit = if shown { style } else { style.fg(colour) };
+        spans.extend([Span::styled(" ", style), Span::styled(icon, lit)]);
+    }
+    spans.extend([
+        Span::styled(format!(" {label} "), style),
+        Span::styled(ARROW, Style::new().fg(bg).bg(BLACK)),
+    ]);
+    spans
+}
+
+/// The status icon, and its colour, of the most urgent agent among `tab`'s
+/// tiled panes while that agent needs a look. A working agent doesn't count:
+/// the tab shows no spinner.
+fn tab_icon(state: &AppState, tab: &Tab, now: SystemTime) -> Option<(&'static str, Color)> {
+    let agents = tab
+        .pane_ids()
+        .into_iter()
+        .filter_map(|pane| state.sessions.agent_in(pane))
+        .filter(|agent| agent.status != AgentStatus::Working);
+    attention(most_urgent(agents)?, now)
 }
 
 fn chevron_width(text: &str) -> u16 {
@@ -492,6 +575,7 @@ mod tests {
                 layout,
                 &HashMap::new(),
                 true,
+                UNIX_EPOCH,
                 right,
                 &mut buf,
                 &mut HitMap::default(),
@@ -532,6 +616,7 @@ mod tests {
                 layout,
                 &HashMap::new(),
                 true,
+                UNIX_EPOCH,
                 right,
                 &mut buf,
                 &mut HitMap::default(),
@@ -658,6 +743,7 @@ mod tests {
             transcript: None,
             status: AgentStatus::Idle,
             turn_started_at: None,
+            waiting_since: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(1),
                 session: SessionId(1),

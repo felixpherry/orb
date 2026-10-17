@@ -15,11 +15,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `<C-g> [` in a pane opens its history as plain text in a float running `$EDITOR`, else `less`, at the bottom in vi, vim, nvim and less; quitting the editor closes the float.
 - `<C-g> y` in a pane lists the other agents of unsettled sessions; picking one pastes the pane's selection, else its screen, into that agent's prompt without sending it, and moves you there. An agent waiting for approval or an answer is refused.
 - `<C-g> ?`, and `?` in the sidebar, list every key that works where you are, Alt and jump keys included; typing filters the list.
+- `<C-g> a` takes you to the next agent that needs you: waiting for approval, then for input, then a finished chat you haven't read, longest waiting first. Press it again for the next one. It reaches agents the project filter hides, and says `No agent needs you` when nobody does.
+- Agent pane borders show the agent's status icon while it works, waits, failed or has a finished turn you haven't read. Tabs show the icon of the agent that needs a look: waiting, failed or finished but unread, never the working spinner.
+- The mode line counts the finished chats you haven't read, in green (`✓N`).
+- While orb is focused, an agent in another tab or session that starts needing approval or input is named in the message box, such as `orb/fix-login needs approval`.
+- Clicking a desktop notification opens that agent's pane with your keys in it, on macOS (with terminal-notifier) and on Linux.
+- Agent rows in the sidebar show a time before the `✳` or `π` mark: the turn so far while working, the wait while waiting, else the time since the last turn.
 
 ### Changed
 
 - `⏎` in the search picker (`<C-g> /`) opens the found agent's own pane instead of its session, and resumes its chat in a new tab if it ended.
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
+- A card's time counts how long its agent has waited for approval or input, instead of the time since its last turn. orb saves when each agent started waiting, so the times survive a restart; this upgrades orb's saved data, and orb keeps a copy of the old file first.
+- The mode line's input count is magenta, as in the sidebar.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 
 ## [0.1.0] - 2026-10-16

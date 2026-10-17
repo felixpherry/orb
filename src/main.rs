@@ -25,7 +25,7 @@ use orb_domain::feat::harness::claude::ClaudeCode;
 use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
 use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::integration::{self, IntegrationPaths};
-use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
+use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, OrbCli, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::SoundService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
@@ -163,7 +163,7 @@ fn run(
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let env = child_env(std::env::vars_os());
-    let sounds = desktop_sounds(&orb_root, log);
+    let (notifier, sounds) = (desktop_notifier(&home), desktop_sounds(&orb_root, log));
     let sockets = socket_paths(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
     let store_lock = store::lock(&store_path).change_context(OrbError)?;
@@ -233,7 +233,7 @@ fn run(
             harnesses,
             [env, browser_env].concat(),
             zmx,
-            desktop_notifier(),
+            notifier,
             sounds,
             log.clone(),
         )
@@ -379,8 +379,9 @@ fn install_integrations(
 }
 
 /// Desktop notices, clicked back to orb's window (kitty on macOS, niri on
-/// Linux).
-fn desktop_notifier() -> NotifierService {
+/// Linux) and then the agent's pane, which this orb's own executable shows
+/// under `home`.
+fn desktop_notifier(home: &Path) -> NotifierService {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let kitty = {
         let kitten = std::env::var_os("KITTY_INSTALLATION_DIR")
@@ -404,7 +405,11 @@ fn desktop_notifier() -> NotifierService {
             niri,
             ancestors: own_ancestry(),
         });
-    NotifierService::desktop(&path, ClickTarget { kitty, niri })
+    let orb = std::env::current_exe().ok().map(|program| OrbCli {
+        program,
+        home: home.to_owned(),
+    });
+    NotifierService::desktop(&path, ClickTarget { kitty, niri, orb })
 }
 
 /// herdr's sounds, written into `~/.orb/sounds` and played by the OS's own

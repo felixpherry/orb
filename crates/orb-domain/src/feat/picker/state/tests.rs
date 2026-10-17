@@ -759,6 +759,7 @@ fn agent(id: i64, title: &str, secs: u64) -> Agent {
         transcript: None,
         status: AgentStatus::Idle,
         turn_started_at: None,
+        waiting_since: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
             session: SessionId(id),

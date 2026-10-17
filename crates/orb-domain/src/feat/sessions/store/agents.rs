@@ -61,8 +61,8 @@ impl Store {
 
     /// Updates everything about an agent that changes after it's created: its
     /// session and directory (an agent can move to another workspace), titles,
-    /// branch, transcript position, turn start, activity and visit stamps,
-    /// and the pane it runs in. Its model stays as inserted.
+    /// branch, transcript position, turn and wait starts, activity and visit
+    /// stamps, and the pane it runs in. Its model stays as inserted.
     ///
     /// # Errors
     ///
@@ -76,7 +76,7 @@ impl Store {
                         transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
                         branch = ?8, last_activity_at = ?9, last_visited_at = ?10,
                         short_id = ?11, cwd = ?12, ai_titled = ?13, renamed_title = ?14,
-                        pane_id = ?15, orb_session_id = ?16
+                        pane_id = ?15, orb_session_id = ?16, waiting_since = ?17
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -95,6 +95,7 @@ impl Store {
                     row.renamed_title,
                     row.pane_id.map(|pane| pane.0),
                     row.orb_session.map(|session| session.0),
+                    row.waiting_since,
                 ],
             )
             .change_context(StoreError)
@@ -125,5 +126,6 @@ pub(super) fn agent_row(row: &Row<'_>) -> rusqlite::Result<AgentRow> {
         harness: HarnessId::new(row.get::<_, String>(17)?),
         pane_id: row.get::<_, Option<i64>>(18)?.map(PaneId),
         orb_session: row.get::<_, Option<i64>>(19)?.map(SessionId),
+        waiting_since: row.get(20)?,
     })
 }

@@ -9,7 +9,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::{PickerMemory, PickerState};
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{Session, Sessions, SidebarItem};
+use crate::feat::sessions::state::{Agent, Notice, NoticeKind, Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 use crate::ids::{AgentId, SessionId};
@@ -167,8 +167,7 @@ impl AppState {
     pub fn agent_on_screen(&self, agent: AgentId) -> bool {
         let Some(launch) = self
             .sessions
-            .all_agents()
-            .find(|candidate| candidate.id == agent)
+            .agent(agent)
             .and_then(|agent| agent.pane.as_ref())
         else {
             return false;
@@ -180,6 +179,33 @@ impl AppState {
                     .is_some_and(|tab| tab.holds(launch.pane))
                     || layout.floats().draws(launch.pane)
             })
+    }
+
+    /// What the message box says when `notice`'s agent starts waiting on the
+    /// user: `<project>/<session> needs approval` or `… needs input`, with
+    /// ` · <agent>` after the session's title while the session runs two or
+    /// more agents. `None` for a finished turn, or an agent no session runs.
+    pub fn ping_text(&self, notice: &Notice) -> Option<String> {
+        let need = match notice.kind {
+            NoticeKind::Finished => return None,
+            NoticeKind::NeedsApproval => "approval",
+            NoticeKind::NeedsInput => "input",
+        };
+        let sessions = &self.sessions;
+        let session = sessions
+            .agent(notice.agent)
+            .and_then(Agent::session)
+            .and_then(|id| sessions.session(id))?;
+        let project = sessions.project(session.project)?;
+        let agent = match sessions.agents(session.id).len() {
+            0 | 1 => String::new(),
+            _ => format!(" · {}", notice.title),
+        };
+        Some(format!(
+            "{}/{}{agent} needs {need}",
+            project.title,
+            sessions.title(session)
+        ))
     }
 
     /// What the frontend knows about harness `id`.
@@ -196,7 +222,8 @@ mod tests {
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::state::{PaneEntry, SessionLayout};
     use crate::feat::sessions::state::{
-        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, sessions_for,
+        Agent, AgentStatus, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Sessions,
+        SidebarItem, sessions_for,
     };
     use crate::feat::zmx::zmx_service::ZmxSession;
     use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
@@ -232,6 +259,7 @@ mod tests {
             transcript: None,
             status: AgentStatus::Idle,
             turn_started_at: None,
+            waiting_since: None,
             pane: pane.map(|pane| PaneLaunch {
                 pane: PaneId(pane),
                 session: SessionId(1),
@@ -420,6 +448,91 @@ mod tests {
 
         // Then it is.
         assert!(on_screen, "a pinned float stays on screen while hidden");
+    }
+
+    /// Session 1, named "fix-login", running agent 1 in pane 10, and agent 2
+    /// in pane 20 too when `two`.
+    fn pinging(two: bool) -> AppState {
+        let mut state = if two {
+            with_second_agent()
+        } else {
+            selecting_agent(true)
+        };
+        if let Some(session) = state.sessions.sessions.first_mut() {
+            session.name = Some("fix-login".to_owned());
+        }
+        state
+    }
+
+    /// Agent 1's notice of `kind`.
+    fn ping(kind: NoticeKind) -> Notice {
+        Notice {
+            agent: AgentId(1),
+            kind,
+            project: "work".to_owned(),
+            title: "Parser fix".to_owned(),
+            pane: Some(PaneId(10)),
+        }
+    }
+
+    #[rstest::rstest]
+    fn ping_text_names_project_and_session() {
+        // Given agent 1 alone in session "fix-login" of project "work".
+        let state = pinging(false);
+
+        // When it starts needing an approval.
+        let text = state.ping_text(&ping(NoticeKind::NeedsApproval));
+
+        // Then the text names the project and the session.
+        assert_eq!(
+            text.as_deref(),
+            Some("work/fix-login needs approval"),
+            "the in-app notice for a one-agent session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ping_text_adds_the_agent_when_the_session_has_two() {
+        // Given agents 1 and 2 in session "fix-login" of project "work".
+        let state = pinging(true);
+
+        // When agent 1 starts needing an approval.
+        let text = state.ping_text(&ping(NoticeKind::NeedsApproval));
+
+        // Then the text names the agent after the session.
+        assert_eq!(
+            text.as_deref(),
+            Some("work/fix-login · Parser fix needs approval"),
+            "the in-app notice tells two agents of one session apart"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ping_text_says_input_for_input() {
+        // Given agent 1 alone in session "fix-login" of project "work".
+        let state = pinging(false);
+
+        // When it starts needing an answer.
+        let text = state.ping_text(&ping(NoticeKind::NeedsInput));
+
+        // Then the text says it needs input.
+        assert_eq!(
+            text.as_deref(),
+            Some("work/fix-login needs input"),
+            "the in-app notice for an agent asking a question"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ping_text_is_none_for_a_finished_turn() {
+        // Given agent 1 alone in session "fix-login" of project "work".
+        let state = pinging(false);
+
+        // When its turn finishes.
+        let text = state.ping_text(&ping(NoticeKind::Finished));
+
+        // Then there is no in-app notice.
+        assert_eq!(text, None, "a finished turn gets no in-app notice");
     }
 
     #[rstest::rstest]

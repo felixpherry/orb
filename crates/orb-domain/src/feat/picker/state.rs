@@ -43,13 +43,7 @@ impl SessionFilter {
         match self {
             Self::All => !settled,
             Self::Settled => settled,
-            Self::Blocked => {
-                !settled
-                    && matches!(
-                        agent.status,
-                        AgentStatus::NeedsApproval | AgentStatus::NeedsInput
-                    )
-            }
+            Self::Blocked => !settled && agent.status.waiting(),
             Self::Working => !settled && agent.status == AgentStatus::Working,
             Self::Idle => {
                 !settled && matches!(agent.status, AgentStatus::Idle | AgentStatus::Unknown)

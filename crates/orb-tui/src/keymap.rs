@@ -241,6 +241,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ("<leader>/", Intent::OpenSearch, Navigation),
             ("<leader>W", Intent::OpenWorktreePicker, Navigation),
             ("<leader>?", Intent::OpenKeyList, General),
+            ("<leader>a", Intent::NextNeedsYou, Navigation),
         ],
     );
     bind(
@@ -1062,6 +1063,7 @@ mod tests {
                 transcript: None,
                 status: AgentStatus::Idle,
                 turn_started_at: None,
+                waiting_since: None,
                 pane: Some(PaneLaunch {
                     pane: PaneId(1),
                     session: SessionId(1),
@@ -1694,6 +1696,25 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_a_goes_to_the_next_agent_needing_you(
+        #[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope,
+    ) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `a`.
+        let intent = press(&mut keys, key(KeyCode::Char('a')));
+
+        // Then it goes to the next agent that needs the user.
+        assert_eq!(
+            intent,
+            Some(Intent::NextNeedsYou),
+            "<C-g> a should go to the next agent needing you in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
     #[case(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
     #[case(key(KeyCode::Char('[')))]
     #[case(key(KeyCode::Char(']')))]
@@ -1860,23 +1881,6 @@ mod tests {
             (intent, keys.is_pending()),
             (None, false),
             "<C-g> s should do nothing in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_a_is_unbound(#[values(Scope::SIDEBAR, Scope::PANE)] scope: Scope) {
-        // Given `<C-g>` pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, LEADER);
-
-        // When pressing `a`.
-        let intent = press(&mut keys, key(KeyCode::Char('a')));
-
-        // Then nothing happens and no sequence is left waiting.
-        assert_eq!(
-            (intent, keys.is_pending()),
-            (None, false),
-            "<C-g> a should do nothing in {scope:?}"
         );
     }
 
@@ -2484,23 +2488,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::SIDEBAR, "/ ? C P Space W b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_EMPTY, "/ ? C P Space W c e f i l n q")]
-    #[case(Scope::SIDEBAR_INCOGNITO, "/ ? C P Space W c e f i l n q t")]
-    #[case(Scope::PANE, "/ <C-g> ? C P Space W [ b c e h i m n p q r s t w y")]
+    #[case(Scope::SIDEBAR, "/ ? C P Space W a b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_EMPTY, "/ ? C P Space W a c e f i l n q")]
+    #[case(Scope::SIDEBAR_INCOGNITO, "/ ? C P Space W a c e f i l n q t")]
+    #[case(Scope::PANE, "/ <C-g> ? C P Space W [ a b c e h i m n p q r s t w y")]
     #[case(
         Scope::PANE_INCOGNITO,
-        "/ <C-g> ? C P Space W [ c e h i m n p q r s t y"
+        "/ <C-g> ? C P Space W [ a c e h i m n p q r s t y"
     )]
-    #[case(Scope::SIDEBAR_AGENT, "/ ? C P Space W b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ ? C P Space W c e f i l n q t")]
-    #[case(Scope::SIDEBAR_COLONY, ", / ? C P Space W c e f i l n q t")]
-    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / ? C P Space W c e f i l n q t")]
+    #[case(Scope::SIDEBAR_AGENT, "/ ? C P Space W a b c e f i l n q t w")]
+    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ ? C P Space W a c e f i l n q t")]
+    #[case(Scope::SIDEBAR_COLONY, ", / ? C P Space W a c e f i l n q t")]
+    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / ? C P Space W a c e f i l n q t")]
     #[case(
         Scope::PANE_COLONY,
-        ", / <C-g> ? C P Space W [ c e h i m n p q r s t y"
+        ", / <C-g> ? C P Space W [ a c e h i m n p q r s t y"
     )]
-    #[case(Scope::SIDEBAR_COLONISTS, ", / ? C P Space W c e f i l n q")]
+    #[case(Scope::SIDEBAR_COLONISTS, ", / ? C P Space W a c e f i l n q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

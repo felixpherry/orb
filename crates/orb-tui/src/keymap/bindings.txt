@@ -8,6 +8,7 @@
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
@@ -56,6 +57,7 @@ s -> ToggleSettle: settle
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -103,6 +105,7 @@ s -> ToggleSettle: settle
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -149,6 +152,7 @@ s -> ToggleSettle: settle
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
@@ -195,6 +199,7 @@ r -> Rename: rename
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -240,6 +245,7 @@ r -> Rename: rename
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -285,6 +291,7 @@ r -> Rename: rename
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -314,6 +321,7 @@ l -> Unfold: open
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -343,6 +351,7 @@ l -> Unfold: open
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -372,6 +381,7 @@ l -> Unfold: open
 <C-g> P -> OpenProjects: projects
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> f -> FilterProjects: filter projects
@@ -401,6 +411,7 @@ l -> Unfold: open
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> [ -> OpenHistory: pane history
+<C-g> a -> NextNeedsYou: needs you
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
@@ -448,6 +459,7 @@ l -> Unfold: open
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> [ -> OpenHistory: pane history
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> h -> LeavePane: go to sidebar
@@ -494,6 +506,7 @@ l -> Unfold: open
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> [ -> OpenHistory: pane history
+<C-g> a -> NextNeedsYou: needs you
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar
 <C-g> h -> LeavePane: go to sidebar
@@ -539,6 +552,7 @@ l -> Unfold: open
 <C-g> Space -> OpenSessionPicker: sessions
 <C-g> W -> OpenWorktreePicker: all worktrees
 <C-g> [ -> OpenHistory: pane history
+<C-g> a -> NextNeedsYou: needs you
 <C-g> b -> SwitchBranch: branch
 <C-g> c -> NewColony: new colony
 <C-g> e -> ToggleSidebar: toggle sidebar

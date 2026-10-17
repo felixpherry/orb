@@ -53,6 +53,7 @@ use tokio::runtime::Runtime;
 use crate::mouse::HitMap;
 use crate::outer_terminal::OuterTerminal;
 use crate::test_support::{FakeZmx, NoGit, layouts_for, pane, session as session_id, sessions_for};
+use crate::toast::{Toast, ToastKind};
 
 use super::panes::{
     AttachPlan, ExitOutcome, PaneExit, attach_at_start, attach_or_restore, broken_pane_message,
@@ -62,7 +63,7 @@ use super::panes::{
 use super::report::{StartedAttach, show, started_attach};
 use super::{
     App, LoopEvent, PREVIEW_EVERY, Toasts, after_pane, cursor_style, handle_mouse_intents,
-    history_line, list_directories, preview_due, stale_preview,
+    history_line, list_directories, preview_due, stale_preview, tick_every,
 };
 
 /// Pane `id`, a shell in `orb-p<id>`.
@@ -251,6 +252,29 @@ fn cursor_shape_follows_where_the_keys_are(
 }
 
 #[rstest::rstest]
+fn screen_ticks_every_second_while_an_agent_waits() {
+    // Given one agent waiting for an approval, and none working.
+    let mut project = project_active_at(1, "alpha", 0);
+    for agent in &mut project.agents {
+        agent.status = AgentStatus::NeedsApproval;
+    }
+    let sessions = Sessions {
+        projects: vec![project],
+        ..Sessions::default()
+    };
+
+    // When asking how often the screen must redraw with no event.
+    let every = tick_every(&sessions);
+
+    // Then it redraws every second, so the wait time counts up.
+    assert_eq!(
+        every,
+        Some(Duration::from_secs(1)),
+        "a wait should keep the screen ticking while nothing works"
+    );
+}
+
+#[rstest::rstest]
 fn preview_of_a_newly_selected_agent_is_due_at_once() {
     // Given agent 1's preview was just read.
     let now = Instant::now();
@@ -320,6 +344,7 @@ fn stale_preview_leaves_the_search_picker_alone() -> io::Result<()> {
                     transcript: Some(transcript.clone()),
                     status: AgentStatus::Idle,
                     turn_started_at: None,
+                    waiting_since: None,
                     pane: None,
                     branch: None,
                     created_at: UNIX_EPOCH,
@@ -734,6 +759,7 @@ fn project_active_at(id: i64, title: &str, secs: u64) -> Project {
             transcript: None,
             status: AgentStatus::Idle,
             turn_started_at: None,
+            waiting_since: None,
             pane: None,
             branch: None,
             created_at: UNIX_EPOCH,
@@ -1726,6 +1752,7 @@ fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
                 transcript: Some(transcript.clone()),
                 status: AgentStatus::Idle,
                 turn_started_at: None,
+                waiting_since: None,
                 pane: Some(PaneLaunch {
                     pane: PaneId(1),
                     session: SessionId(1),
@@ -1912,6 +1939,7 @@ fn an_unreadable_preview_is_logged() -> io::Result<()> {
             transcript: Some(transcript.clone()),
             status: AgentStatus::Idle,
             turn_started_at: None,
+            waiting_since: None,
             pane: None,
             branch: None,
             created_at: UNIX_EPOCH,
@@ -1957,6 +1985,7 @@ fn unreadable_previews_of_two_agents_are_each_logged_once() -> io::Result<()> {
         transcript: Some(transcript.clone()),
         status: AgentStatus::Idle,
         turn_started_at: None,
+        waiting_since: None,
         pane: None,
         branch: None,
         created_at: UNIX_EPOCH,
@@ -2012,6 +2041,7 @@ impl orb_domain::feat::notify::notifier::Notifier for FailingNotifier {
         _: &str,
         _: orb_domain::feat::notify::notifier::Urgency,
         _: AgentId,
+        _: Option<PaneId>,
     ) -> Result<(), error_stack::Report<orb_domain::feat::notify::notifier::NotifyError>> {
         Err(
             error_stack::Report::new(orb_domain::feat::notify::notifier::NotifyError)
@@ -2036,6 +2066,7 @@ fn a_failed_desktop_notification_is_logged() -> io::Result<()> {
             kind: orb_domain::feat::sessions::state::NoticeKind::Finished,
             project: "orb".to_owned(),
             title: "Fix it".to_owned(),
+            pane: None,
         },
     ));
 
@@ -2105,6 +2136,7 @@ fn watching_agent(test: &LoopTest, in_shown_tab: bool) {
             transcript: None,
             status: AgentStatus::Idle,
             turn_started_at: None,
+            waiting_since: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(1),
                 session: SessionId(1),
@@ -2141,6 +2173,7 @@ fn notice_of(kind: orb_domain::feat::sessions::state::NoticeKind) -> Outcome {
         kind,
         project: "orb".to_owned(),
         title: "Fix it".to_owned(),
+        pane: Some(PaneId(1)),
     })
 }
 
@@ -2232,6 +2265,133 @@ fn a_sound_that_cant_play_is_logged() -> io::Result<()> {
     Ok(())
 }
 
+/// Names agent 1's session (see [`watching_agent`]) "fix-login".
+fn name_fix_login(test: &LoopTest) {
+    if let Some(session) = test.state.write().sessions.sessions.first_mut() {
+        session.name = Some("fix-login".to_owned());
+    }
+}
+
+#[rstest::rstest]
+fn focused_orb_names_an_agent_waiting_in_another_tab() -> io::Result<()> {
+    // Given a focused orb with agent 1's pane in a tab behind the shown one.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, false);
+    name_fix_login(&test);
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box names its project and session.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Info, "orb/fix-login needs approval", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "an agent waiting off screen is named in the info box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn focused_orb_names_no_agent_waiting_on_screen() -> io::Result<()> {
+    // Given a focused orb showing agent 1's pane.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, true);
+    name_fix_login(&test);
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box stays empty.
+    assert!(
+        test.app.toasts.shown(Instant::now()).is_none(),
+        "the user already sees an agent on screen"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn unfocused_orb_shows_no_in_app_notice() -> io::Result<()> {
+    // Given an unfocused orb with agent 1's pane in a tab behind the shown one.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    watching_agent(&test, false);
+    name_fix_login(&test);
+    test.app.focused = false;
+
+    // When agent 1 starts needing an approval.
+    test.app.apply(notice_of(
+        orb_domain::feat::sessions::state::NoticeKind::NeedsApproval,
+    ));
+
+    // Then the message box stays empty.
+    assert!(
+        test.app.toasts.shown(Instant::now()).is_none(),
+        "the desktop notification speaks while orb isn't focused"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn a_notice_from_an_intent_shows_in_the_message_box() -> io::Result<()> {
+    // Given an intent that left a notice.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    test.state.write().sessions.notice = Some("No agent needs you".to_owned());
+
+    // When the loop ends its turn.
+    test.app.take_messages();
+
+    // Then the message box shows it as info.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Info, "No agent needs you", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "a notice isn't an error, so it shows in the info box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn an_error_and_a_notice_from_one_turn_show_the_error() -> io::Result<()> {
+    // Given intents that left an error and a notice in one turn.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    {
+        let mut state = test.state.write();
+        state.sessions.error = Some("boom".to_owned());
+        state.sessions.notice = Some("No agent needs you".to_owned());
+    }
+
+    // When the loop ends its turn.
+    test.app.take_messages();
+
+    // Then the message box shows the error.
+    let now = Instant::now();
+    let expected = test
+        .app
+        .toasts
+        .deadline(now)
+        .map(|until| Toast::new(ToastKind::Error, "boom", until));
+    assert_eq!(
+        test.app.toasts.shown(now),
+        expected.as_ref(),
+        "a notice shouldn't hide an error from the same turn"
+    );
+    Ok(())
+}
+
 #[rstest::rstest]
 fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()> {
     // Given the loop, and an agent asking it to close pane 99, which no
@@ -2243,7 +2403,7 @@ fn refused_change_answers_the_caller_and_not_the_message_box() -> io::Result<()>
     // When the loop handles the request and ends its turn.
     test.app
         .handle(LoopEvent::Control(close, tx), &mut io::sink())?;
-    test.app.take_error();
+    test.app.take_messages();
 
     // Then the agent hears not_found and the message box shows nothing.
     let answer = rx

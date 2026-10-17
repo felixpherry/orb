@@ -227,8 +227,7 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
         Some(&PickerItem::Hit { agent, .. }) => (
             state
                 .sessions
-                .all_agents()
-                .find(|shown| shown.id == agent)
+                .agent(agent)
                 .ok_or(PickSessionError::Deleted)?
                 .home()
                 .ok_or(PickSessionError::NoSession)?,
@@ -962,6 +961,7 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
+            waiting_since: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(1),
                 session: SessionId(1),

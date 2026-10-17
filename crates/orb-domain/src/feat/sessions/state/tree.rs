@@ -62,12 +62,7 @@ impl Sessions {
     /// Whether one of session `id`'s own agents waits for an approval or an
     /// answer.
     pub fn stuck(&self, id: SessionId) -> bool {
-        self.agents(id).iter().any(|agent| {
-            matches!(
-                agent.status,
-                AgentStatus::NeedsApproval | AgentStatus::NeedsInput
-            )
-        })
+        self.agents(id).iter().any(|agent| agent.status.waiting())
     }
 
     /// Whether the project filter lets the sidebar list session `id`: it
@@ -188,6 +183,24 @@ impl Sessions {
             );
         }
         rows
+    }
+
+    /// The unsettled sessions the sidebar lists, in its order as if no card
+    /// or colonists row were folded and no search had text: each top-level
+    /// session, then its colonists, depth first.
+    pub(super) fn tree_order(&self) -> Vec<SessionId> {
+        let tops = self
+            .sessions
+            .iter()
+            .filter(|session| self.listed(session.id) && self.top(session.id));
+        let mut next: Vec<&Session> = in_sidebar_order(tops);
+        next.reverse();
+        let mut order = Vec::new();
+        while let Some(session) = next.pop() {
+            order.push(session.id);
+            next.extend(self.colonists(session.id).into_iter().rev());
+        }
+        order
     }
 
     /// Pushes `session`'s card at `spot`, then what hangs under it: its

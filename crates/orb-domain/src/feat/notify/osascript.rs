@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, PaneId};
 
 /// Shows notifications with `osascript … display notification`, which macOS
 /// attributes to Script Editor: a click opens Script Editor, and a later
@@ -29,6 +29,7 @@ impl Notifier for OsascriptNotifier {
         body: &str,
         _urgency: Urgency,
         _agent: AgentId,
+        _pane: Option<PaneId>,
     ) -> Result<(), Report<NotifyError>> {
         spawn_detached("osascript", osascript_args(title, body), || {})
     }

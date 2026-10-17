@@ -136,6 +136,7 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     ALTER TABLE sessions ADD COLUMN parent_id INTEGER;
     UPDATE sessions SET kind = 'colony' WHERE kind IN ('research', 'learn');
 "),
+    Migration::Sql("ALTER TABLE threads ADD COLUMN waiting_since INTEGER;"),
 ];
 
 /// Applies the migrations the database hasn't seen, all in one transaction.

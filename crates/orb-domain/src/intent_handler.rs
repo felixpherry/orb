@@ -16,11 +16,11 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// Every intent first clears the error, which the user has now seen;
-    /// otherwise an intent that fails validation changes nothing. After every
-    /// intent, a cursor left on a row a fold hides opens the folds above it
-    /// (a hidden one-agent colonist's agent row moves it to the card),
-    /// unless a search has text.
+    /// Every intent first clears the error and the notice, which the user
+    /// has now seen; otherwise an intent that fails validation changes
+    /// nothing. After every intent, a cursor left on a row a fold hides
+    /// opens the folds above it (a hidden one-agent colonist's agent row
+    /// moves it to the card), unless a search has text.
     /// A focus key, tab switch, pane click or float toggle that moves the
     /// keys from one pane to another records the agent left and the agent
     /// entered, each only if its pane runs an agent.
@@ -35,6 +35,7 @@ impl IntentHandler {
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         state.sessions.error = None;
+        state.sessions.notice = None;
         if *intent != Intent::PickerG
             && let Some(picker) = state.picker.as_mut()
         {
@@ -93,6 +94,7 @@ impl IntentHandler {
             Intent::DropFloat => layout::intent::drop_float(state),
             Intent::JumpBack => jumps::intent::jump_back(state),
             Intent::JumpForward => jumps::intent::jump_forward(state),
+            Intent::NextNeedsYou => sessions::intent::next_needs_you(state),
             Intent::NewSession => picker::intent::open_project_picker(state),
             Intent::NewColony => picker::intent::open_world_picker(state),
             Intent::OpenProjects => picker::intent::open_projects(state),
@@ -291,6 +293,22 @@ mod tests {
         assert_eq!(
             state.sessions.error, None,
             "the user has seen the error once they press a key"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_intent_clears_the_notice() {
+        // Given a notice for the message box.
+        let mut state = state_with(vec![in_root(1)], 1);
+        state.sessions.notice = Some("No agent needs you".to_owned());
+
+        // When handling the next intent.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the notice is gone.
+        assert_eq!(
+            state.sessions.notice, None,
+            "the user has seen the notice once they press a key"
         );
     }
 

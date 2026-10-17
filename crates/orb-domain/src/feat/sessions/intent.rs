@@ -1,16 +1,17 @@
 //! What the session keys do: making, folding, pinning, settling and deleting
-//! sessions, and what the confirms and name boxes for them ask for.
+//! sessions, what the confirms and name boxes for them ask for, and going to
+//! the next agent that needs the user.
 
 use crate::command::{SessionsCommand, Workspace};
 use crate::feat::git::intent::workspace_items;
-use crate::feat::picker::intent::open_picker;
+use crate::feat::picker::intent::{open_picker, pick_agent};
 use crate::feat::picker::state::{PickTarget, PickerState};
 use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem, folder_slug};
 use crate::feat::sessions::validator::{
-    COLONIST_WORKING, FoldTarget, NewColonyError, SETTLE_IN_PROGRESS, ToggleSettleError,
-    validate_delete, validate_fold, validate_new_colony, validate_new_incognito,
-    validate_new_session, validate_settle_colonists, validate_toggle_pin, validate_toggle_settle,
-    validate_unfold,
+    COLONIST_WORKING, FoldTarget, NOBODY_NEEDS_YOU, NewColonyError, NextNeedsYouError,
+    SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete, validate_fold, validate_new_colony,
+    validate_new_incognito, validate_new_session, validate_next_needs_you,
+    validate_settle_colonists, validate_toggle_pin, validate_toggle_settle, validate_unfold,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::{ProjectId, SessionId};
@@ -425,6 +426,19 @@ pub(crate) fn new_session(
     ]
 }
 
+/// `<C-g> a`: moves the keys into the pane of the next agent that needs the
+/// user (see [`validate_next_needs_you`]), as a session picker pick would.
+/// With no agent to go to, nothing moves and the message box says so.
+pub(crate) fn next_needs_you(state: &mut AppState) -> Vec<Command> {
+    match validate_next_needs_you(state) {
+        Ok((session, pane)) => pick_agent(state, session, pane),
+        Err(NextNeedsYouError::NoneWaiting) => {
+            state.sessions.notice = Some(NOBODY_NEEDS_YOU.to_owned());
+            vec![]
+        }
+    }
+}
+
 /// The visit for the agent pane the keys landed in, when it isn't `left`,
 /// the agent whose pane had them before the intent.
 pub(crate) fn visit_entered_pane(state: &AppState, left: Option<SidebarItem>) -> Option<Command> {
@@ -444,12 +458,14 @@ mod tests {
     use crate::command::{SessionsCommand, Workspace};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerKind;
-    use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind, SidebarItem};
-    use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
+    use crate::feat::sessions::state::{
+        Agent, AgentStatus, ProjectKind, SessionKind, SidebarItem, layouts_for,
+    };
+    use crate::feat::sessions::validator::{NOBODY_NEEDS_YOU, SETTLE_IN_PROGRESS};
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, at, colony_with_colonists, incognito, on_agent_in_another_tab, settle, state_at,
-        state_with, stopped,
+        agent, agent_row, at, colony_with_colonists, incognito, on_agent_in_another_tab, settle,
+        state_at, state_with, stopped, two_projects,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -1200,6 +1216,168 @@ mod tests {
             state.sessions.cursor,
             Some(SidebarItem::Session(SessionId(2))),
             "h on a top-level colonist shouldn't move to its settled colony"
+        );
+    }
+
+    /// Agent 1 waiting for an approval since second 10, agent 2 for an
+    /// answer since second 20, and idle agent 3, with the cursor on
+    /// `cursor`.
+    fn two_waiting(cursor: SidebarItem) -> AppState {
+        let waiting = |id, status, secs| Agent {
+            waiting_since: Some(at(secs)),
+            ..agent(id, status)
+        };
+        state_at(
+            vec![
+                waiting(1, AgentStatus::NeedsApproval, 10),
+                waiting(2, AgentStatus::NeedsInput, 20),
+                agent(3, AgentStatus::Idle),
+            ],
+            cursor,
+        )
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_moves_the_keys_into_the_first_agent() {
+        // Given two waiting agents, the cursor on idle agent 3's card.
+        let mut state = two_waiting(SidebarItem::Session(SessionId(3)));
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys are in agent 1's pane.
+        assert_eq!(
+            (state.focus, state.focused_agent()),
+            (Focus::Pane, Some(agent_row(1, 1))),
+            "<C-g> a should go to the agent waiting for approval first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_from_a_listed_agent_goes_to_the_next() {
+        // Given two waiting agents, the cursor on agent 1's row.
+        let mut state = two_waiting(agent_row(1, 1));
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys are in agent 2's pane.
+        assert_eq!(
+            (state.focus, state.focused_agent()),
+            (Focus::Pane, Some(agent_row(2, 2))),
+            "<C-g> a again should go to the next agent that needs the user"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_from_the_last_wraps_to_the_first() {
+        // Given two waiting agents, the keys in agent 2's pane and the
+        // cursor on agent 3's card.
+        let mut state = AppState {
+            focus: Focus::Pane,
+            attached: [SessionId(2)].into(),
+            ..two_waiting(SidebarItem::Session(SessionId(3)))
+        };
+        state.sessions.enter(SessionId(2));
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys are in agent 1's pane.
+        assert_eq!(
+            (state.focus, state.focused_agent()),
+            (Focus::Pane, Some(agent_row(1, 1))),
+            "<C-g> a from the last agent in the list should wrap to the first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_records_a_jump() {
+        // Given two waiting agents, the cursor on idle agent 3's card.
+        let mut state = two_waiting(SidebarItem::Session(SessionId(3)));
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the jump list holds the card it left and the agent it reached.
+        assert_eq!(
+            state.jumps.entries(),
+            [SidebarItem::Session(SessionId(3)), agent_row(1, 1)],
+            "<C-g> a should be a jump <C-[> can undo"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_reaches_an_agent_the_filter_hides() {
+        // Given agent 11 of alpha waiting for an approval, the sidebar
+        // filtered to beta.
+        let mut state = two_projects(Some(2), SidebarItem::Session(SessionId(21)));
+        if let Some(waiting) = state
+            .sessions
+            .projects
+            .first_mut()
+            .and_then(|alpha| alpha.agents.first_mut())
+        {
+            waiting.status = AgentStatus::NeedsApproval;
+        }
+        state.layouts = layouts_for(&state.sessions.projects);
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys are in agent 11's pane.
+        assert_eq!(
+            (state.focus, state.focused_agent()),
+            (Focus::Pane, Some(agent_row(11, 11))),
+            "<C-g> a should reach an agent the project filter hides"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_with_nobody_waiting_leaves_a_notice() {
+        // Given one idle agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the message box will say nobody needs the user.
+        assert_eq!(
+            state.sessions.notice.as_deref(),
+            Some(NOBODY_NEEDS_YOU),
+            "<C-g> a with nobody waiting should say so"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_with_nobody_waiting_moves_nothing() {
+        // Given one idle agent, its card under the cursor.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When handling NextNeedsYou.
+        IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then the keys and the cursor stay.
+        assert_eq!(
+            (state.focus, state.sessions.cursor),
+            (Focus::Sidebar, Some(SidebarItem::Session(SessionId(1)))),
+            "<C-g> a with nobody waiting should leave the keys and cursor as they were"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_needs_you_with_nobody_waiting_returns_no_command() {
+        // Given one idle agent, its card under the cursor.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When handling NextNeedsYou.
+        let commands = IntentHandler::handle(&Intent::NextNeedsYou, &mut state);
+
+        // Then nothing is asked for.
+        assert_eq!(
+            commands,
+            vec![],
+            "<C-g> a with nobody waiting should ask the actors for nothing"
         );
     }
 }

@@ -91,6 +91,9 @@ pub struct AgentRow {
     pub created_at: i64,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<i64>,
+    /// When orb first saw the agent waiting for an approval or an answer;
+    /// `None` while it isn't waiting.
+    pub waiting_since: Option<i64>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
     /// When orb last saw a turn end, else when the agent was created.
@@ -414,7 +417,7 @@ impl Store {
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, last_activity_at, last_visited_at, ai_titled, model,
-                        renamed_title, harness, pane_id, orb_session_id
+                        renamed_title, harness, pane_id, orb_session_id, waiting_since
                  FROM threads ORDER BY created_at DESC, id DESC",
                 agent_row,
             )

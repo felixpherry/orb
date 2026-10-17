@@ -28,7 +28,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier};
 
 use super::{BACKGROUND, layout, render};
-use crate::sidebar::{BLACK, BLUE, COMMENT, GUTTER};
+use crate::sidebar::{
+    APPROVAL_ICON, BLACK, BLUE, COMMENT, COMPLETED_ICON, GUTTER, INPUT_ICON, MAGENTA, YELLOW,
+};
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::keymap::{Keys, LEADER, Scope, keymap, press};
@@ -55,6 +57,7 @@ fn agent(id: i64, status: AgentStatus) -> Agent {
         transcript: None,
         status,
         turn_started_at: None,
+        waiting_since: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
             session: SessionId(id),
@@ -1484,6 +1487,162 @@ fn click_on_the_drawn_left_chip_shows_the_last_hidden_tab() {
     );
 }
 
+/// `shown(Focus::Sidebar)` with a second tab of pane 2, shown while
+/// `second_shown`, where agent 2 runs with `status`, unread while `unseen`.
+fn second_tab_running(status: AgentStatus, unseen: bool, second_shown: bool) -> AppState {
+    laid_out(|state| {
+        state.layouts.new_tab(SessionId(1), entry(2));
+        if !second_shown {
+            state.layouts.go_to_tab(SessionId(1), 1);
+        }
+        let agent = Agent {
+            pane: Some(PaneLaunch {
+                pane: PaneId(2),
+                session: SessionId(1),
+            }),
+            unseen,
+            ..agent(2, status)
+        };
+        for project in &mut state.sessions.projects {
+            project.agents.push(agent.clone());
+        }
+    })
+}
+
+#[rstest::rstest]
+fn tab_with_a_waiting_agent_shows_its_icon() {
+    // Given a second tab, not shown, whose agent needs an approval.
+    let state = second_tab_running(AgentStatus::NeedsApproval, false, false);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label starts with the approval icon in yellow.
+    assert_eq!(
+        bar_style(&buffer, &format!("{APPROVAL_ICON} 2 ")),
+        Some((YELLOW, GUTTER, false)),
+        "tab bar was '{}'",
+        tab_bar(&buffer)
+    );
+}
+
+#[rstest::rstest]
+fn tab_with_only_shells_has_no_icon() {
+    // Given a second tab holding only a shell.
+    let state = laid_out(|state| {
+        state.layouts.new_tab(SessionId(1), entry(2));
+        state.layouts.go_to_tab(SessionId(1), 1);
+    });
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label is its number alone.
+    let bar = tab_bar(&buffer);
+    assert!(bar.contains("\u{e0b0} 2 \u{e0b0}"), "tab bar was '{bar}'");
+}
+
+#[rstest::rstest]
+fn tab_with_an_idle_read_agent_has_no_icon() {
+    // Given a second tab whose agent is idle and read.
+    let state = second_tab_running(AgentStatus::Idle, false, false);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label is its number alone.
+    let bar = tab_bar(&buffer);
+    assert!(bar.contains("\u{e0b0} 2 \u{e0b0}"), "tab bar was '{bar}'");
+}
+
+#[rstest::rstest]
+fn tab_with_a_working_agent_has_no_icon() {
+    // Given a second tab whose agent is working.
+    let state = second_tab_running(AgentStatus::Working, false, false);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label is its number alone: no spinner.
+    let bar = tab_bar(&buffer);
+    assert!(bar.contains("\u{e0b0} 2 \u{e0b0}"), "tab bar was '{bar}'");
+}
+
+#[rstest::rstest]
+fn tab_icon_passes_over_a_working_agent() {
+    // Given a second tab, not shown, with a working agent beside one whose
+    // finished turn is unread.
+    let state = laid_out(|state| {
+        state.layouts.new_tab(SessionId(1), entry(2));
+        state.layouts.split(SessionId(1), Split::Right, entry(3));
+        state.layouts.go_to_tab(SessionId(1), 1);
+        for (id, status, unseen) in [
+            (2, AgentStatus::Working, false),
+            (3, AgentStatus::Idle, true),
+        ] {
+            let agent = Agent {
+                pane: Some(PaneLaunch {
+                    pane: PaneId(id),
+                    session: SessionId(1),
+                }),
+                unseen,
+                ..agent(id, status)
+            };
+            for project in &mut state.sessions.projects {
+                project.agents.push(agent.clone());
+            }
+        }
+    });
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then tab 2's label starts with the finished icon.
+    let bar = tab_bar(&buffer);
+    assert!(
+        bar.contains(&format!("{COMPLETED_ICON} 2 ")),
+        "tab bar was '{bar}'"
+    );
+}
+
+#[rstest::rstest]
+fn shown_tab_icon_takes_the_tab_colour() {
+    // Given the second tab shown, its agent waiting for an answer.
+    let state = second_tab_running(AgentStatus::NeedsInput, false, true);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then its icon is bold black on blue, like the tab's text.
+    assert_eq!(
+        bar_style(&buffer, &format!("{INPUT_ICON} 2 ")),
+        Some((BLACK, BLUE, true)),
+        "tab bar was '{}'",
+        tab_bar(&buffer)
+    );
+}
+
+#[rstest::rstest]
+fn tab_icon_widens_its_click_target() {
+    // Given a second tab, not shown, whose agent has an unread finished turn.
+    let state = second_tab_running(AgentStatus::Idle, true, false);
+    let (buffer, hits) = draw_hits(&state);
+
+    // When clicking the arrow that closes tab 2's chevron.
+    let route = find_in_bar(&buffer, &format!("{COMPLETED_ICON} 2 \u{e0b0}"))
+        .map(|at| click_from_sidebar(&hits, Position::new(at.x + 4, at.y)));
+
+    // Then tab 2 is shown with the keys in pane 2.
+    assert_eq!(
+        route,
+        Some(MouseRoute::Intents(vec![
+            Intent::GoToTab(2),
+            Intent::FocusPane(PaneId(2))
+        ])),
+        "the whole chevron, icon included, is tab 2's"
+    );
+}
+
 /// The colour of the top-left corner of the frame at column `x` of the
 /// tab body.
 fn corner_fg(buffer: &Buffer, x: u16) -> Option<Color> {
@@ -1570,6 +1729,65 @@ fn frame_title_names_the_pane(#[case] state: AppState, #[case] title: &str) {
     assert!(top.contains(title), "top edge was '{top}'");
 }
 
+/// `state` with agent 1 set to `status`.
+fn agent_1_as(mut state: AppState, status: AgentStatus) -> AppState {
+    for agent in state
+        .sessions
+        .projects
+        .iter_mut()
+        .flat_map(|project| &mut project.agents)
+        .filter(|agent| agent.id == AgentId(1))
+    {
+        agent.status = status;
+    }
+    state
+}
+
+/// The text of the shown tab's top frame edge.
+fn frame_top(buffer: &Buffer) -> String {
+    let right = right_of(buffer);
+    text(buffer, Rect::new(right.x, right.y + 1, right.width, 1))
+}
+
+#[rstest::rstest]
+fn agent_pane_frame_title_starts_with_its_icon() {
+    // Given agent 1's pane shown while the agent waits for an answer.
+    let state = agent_1_as(shown(Focus::Sidebar), AgentStatus::NeedsInput);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then the frame title starts with the input icon in magenta.
+    let right = right_of(&buffer);
+    let title = (right.x..right.right())
+        .map(|x| Position::new(x, right.y + 1))
+        .find(|at| {
+            let rest = Rect::new(at.x, at.y, right.right() - at.x, 1);
+            text(&buffer, rest).starts_with(&format!("╭ {INPUT_ICON} Fix the bug "))
+        });
+    assert_eq!(
+        title
+            .and_then(|at| buffer.cell((at.x + 2, at.y)))
+            .map(|cell| cell.fg),
+        Some(MAGENTA),
+        "top edge was '{}'",
+        frame_top(&buffer)
+    );
+}
+
+#[rstest::rstest]
+fn shell_pane_frame_title_is_unchanged() {
+    // Given pane 1 running no agent, its old agent waiting for an answer.
+    let state = agent_1_as(shell_pane(), AgentStatus::NeedsInput);
+
+    // When drawing a frame.
+    let buffer = draw(&state);
+
+    // Then the frame title is the plain name.
+    let top = frame_top(&buffer);
+    assert!(top.contains("╭ shell ─"), "top edge was '{top}'");
+}
+
 #[rstest::rstest]
 fn zoomed_tab_draws_one_frame() {
     // Given agent 1's pane split right, then zoomed.
@@ -1645,6 +1863,22 @@ fn stack_list_marks_the_shown_pane() {
     // Then its row reads `> │ shell`, the `>` outside the bar.
     let right = right_side(&buffer);
     assert!(right.contains("> │ shell"), "right side was\n{right}");
+}
+
+#[rstest::rstest]
+fn stack_list_names_have_no_icon() {
+    // Given a stack whose agent pane waits for an answer.
+    let state = agent_1_as(stacked(), AgentStatus::NeedsInput);
+
+    // When drawing a frame tall enough for every row.
+    let buffer = draw_tall(&state, None);
+
+    // Then the agent's row reads its title alone.
+    let right = right_side(&buffer);
+    assert!(
+        right.contains("│ Fix the bug") && !right.contains(&format!("{INPUT_ICON} Fix the bug")),
+        "right side was\n{right}"
+    );
 }
 
 /// `stacked()` with pane 2 named `name`.

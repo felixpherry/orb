@@ -220,6 +220,7 @@ impl SessionsActor {
             transcript_offset: 0,
             created_at: now,
             turn_started_at: None,
+            waiting_since: None,
             branch: None,
             last_activity_at: now,
             last_visited_at: now,
@@ -588,10 +589,10 @@ pub(super) fn agent_mut(sessions: &mut Sessions, id: AgentId) -> Option<&mut Age
         .find(|agent| agent.id == id)
 }
 
-/// Brings a saved agent up to date with `status`: the turn stamp, and the
-/// title and branch from any new transcript lines, read in its harness's
-/// `format`. Returns whether a scan ran and named no branch, which leaves
-/// the branch to git.
+/// Brings a saved agent up to date with `status`: the turn and wait stamps,
+/// and the title and branch from any new transcript lines, read in its
+/// harness's `format`. Returns whether a scan ran and named no branch, which
+/// leaves the branch to git.
 fn update_row(
     row: &mut AgentRow,
     status: AgentStatus,
@@ -602,6 +603,9 @@ fn update_row(
     row.turn_started_at = status
         .in_progress()
         .then(|| row.turn_started_at.unwrap_or(now_ms));
+    row.waiting_since = status
+        .waiting()
+        .then(|| row.waiting_since.unwrap_or(now_ms));
     let (Some(session_id), Some(format)) = (&row.session_id, format) else {
         return false;
     };
@@ -715,6 +719,7 @@ pub(super) fn notice(sessions: &Sessions, row: &AgentRow, status: AgentStatus) -
         kind: notice_kind(agent.status, status)?,
         project: project.title.clone(),
         title: display_title(row).unwrap_or_else(|| NEW_AGENT.to_owned()),
+        pane: row.pane_id,
     })
 }
 

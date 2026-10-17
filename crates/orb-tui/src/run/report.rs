@@ -174,26 +174,41 @@ impl App {
         }
     }
 
-    /// Moves the refusal the last intents or the loop's own work left in
-    /// the state into the message box.
-    pub(super) fn take_error(&mut self) {
-        if self.state.read().sessions.error.is_none() {
+    /// Moves the refusal and the notice the last intents or the loop's own
+    /// work left in the state into the message box: the refusal first, so a
+    /// notice never hides it.
+    pub(super) fn take_messages(&mut self) {
+        let waiting = {
+            let state = self.state.read();
+            state.sessions.error.is_some() || state.sessions.notice.is_some()
+        };
+        if !waiting {
             return;
         }
-        if let Some(error) = self.state.write().sessions.error.take() {
-            self.toasts.error(error, Instant::now());
+        let (error, notice) = {
+            let mut state = self.state.write();
+            (state.sessions.error.take(), state.sessions.notice.take())
+        };
+        let now = Instant::now();
+        if let Some(error) = error {
+            self.toasts.error(error, now);
+        }
+        if let Some(notice) = notice {
+            self.toasts.notice(notice, now);
         }
     }
 
     /// Plays `notice`'s sound on a thread of its own: a request always, a
     /// finished turn unless orb is focused and the agent's pane is on
-    /// screen. Then, while orb's terminal isn't focused, sends `notice` on a
-    /// thread of its own (the desktop's notification server can be slow to
-    /// answer); while it is, the sidebar already shows it and it's dropped.
+    /// screen. Then, while orb's terminal is focused, names an agent off
+    /// screen that started waiting on the user in the message box (see
+    /// [`AppState::ping_text`]); while it isn't, sends `notice` on a thread
+    /// of its own (the desktop's notification server can be slow to answer).
     /// A sound that can't play or a notice that can't be sent is logged and
     /// dropped.
-    fn announce(&self, notice: Notice) {
-        let looking = self.focused && self.state.read().agent_on_screen(notice.agent);
+    fn announce(&mut self, notice: Notice) {
+        let on_screen = self.state.read().agent_on_screen(notice.agent);
+        let looking = self.focused && on_screen;
         if let Some(sound) = sound_for(notice.kind, looking) {
             let sounds = self.sounds.clone();
             let log = self.log.clone();
@@ -209,6 +224,12 @@ impl App {
             }
         }
         if self.focused {
+            let ping = (!on_screen)
+                .then(|| self.state.read().ping_text(&notice))
+                .flatten();
+            if let Some(text) = ping {
+                self.toasts.notice(text, Instant::now());
+            }
             return;
         }
         let notifier = self.notifier.clone();

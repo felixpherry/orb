@@ -59,10 +59,10 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 - **Reports are applied in one place** (`apply`, `show`, `open_ready` in crates/orb-tui/src/run/report.rs:113, :74, :138). Applying a report:
   - opens a ready session, as long as the session that was active when it was asked for is still active, even if the cursor has moved since; from the sidebar it opens at once, from a pane it takes the keys into the new pane, behind a picker or text box it waits until that closes;
   - shows an error or notice in the message box, without repeating an error until the next key or success, and without letting a notice hide an error from the same turn;
-  - sends a desktop notice for a status change while orb's terminal isn't focused;
+  - sends a desktop notice for a status change while orb's terminal isn't focused, and names an agent that starts waiting off screen in the message box while it is;
   - re-lists an open worktree picker and re-sorts an open projects screen;
   - fills the search picker unless the rows are stale.
-- **There is no fixed tick.** Apart from the channel, the loop only wakes for a held pane screen update, a spinner frame, the message box timing out, or the session picker's preview being due.
+- **There is no fixed tick.** Apart from the channel, the loop only wakes for a held pane screen update, a spinner frame, a second passing while an agent waits on the user, the message box timing out, or the session picker's preview being due.
 - **Workers never touch the picker or the message box.** Those belong to the loop.
 
 ## Panes

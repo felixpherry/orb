@@ -24,8 +24,8 @@ use super::{
     APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, COMMENT, COMPLETED_ICON, CYAN,
     DARK3, FAILED_ICON, FG, FG_DARK, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN,
     GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED,
-    STOPPED_ICON, SidebarScroll, USERS, VISUAL, YELLOW, ago_label, badge_colour, monogram, render,
-    working_label,
+    STOPPED_ICON, SidebarScroll, USERS, VISUAL, YELLOW, ago_label, badge_colour, duration_label,
+    monogram, render,
 };
 use crate::mouse::{Clicks, HitMap, MouseRoute};
 use crate::test_support::{layouts_for, sessions_for};
@@ -45,6 +45,7 @@ fn agent(id: i64, status: AgentStatus) -> Agent {
         transcript: None,
         status,
         turn_started_at: Some(at(866)),
+        waiting_since: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
             session: SessionId(id),
@@ -220,9 +221,9 @@ fn badge_colour_matches_t3(#[case] name: &str, #[case] expected: usize) {
 #[case(45, "45s")]
 #[case(134, "2m")]
 #[case(3900, "1h 5m")]
-fn working_label_is_t3s_duration(#[case] secs: u64, #[case] expected: &str) {
+fn duration_label_is_t3s_duration(#[case] secs: u64, #[case] expected: &str) {
     // Given / When formatting how long a turn has run.
-    let label = working_label(Duration::from_secs(secs));
+    let label = duration_label(Duration::from_secs(secs));
 
     // Then it uses T3's format.
     assert_eq!(label, expected, "{secs} s");
@@ -935,6 +936,22 @@ fn idle_agent_shows_time_since_last_activity() {
 }
 
 #[rstest::rstest]
+fn waiting_card_shows_its_wait() {
+    // Given an agent waiting for an approval for 6 min, whose last turn
+    // ended 3 h ago.
+    let sessions = sessions(vec![Agent {
+        waiting_since: Some(at(10_440)),
+        ..agent(1, AgentStatus::NeedsApproval)
+    }]);
+
+    // When rendering the sidebar.
+    let heading = line(&draw(&sessions, at(10_800), 8), 3);
+
+    // Then its first line ends with how long it has waited.
+    assert!(heading.trim_end().ends_with(" 6m"), "line was '{heading}'");
+}
+
+#[rstest::rstest]
 fn untitled_agent_row_is_a_new_agent() {
     // Given a session whose agent has no title yet.
     let sessions = sessions(vec![Agent {
@@ -1438,26 +1455,55 @@ fn session_card_lists_one_row_per_agent_pane() {
 }
 
 #[rstest::rstest]
-fn agent_row_ends_with_its_harness_mark() {
-    // Given session 1 with a pi agent.
+#[case::claude("claude", " 16m ✳")]
+#[case::pi("pi", " 16m π")]
+#[case::no_mark("bare", " 16m")]
+fn agent_row_ends_with_its_time_then_its_mark(#[case] harness: &str, #[case] end: &str) {
+    // Given session 1 with an idle agent of `harness` whose last turn ended
+    // 1000 s ago.
     let sessions = one_session(vec![Agent {
-        harness: HarnessId::new("pi"),
+        harness: HarnessId::new(harness),
         ..agent(1, AgentStatus::Idle)
     }]);
 
-    // When drawing the sidebar with pi's mark, π.
+    // When drawing the sidebar with Claude's ✳, pi's π and a harness with
+    // no mark.
     let pi = HarnessInfo {
         icon: Some("π".to_owned()),
         ..pi_like()
     };
-    let buf = draw_with(&sessions, &[info(), pi]);
+    let bare = HarnessInfo {
+        id: HarnessId::new("bare"),
+        ..pi_like()
+    };
+    let row = line(&draw_with(&sessions, &[info(), pi, bare]), 5);
 
-    // Then the agent row ends with π.
-    assert!(
-        line(&buf, 5).trim_end().ends_with('π'),
-        "line was '{}'",
-        line(&buf, 5)
-    );
+    // Then the agent row ends with the time, then the harness's mark.
+    assert!(row.trim_end().ends_with(end), "line was '{row}'");
+}
+
+#[rstest::rstest]
+fn working_agent_row_shows_its_turn_so_far() {
+    // Given session 1 with a Working agent whose turn started 134 s ago.
+    let sessions = one_session(vec![agent(1, AgentStatus::Working)]);
+
+    // When drawing the sidebar.
+    let row = line(&draw(&sessions, at(1000), 8), 5);
+
+    // Then the agent row's time is how long the turn has run.
+    assert!(row.trim_end().ends_with(" 2m ✳"), "line was '{row}'");
+}
+
+#[rstest::rstest]
+fn idle_agent_row_shows_time_since_its_last_turn() {
+    // Given session 1 with an idle agent whose last turn ended 3 h ago.
+    let sessions = one_session(vec![agent(1, AgentStatus::Idle)]);
+
+    // When drawing the sidebar.
+    let row = line(&draw(&sessions, at(10_800), 8), 5);
+
+    // Then the agent row's time is the time since that turn ended.
+    assert!(row.trim_end().ends_with(" 3h ✳"), "line was '{row}'");
 }
 
 #[rstest::rstest]
@@ -2056,7 +2102,7 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
         let agent = line(&draw_with_layouts(&sessions, &layouts), 5);
         let words: Vec<&str> = agent.split_whitespace().collect();
         words
-            .get(1..words.len().saturating_sub(1))
+            .get(1..words.len().saturating_sub(2))
             .unwrap_or_default()
             .join(" ")
     };

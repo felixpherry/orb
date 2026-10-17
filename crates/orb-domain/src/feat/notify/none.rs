@@ -3,7 +3,7 @@
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, PaneId};
 
 /// Shows nothing, and always succeeds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -20,6 +20,7 @@ impl Notifier for NoneNotifier {
         _body: &str,
         _urgency: Urgency,
         _agent: AgentId,
+        _pane: Option<PaneId>,
     ) -> Result<(), Report<NotifyError>> {
         Ok(())
     }
@@ -37,7 +38,7 @@ mod tests {
         let notifier = NoneNotifier;
 
         // When notifying that agent 1 finished.
-        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1));
+        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1), None);
 
         // Then it succeeds.
         assert!(result.is_ok(), "the none notifier should always succeed");

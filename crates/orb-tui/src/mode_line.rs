@@ -5,8 +5,9 @@
 //! active session's branch, then its place, `<project>/<title>`. On the
 //! right, `N running`, `fetching origin/<base>…` while Start fetches, or
 //! `starting session…` with a spinner, how many agents need an approval or
-//! an answer, and the local time in the mode's colour. When the line is too
-//! narrow, the right side stays whole and the left side is cut at its end.
+//! an answer and how many have a finished turn the user hasn't read, and the
+//! local time in the mode's colour. When the line is too narrow, the right
+//! side stays whole and the left side is cut at its end.
 
 use std::borrow::Cow;
 use std::time::SystemTime;
@@ -23,8 +24,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::sidebar::{
-    APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, CYAN, FG_DARK, FOLDER, GREEN, GREEN1, GUTTER,
-    INPUT_ICON, MAGENTA, ORANGE, SPINNER, SPINNER_FRAME, YELLOW,
+    APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, COMPLETED_ICON, FG_DARK, FOLDER, GREEN, GREEN1,
+    GUTTER, INPUT_ICON, MAGENTA, ORANGE, SPINNER, SPINNER_FRAME, YELLOW,
 };
 
 /// Closes a left block into the next (Nerd Font `nf-pl-left_hard_divider`).
@@ -35,9 +36,9 @@ const ARROW_LEFT: &str = "\u{e0b2}";
 const CLOCK: &str = "\u{f017}";
 
 /// Draws the mode line into `area`: the mode, the active session's branch and
-/// project on the left; the activity, the approval and input counts and the
-/// time `now` in `tz` on the right. The right side keeps its width, and the
-/// left is cut at its end.
+/// project on the left; the activity, the approval, input and unread counts
+/// and the time `now` in `tz` on the right. The right side keeps its width,
+/// and the left is cut at its end.
 pub(crate) fn render(
     state: &AppState,
     now: SystemTime,
@@ -118,18 +119,27 @@ fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
 /// x · y: the activity and the counts, then the clock block.
 fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> Line<'static> {
     let counts = [
-        (APPROVAL_ICON, AgentStatus::NeedsApproval, YELLOW),
-        (INPUT_ICON, AgentStatus::NeedsInput, CYAN),
+        (
+            APPROVAL_ICON,
+            sessions.status_count(AgentStatus::NeedsApproval),
+            YELLOW,
+        ),
+        (
+            INPUT_ICON,
+            sessions.status_count(AgentStatus::NeedsInput),
+            MAGENTA,
+        ),
+        (COMPLETED_ICON, sessions.unread_count(), GREEN),
     ];
     let mut spans: Vec<Span<'static>> = activity(sessions, now)
         .map(|activity| on(format!("{activity}  "), ORANGE, BG_DARK))
         .into_iter()
-        .chain(counts.into_iter().filter_map(|(icon, status, fg)| {
-            match sessions.status_count(status) {
-                0 => None,
-                count => Some(on(format!("{icon} {count}  "), fg, BG_DARK)),
-            }
-        }))
+        .chain(
+            counts
+                .into_iter()
+                .filter(|(_, count, _)| *count > 0)
+                .map(|(icon, count, fg)| on(format!("{icon} {count}  "), fg, BG_DARK)),
+        )
         .collect();
     spans.push(on(ARROW_LEFT, colour, BG_DARK));
     spans.push(on(format!(" {CLOCK} {} ", clock(now, tz)), BLACK, colour).bold());
@@ -206,7 +216,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::render;
-    use crate::sidebar::{BLUE, CYAN, FG_DARK, GREEN, GREEN1, YELLOW};
+    use crate::sidebar::{BLUE, FG_DARK, GREEN, GREEN1, MAGENTA, YELLOW};
 
     /// 2023-11-14 22:13:20 UTC, at spinner frame 0.
     const NOW: u64 = 1_700_000_000;
@@ -229,6 +239,7 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
+            waiting_since: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
@@ -769,13 +780,71 @@ mod tests {
         // When drawing the mode line.
         let buffer = draw(&state);
 
-        // Then the input count shows in cyan.
+        // Then the input count shows in magenta, as on the sidebar.
         assert_eq!(
             cell_at(&buffer, "\u{f059} 1").map(|cell| cell.fg),
-            Some(CYAN),
+            Some(MAGENTA),
             "input count foreground in '{}'",
             text(&buffer)
         );
+    }
+
+    /// Agent `id`, idle with a finished turn the user hasn't read.
+    fn unread(id: i64) -> Agent {
+        Agent {
+            unseen: true,
+            ..agent(id, AgentStatus::Idle)
+        }
+    }
+
+    #[rstest::rstest]
+    fn unread_count_shows_green_on_the_right() {
+        // Given three agents with a finished turn the user hasn't read.
+        let state = with_sessions(sessions((1..=3).map(unread).collect()));
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the unread count shows in green after the completed icon.
+        assert_eq!(
+            cell_at(&buffer, "\u{f058} 3").map(|cell| cell.fg),
+            Some(GREEN),
+            "unread count foreground in '{}'",
+            text(&buffer)
+        );
+    }
+
+    #[rstest::rstest]
+    fn unread_count_is_hidden_at_zero() {
+        // Given only an idle agent whose turn the user has read.
+        let state = with_sessions(sessions(vec![agent(1, AgentStatus::Idle)]));
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then no unread count shows.
+        let text = text(&buffer);
+        assert!(!text.contains('\u{f058}'), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn unread_count_includes_agents_the_filter_hides() {
+        // Given an unread agent in jinn while the sidebar shows only orb.
+        let state = with_sessions(fill(Sessions {
+            projects: vec![
+                project(1, "orb", vec![agent(1, AgentStatus::Idle)]),
+                project(2, "jinn", vec![unread(2)]),
+            ],
+            filter: Some(ProjectId(1)),
+            ..Sessions::default()
+        }));
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the hidden agent still counts.
+        let text = text(&buffer);
+        assert!(text.contains("\u{f058} 1"), "mode line was '{text}'");
     }
 
     #[rstest::rstest]

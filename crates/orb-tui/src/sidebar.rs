@@ -679,7 +679,7 @@ fn render_card(
     let (glyph, colour) = tree_status(sessions, session.id, attached, now);
     let pin = if session.pinned_at.is_some() { PIN } else { "" };
     let time = match most_urgent(sessions.agents(session.id)) {
-        Some(agent) if agent.status == AgentStatus::Working => when(agent, now),
+        Some(agent) if agent.status.in_progress() => when(agent, now),
         _ => ago_label(since(now, session.last_activity_at)),
     };
     let title = sessions.title(session);
@@ -736,7 +736,8 @@ fn render_card(
 
 /// An agent pane's row under its tree `guide`: its status icon (the idle
 /// circle filled while `attached`), `label` with where the search matched
-/// it (blue and bold while `active`), and its harness mark on the right.
+/// it (blue and bold while `active`), and on the right its time, then its
+/// harness's mark when the harness has one.
 #[expect(
     clippy::too_many_arguments,
     reason = "the row's parts plus the frame inputs every node takes"
@@ -769,7 +770,15 @@ fn render_agent(
             .chain(title_spans(label, &matched, active))
             .collect::<Vec<_>>(),
         ),
-        Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
+        Line::from(
+            [span(when(agent, now), COMMENT)]
+                .into_iter()
+                .chain(
+                    mark.into_iter()
+                        .flat_map(|mark| [span(" ", COMMENT), span(mark, LOGO)]),
+                )
+                .collect::<Vec<_>>(),
+        ),
         area,
         buf,
     );
@@ -885,6 +894,14 @@ pub(crate) fn status(
     }
 }
 
+/// The agent's status icon and its colour while the agent needs a look: it
+/// waits, failed, is gone, works, or has a finished turn the user hasn't
+/// read. `None` while it is idle and read, or stopped.
+pub(crate) fn attention(agent: &Agent, now: SystemTime) -> Option<(&'static str, Color)> {
+    let (icon, _, colour) = status(agent, false, now);
+    (agent.urgency() <= 4).then_some((icon, colour))
+}
+
 /// The working spinner's frame: one per [`SPINNER_FRAME`] since the turn
 /// started, so it moves with the loop's redraw while an agent works.
 fn spinner(agent: &Agent, now: SystemTime) -> &'static str {
@@ -898,11 +915,13 @@ fn spinner(agent: &Agent, now: SystemTime) -> &'static str {
         .unwrap_or_default()
 }
 
-/// How long the turn has run while working, else how long ago the last turn
+/// How long the agent has waited for an approval or an answer, else how long
+/// the turn has run while it works or waits, else how long ago the last turn
 /// ended.
 fn when(agent: &Agent, now: SystemTime) -> String {
-    match (agent.status, agent.turn_started_at) {
-        (AgentStatus::Working, Some(at)) => working_label(since(now, at)),
+    match (agent.status, agent.turn_started_at, agent.waiting_since) {
+        (status, _, Some(at)) if status.waiting() => duration_label(since(now, at)),
+        (status, Some(at), _) if status.in_progress() => duration_label(since(now, at)),
         _ => ago_label(since(now, agent.last_activity_at)),
     }
 }
@@ -949,8 +968,9 @@ fn since(now: SystemTime, at: SystemTime) -> Duration {
     now.duration_since(at).unwrap_or_default()
 }
 
-/// How long a turn has run, as T3 shows it: `45s`, `2m`, or `1h 5m`.
-pub(crate) fn working_label(elapsed: Duration) -> String {
+/// How long something has lasted so far, such as a turn or a wait, as T3
+/// shows a turn's: `45s`, `2m`, or `1h 5m`.
+pub(crate) fn duration_label(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     match secs {
         0..60 => format!("{secs}s"),

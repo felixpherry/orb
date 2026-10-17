@@ -124,6 +124,7 @@ pub(crate) fn render(
                 layout,
                 panes,
                 keys_in_pane,
+                now,
                 right,
                 frame.buffer_mut(),
                 hits,

@@ -129,6 +129,10 @@ pub enum Intent {
     JumpBack,
     /// Move forward to the next row in the jump list, after a jump back.
     JumpForward,
+    /// Move the keys into the pane of the next agent that needs the user:
+    /// approval, then input, then a finished turn not yet read, longest
+    /// waiting first.
+    NextNeedsYou,
     /// Open the project picker to make a session of that project.
     NewSession,
     /// Make a session in orb's Incognito folder, with one shell.
@@ -304,6 +308,7 @@ impl fmt::Display for Intent {
             Self::Attach => "attach",
             Self::JumpBack => "jump back",
             Self::JumpForward => "jump forward",
+            Self::NextNeedsYou => "needs you",
             Self::NewSession => "new session",
             Self::NewIncognito => "incognito",
             Self::NewColony => "new colony",
@@ -407,6 +412,7 @@ mod tests {
     #[case(Intent::ChangeWorkspace, "session's worktree")]
     #[case(Intent::OpenWorktreePicker, "all worktrees")]
     #[case(Intent::OpenKeyList, "keys")]
+    #[case(Intent::NextNeedsYou, "needs you")]
     fn navigation_intents_display_what_they_do(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key names where the intent goes or what
         // it acts on.

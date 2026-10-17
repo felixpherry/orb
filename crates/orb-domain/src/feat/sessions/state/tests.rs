@@ -45,6 +45,7 @@ fn idle_agent(id: i64) -> Agent {
         transcript: None,
         status: AgentStatus::Idle,
         turn_started_at: None,
+        waiting_since: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
             session: SessionId(id),
@@ -902,6 +903,289 @@ fn status_count_skips_agents_being_deleted() {
     assert_eq!(
         count, 1,
         "an agent being deleted shouldn't count toward its status"
+    );
+}
+
+/// Agent `id`, idle with a finished turn the user hasn't read.
+fn unread(id: i64) -> Agent {
+    Agent {
+        unseen: true,
+        ..idle_agent(id)
+    }
+}
+
+#[rstest::rstest]
+fn unread_count_counts_idle_agents_with_an_unread_turn() {
+    // Given two agents with an unread finished turn and one read.
+    let sessions = sessions(vec![unread(1), unread(2), idle_agent(3)], None);
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then the two unread ones count.
+    assert_eq!(count, 2, "only unread finished turns count");
+}
+
+#[rstest::rstest]
+fn unread_count_leaves_out_settled_sessions() {
+    // Given two agents with an unread finished turn, session 1 settled.
+    let mut sessions = sessions(vec![unread(1), unread(2)], None);
+    for session in sessions
+        .sessions
+        .iter_mut()
+        .filter(|s| s.id == SessionId(1))
+    {
+        session.settled_at = Some(at(5));
+    }
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then only the unsettled one counts.
+    assert_eq!(
+        count, 1,
+        "a settled session's agents keep their unread mark but don't count"
+    );
+}
+
+#[rstest::rstest]
+fn unread_count_skips_agents_being_deleted() {
+    // Given two agents with an unread finished turn, one being deleted.
+    let sessions = Sessions {
+        deleting: [SessionId(1)].into(),
+        ..sessions(vec![unread(1), unread(2)], None)
+    };
+
+    // When counting the unread agents.
+    let count = sessions.unread_count();
+
+    // Then only the other one counts.
+    assert_eq!(count, 1, "an agent being deleted shouldn't count as unread");
+}
+
+/// Agent `id` with `status`, waiting since second `since` if any.
+fn waiting(id: i64, status: AgentStatus, since: Option<u64>) -> Agent {
+    Agent {
+        status,
+        waiting_since: since.map(at),
+        ..idle_agent(id)
+    }
+}
+
+/// Agent `id`, unread, its last turn ended at second `secs`.
+fn unread_since(id: i64, secs: u64) -> Agent {
+    Agent {
+        last_activity_at: at(secs),
+        ..unread(id)
+    }
+}
+
+/// The ids of the agents `<C-g> a` visits, in order.
+fn needing_you(sessions: &Sessions) -> Vec<i64> {
+    sessions
+        .needs_you()
+        .iter()
+        .map(|agent| agent.id.0)
+        .collect()
+}
+
+#[rstest::rstest]
+fn needs_you_lists_approval_then_input_then_unread() {
+    // Given an unread agent, one waiting for input and one for approval.
+    let sessions = sessions(
+        vec![
+            unread(1),
+            waiting(2, AgentStatus::NeedsInput, Some(10)),
+            waiting(3, AgentStatus::NeedsApproval, Some(20)),
+        ],
+        None,
+    );
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then approval comes first, then input, then the unread turn.
+    assert_eq!(
+        order,
+        vec![3, 2, 1],
+        "approval outranks input, which outranks an unread turn"
+    );
+}
+
+#[rstest::rstest]
+fn needs_you_puts_the_longer_wait_first() {
+    // Given two agents waiting for approval, agent 2 for longer.
+    let sessions = sessions(
+        vec![
+            waiting(1, AgentStatus::NeedsApproval, Some(20)),
+            waiting(2, AgentStatus::NeedsApproval, Some(10)),
+        ],
+        None,
+    );
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then the longer wait comes first.
+    assert_eq!(order, vec![2, 1], "the oldest wait start goes first");
+}
+
+#[rstest::rstest]
+fn needs_you_puts_a_wait_with_no_start_last() {
+    // Given two agents waiting for input, agent 1 not stamped yet.
+    let sessions = sessions(
+        vec![
+            waiting(1, AgentStatus::NeedsInput, None),
+            waiting(2, AgentStatus::NeedsInput, Some(30)),
+        ],
+        None,
+    );
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then the stamped wait comes first.
+    assert_eq!(
+        order,
+        vec![2, 1],
+        "a wait with no start yet comes last in its group"
+    );
+}
+
+#[rstest::rstest]
+fn needs_you_puts_the_older_unread_first() {
+    // Given two unread agents, agent 2's turn ended earlier.
+    let sessions = sessions(vec![unread_since(1, 20), unread_since(2, 10)], None);
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then the older turn end comes first.
+    assert_eq!(order, vec![2, 1], "the oldest unread turn goes first");
+}
+
+#[rstest::rstest]
+fn needs_you_leaves_out_failed_agents() {
+    // Given a failed agent and one waiting for approval.
+    let sessions = sessions(
+        vec![
+            with_status(1, AgentStatus::Failed, false),
+            waiting(2, AgentStatus::NeedsApproval, Some(10)),
+        ],
+        None,
+    );
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then only the waiting agent is listed.
+    assert_eq!(order, vec![2], "a failed agent isn't waiting on the user");
+}
+
+#[rstest::rstest]
+fn needs_you_leaves_out_settled_sessions() {
+    // Given two unread agents, session 1 settled.
+    let sessions = settling(sessions(vec![unread(1), unread(2)], None), &[(1, 5)]);
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then only the unsettled one is listed.
+    assert_eq!(
+        order,
+        vec![2],
+        "a settled session's agents keep their marks but aren't listed"
+    );
+}
+
+#[rstest::rstest]
+fn needs_you_leaves_out_sessions_being_deleted() {
+    // Given two agents waiting for approval, session 1 being deleted.
+    let sessions = Sessions {
+        deleting: [SessionId(1)].into(),
+        ..sessions(
+            vec![
+                waiting(1, AgentStatus::NeedsApproval, Some(10)),
+                waiting(2, AgentStatus::NeedsApproval, Some(20)),
+            ],
+            None,
+        )
+    };
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then only the other one is listed.
+    assert_eq!(order, vec![2], "an agent being deleted isn't listed");
+}
+
+#[rstest::rstest]
+fn needs_you_leaves_out_ended_agents() {
+    // Given an unread agent whose pane ended in session 1, and a live one.
+    let ended = Agent {
+        pane: None,
+        last_session: Some(SessionId(1)),
+        ..unread(1)
+    };
+    let sessions = Sessions {
+        sessions: vec![session(1), session(2)],
+        ..sessions(vec![ended, unread(2)], None)
+    };
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then only the live agent is listed.
+    assert_eq!(order, vec![2], "an agent without a pane can't be visited");
+}
+
+#[rstest::rstest]
+fn needs_you_includes_agents_the_filter_hides() {
+    // Given an agent waiting for approval in project 1, filtered to
+    // project 2.
+    let sessions = fill(Sessions {
+        projects: vec![
+            project(1, vec![waiting(1, AgentStatus::NeedsApproval, Some(10))]),
+            project(2, vec![idle_agent(2)]),
+        ],
+        filter: Some(ProjectId(2)),
+        ..Sessions::default()
+    });
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then the hidden agent is listed.
+    assert_eq!(order, vec![1], "the project filter doesn't hide a wait");
+}
+
+#[rstest::rstest]
+fn needs_you_breaks_ties_in_sidebar_order() {
+    // Given agents 1 to 3 waiting for approval since the same second: agent
+    // 1 alone in project 1's session 1, and agents 2 and 3 in project 2's
+    // newer session 2, stored newest first.
+    let tied = |id, session, secs| Agent {
+        status: AgentStatus::NeedsApproval,
+        waiting_since: Some(at(100)),
+        ..agent(id, session, secs)
+    };
+    let sessions = fill(Sessions {
+        projects: vec![
+            project(1, vec![tied(1, 1, 10)]),
+            project(2, vec![tied(3, 2, 30), tied(2, 2, 20)]),
+        ],
+        ..Sessions::default()
+    });
+
+    // When listing who needs the user.
+    let order = needing_you(&sessions);
+
+    // Then they come as the sidebar lists them: session 2's card first, its
+    // agents oldest first, then session 1's.
+    assert_eq!(
+        order,
+        vec![2, 3, 1],
+        "tied waits should keep the sidebar's card and agent order"
     );
 }
 
