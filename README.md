@@ -12,7 +12,7 @@ macOS or Linux, inside [kitty](https://sw.kovidgoyal.net/kitty/), with [Claude C
 curl -fsSL https://raw.githubusercontent.com/zqccer/orb/main/install.sh | sh
 ```
 
-This puts orb and [zmx](https://github.com/neurosnap/zmx) (it keeps every pane running) in `~/.local/bin` and sets up orb's Claude Code hook, pi extension and `orb` skill without asking. It asks before it installs kitty and, on macOS, before it adds orb's Cmd keys to kitty.conf. At the end it lists anything left for you. Running it again is safe.
+This puts orb and [zmx](https://github.com/neurosnap/zmx) (it keeps every pane running) in `~/.local/bin` and sets up orb's Claude Code hook, pi extension, the `orb` skill, and 17 skills that take an approved plan to an open pull request (plan-with-me → approve-plan → ship-plan) without asking. It asks before it installs kitty and, on macOS, before it adds orb's Cmd keys to kitty.conf. At the end it lists anything left for you. Running it again is safe.
 
 ## First run
 

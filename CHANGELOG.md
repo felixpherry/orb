@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - While orb is focused, an agent in another tab or session that starts needing approval or input is named in the message box, such as `orb/fix-login needs approval`.
 - Clicking a desktop notification opens that agent's pane with your keys in it, on macOS (with terminal-notifier) and on Linux.
 - Agent rows in the sidebar show a time before the `✳` or `π` mark: the turn so far while working, the wait while waiting, else the time since the last turn.
+- `orb integration install` also installs 17 workflow skills that take an approved plan to an open pull request.
 
 ### Changed
 
@@ -28,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
 - A card's time counts how long its agent has waited for approval or input, instead of the time since its last turn. orb saves when each agent started waiting, so the times survive a restart; this upgrades orb's saved data, and orb keeps a copy of the old file first.
 - The mode line's input count is magenta, as in the sidebar.
+- pi's copy of orb's skills moves from `~/.pi/agent/skills` to `~/.agents/skills`; the install removes the old copy.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 
 ## [0.1.0] - 2026-10-16
