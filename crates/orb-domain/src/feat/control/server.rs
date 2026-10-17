@@ -38,9 +38,6 @@ use crate::{AppState, Log, State};
 /// How long a connection may take to send its request line.
 const REQUEST_LIMIT: Duration = Duration::from_secs(5);
 
-/// How long one check for a caller that hung up waits for a byte.
-const GONE_PROBE: Duration = Duration::from_millis(1);
-
 /// The control socket couldn't be opened.
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -147,16 +144,24 @@ where
     if read.is_err() {
         return;
     }
-    let probing = stream.set_read_timeout(Some(GONE_PROBE)).is_ok();
+    let probing = watch_for_hang_up(&stream);
     let gone = || probing && hung_up(&stream);
     let reply = answer(&line, &gone);
     let mut stream = stream;
+    let _ = stream.set_nonblocking(false);
     let _ = writeln!(stream, "{reply}");
 }
 
+/// Makes reads on `stream` return at once, so [`hung_up`] can check it
+/// without waiting. Unlike a read timeout, which macOS refuses to set once the
+/// caller has hung up, this works either way.
+fn watch_for_hang_up(stream: &UnixStream) -> bool {
+    stream.set_nonblocking(true).is_ok()
+}
+
 /// Whether the caller on `stream` hung up. It never sends more than its one
-/// line, so a later read either times out (still there) or finds the end of
-/// the stream (gone).
+/// line, so a later read either finds nothing yet (still there) or finds the
+/// end of the stream (gone).
 fn hung_up(mut stream: &UnixStream) -> bool {
     match stream.read(&mut [0; 1]) {
         Ok(0) => true,
@@ -857,7 +862,7 @@ fn agent_row(app: &AppState, session: SessionId, agent: &Agent, pane: PaneId) ->
 )]
 mod tests {
     use std::ffi::OsString;
-    use std::io::{self, Read, Write};
+    use std::io::{self, BufRead, BufReader, Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
@@ -867,7 +872,10 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{Action, ControlServerError, log_text, open, plan, reply_line, route, serve};
+    use super::{
+        Action, ControlServerError, hung_up, log_text, open, plan, reply_line, route, serve,
+        watch_for_hang_up,
+    };
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
@@ -1370,6 +1378,46 @@ mod tests {
             served.join().is_ok(),
             "serve should return once the caller left"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn hang_up_is_seen_when_the_caller_left_right_after_its_line() -> io::Result<()> {
+        // Given a request line that was read, and then a caller that hung up.
+        let (mut client, server) = UnixStream::pair()?;
+        writeln!(client, "{{}}")?;
+        let mut line = String::new();
+        BufReader::new(&server).read_line(&mut line)?;
+        drop(client);
+
+        // When starting to watch for the hang-up.
+        let watching = watch_for_hang_up(&server);
+
+        // Then the watch starts and sees the caller gone.
+        assert!(
+            watching && hung_up(&server),
+            "a caller that left before the watch started should read as gone"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn hang_up_is_not_seen_while_the_caller_waits() -> io::Result<()> {
+        // Given a request line that was read from a caller still connected.
+        let (mut client, server) = UnixStream::pair()?;
+        writeln!(client, "{{}}")?;
+        let mut line = String::new();
+        BufReader::new(&server).read_line(&mut line)?;
+
+        // When watching for the hang-up.
+        let watching = watch_for_hang_up(&server);
+
+        // Then the caller reads as still there.
+        assert!(
+            watching && !hung_up(&server),
+            "a caller still connected should not read as gone"
+        );
+        drop(client);
         Ok(())
     }
 }
