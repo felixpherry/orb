@@ -391,7 +391,9 @@ Entries are added or amended **only with human approval**.
 - (api) orb session create waits up to 3 minutes for orb's answer; other requests without a limit of their own wait 60 s.
 - (api) orb closes an API connection that sends no request within 5 s, and stops waiting on an agent once the caller hangs up.
 - (api) orb session create is refused with starting while another session is starting; the sessions actor checks and claims the start.
-- (integration) `orb integration install` also installs an `orb` skill for Claude Code and pi that teaches agents the API, including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits.
+- (integration) `orb integration install` writes orb's skills into Claude Code's `~/.claude/skills` and pi's `~/.agents/skills`.
+- (integration) orb's skills are the `orb` skill, which teaches agents the API (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits), and 17 workflow skills that take an approved plan to an open pull request.
+- (integration) `orb integration install` removes the `orb` skill copy that older orb versions wrote to `~/.pi/agent/skills`, unless pi's skills folder resolves to a folder the install writes.
 - (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
 - (sessions) A session that finishes starting while a picker, the rename box or search has the keys waits until they close.
