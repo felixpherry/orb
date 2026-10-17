@@ -458,3 +458,4 @@
 {"id": "6695c84bfff715e39a466cde3373b35d5af903cc", "message": "test(sounds): make the hung-player test deterministic\n\nmacOS scans a freshly written program on its first run, which in a full\ntest run could outlast the 2 s limit. Both players are now system\nprograms (/bin/sh running sleep, /usr/bin/true)."}
 {"id": "d0164e899ef9321c62becec4370a66e418ce8ad3", "message": "fix(notify): time-limit the desktop notifier and reject bare waits\n\nterminal-notifier or osascript is stopped after 5 s and counted as\nfailed, so a hung one falls back. lint-rules rejects a bare .wait()\noutside the timed runner and the pane reaper."}
 {"id": "e333ea4a93d0f5c555ac55ffef73a1a98769f01d", "message": "docs(dev): point three line references at the moved code"}
+{"id": "bd578139301ccc9973c491d75783ede1e12ad652", "message": "Merge branch 'main' into panes-search"}
