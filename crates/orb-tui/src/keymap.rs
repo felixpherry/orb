@@ -327,7 +327,8 @@ fn walk(scope: Scope) -> Vec<(String, Option<Intent>, String)> {
 /// The key list's rows for `scope`, each a key's text and what it does: the
 /// keys that don't start with `<C-g>` (the sidebar's letters), then the
 /// `<C-g>` keys, each sorted by their text, then the Alt keys and the jump
-/// keys. Groups of keys aren't rows; the keys under them are.
+/// keys. Groups of keys aren't rows; the keys under them are. In the
+/// sidebar, `Alt +` and `Alt -` read as widening and narrowing it.
 pub(crate) fn key_rows(scope: Scope) -> Vec<(String, String)> {
     let leader = LEADER.display();
     let mut rows: Vec<(String, String)> = walk(scope)
@@ -336,9 +337,11 @@ pub(crate) fn key_rows(scope: Scope) -> Vec<(String, String)> {
         .collect();
     rows.sort_by(|(a, _), (b, _)| (a.starts_with(&leader), a).cmp(&(b.starts_with(&leader), b)));
     let alt = ALT_KEYS.iter().map(|(keys, _, intent)| {
-        let label = match intent {
-            Intent::GoToTab(_) => "tab 1…9".to_owned(),
-            other => other.to_string(),
+        let label = match (intent, scope.side) {
+            (Intent::GoToTab(_), _) => "tab 1…9".to_owned(),
+            (Intent::GrowFocused, Side::Sidebar) => "widen sidebar".to_owned(),
+            (Intent::ShrinkFocused, Side::Sidebar) => "narrow sidebar".to_owned(),
+            (other, _) => other.to_string(),
         };
         ((*keys).to_owned(), label)
     });
@@ -1982,6 +1985,26 @@ mod tests {
         assert!(
             has_row(&rows, "Alt x", "close pane"),
             "the pane's rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::sidebar_widens(Scope::SIDEBAR, "Alt +", "widen sidebar")]
+    #[case::sidebar_narrows(Scope::SIDEBAR, "Alt -", "narrow sidebar")]
+    #[case::pane_grows(Scope::PANE, "Alt +", "grow")]
+    #[case::pane_shrinks(Scope::PANE, "Alt -", "shrink")]
+    fn key_rows_name_what_the_resize_keys_do_there(
+        #[case] scope: Scope,
+        #[case] keys: &str,
+        #[case] label: &str,
+    ) {
+        // Given / When listing the keys that work in `scope`.
+        let rows = key_rows(scope);
+
+        // Then the resize key reads as what it does there.
+        assert!(
+            has_row(&rows, keys, label),
+            "{keys} should read {label} in {scope:?}, rows were {rows:?}"
         );
     }
 
