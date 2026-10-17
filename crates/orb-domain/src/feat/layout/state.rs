@@ -13,15 +13,16 @@ use crate::feat::zmx::zmx_service::ZmxSession;
 use crate::ids::{PaneId, SessionId};
 
 /// Where a pane's program runs: its zmx session and directory, the name the
-/// user gave it, and the command that brings its conversation back in a
-/// fresh shell.
+/// user gave it, and the line a fresh shell in it runs first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneEntry {
     pub id: PaneId,
     pub zmx: ZmxSession,
     pub cwd: PathBuf,
     pub name: Option<String>,
-    /// Typed into the pane's shell when zmx has to make its session anew.
+    /// Typed into the pane's shell when zmx has to make its session anew:
+    /// the command that brings its agent's conversation back, or the first
+    /// line of a pane just added, such as the history viewer's.
     pub resume: Option<String>,
 }
 
