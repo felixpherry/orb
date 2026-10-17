@@ -26,7 +26,7 @@ use crate::feat::sessions::intent::{
     delete_session, filter_to, open_colony_name, pick_project, remove_project, settle_session,
     still_deletable,
 };
-use crate::feat::sessions::state::{PaneLaunch, Project};
+use crate::feat::sessions::state::{AgentStatus, PaneLaunch, Project};
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
 use crate::feat::sidebar;
 use crate::ids::{AgentId, PaneId, SessionId};
@@ -893,12 +893,15 @@ fn send_to_picked(state: &mut AppState, from: PaneId) -> Vec<Command> {
             commands.push(Command::SendText { from, to: pane });
             commands
         }
-        Err(SendToPickError::Blocked { approval }) => {
+        Err(SendToPickError::Blocked(status)) => {
             if let Some((_, pane)) = state.picker.as_ref().and_then(PickerState::selected_agent) {
                 let name = state
                     .layouts
                     .agent_name(pane, state.sessions.agent_in(pane));
-                let wait = if approval { "approval" } else { "an answer" };
+                let wait = match status {
+                    AgentStatus::NeedsApproval => "approval",
+                    _ => "an answer",
+                };
                 state.sessions.error = Some(format!("{name} is waiting for {wait}"));
             }
             vec![]

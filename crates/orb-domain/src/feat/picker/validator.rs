@@ -290,9 +290,9 @@ pub enum SendToPickError {
     /// The row's session is gone or being deleted, or its pane no longer
     /// runs one of its agents.
     Gone,
-    /// The agent waits for an approval (`approval`) or for an answer, which
-    /// a paste would give.
-    Blocked { approval: bool },
+    /// The agent waits for an approval or an answer (its status), which a
+    /// paste would give.
+    Blocked(AgentStatus),
 }
 
 /// Allow sending to the agent highlighted in the `Send to` list; gives its
@@ -315,8 +315,9 @@ pub fn validate_send_to_pick(state: &AppState) -> Result<(SessionId, PaneId), Se
         return Err(SendToPickError::Gone);
     }
     match state.sessions.agent_in(pane).map(|agent| agent.status) {
-        Some(AgentStatus::NeedsApproval) => Err(SendToPickError::Blocked { approval: true }),
-        Some(AgentStatus::NeedsInput) => Err(SendToPickError::Blocked { approval: false }),
+        Some(status @ (AgentStatus::NeedsApproval | AgentStatus::NeedsInput)) => {
+            Err(SendToPickError::Blocked(status))
+        }
         _ => Ok((session, pane)),
     }
 }
@@ -413,11 +414,14 @@ mod tests {
 
     use super::{
         AddDirectoryError, CloseListedAgentError, DeleteWorktreeError, OpenDirectoryError,
-        PickProjectError, PickSessionError, RemoveProjectError, SendToAgentError,
+        PickProjectError, PickSessionError, RemoveProjectError, SendToAgentError, SendToPickError,
         validate_add_directory, validate_close_listed_agent, validate_delete_worktree,
         validate_open_directory, validate_pick_project, validate_pick_session,
-        validate_remove_project, validate_send_to_agent,
+        validate_remove_project, validate_send_to_agent, validate_send_to_pick,
     };
+    use crate::feat::layout::state::Layouts;
+    use crate::intent_handler::test_support::{agent, state_with};
+    use crate::{Intent, IntentHandler};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{
@@ -476,6 +480,90 @@ mod tests {
             result,
             Err(SendToAgentError::NothingShown),
             "sending needs a shown pane"
+        );
+    }
+
+    /// The `Send to` list opened from agent 1's pane of session 1, on agent
+    /// 2 (`status`) of session 2.
+    fn sending_to_2(status: AgentStatus) -> AppState {
+        let mut state = AppState {
+            focus: Focus::Pane,
+            attached: [SessionId(1)].into(),
+            ..state_with(vec![agent(1, AgentStatus::Idle), agent(2, status)], 1)
+        };
+        state.sessions.enter(SessionId(1));
+        IntentHandler::handle(&Intent::SendToAgent, &mut state);
+        state
+    }
+
+    #[rstest::rstest]
+    fn send_pick_without_a_highlighted_agent_is_refused() {
+        // Given an empty `Send to` list.
+        let state = AppState {
+            picker: Some(PickerState::send_to(vec![], PaneId(1), Focus::Pane)),
+            ..AppState::default()
+        };
+
+        // When validating `⏎`.
+        let result = validate_send_to_pick(&state);
+
+        // Then there's no agent to send to.
+        assert_eq!(
+            result,
+            Err(SendToPickError::NoSelection),
+            "sending needs a highlighted agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn send_pick_on_a_gone_pane_is_refused() {
+        // Given the `Send to` list on agent 2, whose pane no layout shows
+        // any more.
+        let mut state = sending_to_2(AgentStatus::Idle);
+        state.layouts = Layouts::default();
+
+        // When validating `⏎`.
+        let result = validate_send_to_pick(&state);
+
+        // Then the agent is gone.
+        assert_eq!(
+            result,
+            Err(SendToPickError::Gone),
+            "a closed pane can't be sent to"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::approval(AgentStatus::NeedsApproval)]
+    #[case::answer(AgentStatus::NeedsInput)]
+    fn send_pick_on_a_waiting_agent_is_refused(#[case] status: AgentStatus) {
+        // Given the `Send to` list on agent 2, waiting.
+        let state = sending_to_2(status);
+
+        // When validating `⏎`.
+        let result = validate_send_to_pick(&state);
+
+        // Then it is refused with what the agent waits for.
+        assert_eq!(
+            result,
+            Err(SendToPickError::Blocked(status)),
+            "a paste would answer the agent's prompt"
+        );
+    }
+
+    #[rstest::rstest]
+    fn send_pick_on_an_idle_agent_gives_its_session_and_pane() {
+        // Given the `Send to` list on agent 2, idle.
+        let state = sending_to_2(AgentStatus::Idle);
+
+        // When validating `⏎`.
+        let result = validate_send_to_pick(&state);
+
+        // Then the paste goes to agent 2's pane in session 2.
+        assert_eq!(
+            result,
+            Ok((SessionId(2), PaneId(2))),
+            "an idle agent takes the paste"
         );
     }
 
