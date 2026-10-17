@@ -232,7 +232,6 @@ impl fmt::Debug for SoundService {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -243,6 +242,7 @@ mod tests {
         CommandPlayers, DONE_MP3, REQUEST_MP3, Sound, SoundError, SoundPlayer, SoundService,
         sound_for,
     };
+    use crate::common::write_program;
     use crate::feat::sessions::state::NoticeKind;
 
     /// Writes a program `name` into `dir` that appends its name and arguments
@@ -250,15 +250,14 @@ mod tests {
     fn program(dir: &Path, name: &str, code: i32) -> Result<PathBuf, Report<SoundError>> {
         let path = dir.join(name);
         let runs = dir.join("runs");
-        fs::write(
+        write_program(
             &path,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexit {code}\n",
                 runs.display()
             ),
         )
         .change_context(SoundError)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).change_context(SoundError)?;
         Ok(path)
     }
 
