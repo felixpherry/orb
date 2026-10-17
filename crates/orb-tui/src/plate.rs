@@ -1,7 +1,11 @@
-//! The plate as the start screen: what the right-hand area shows while no
-//! session is shown.
+//! The plate: the start screen, what the right-hand area shows while no
+//! session is shown, and a float over the shown session while it has the
+//! keys.
 //!
-//! The plate fills the right-hand area inside a small margin: a list box
+//! As the start screen the plate fills the right-hand area inside a small
+//! margin; as a float it covers most of the shown session's tab body,
+//! centred, the tab bar and the sidebar still drawn around it. Either way it
+//! is a list box
 //! titled Plate beside a preview of the selected row, or the preview under
 //! the list when the area is narrow. The list holds four groups — Your move,
 //! Waiting on others, Parked and Done today — each under a header with its
@@ -9,8 +13,8 @@
 //! is on the user's plate and how many agents are working. Each row shows
 //! its glyph, its verb's tag, its title, and on a wide list its session's
 //! title, then its age. The preview shows the selected row's state, title,
-//! description, numbered links, where it came from and its keys. The start
-//! screen takes no keys and no clicks.
+//! description, numbered links, where it came from and its keys. Clicks on
+//! the plate do nothing; while it has the keys, a click off it closes it.
 
 use std::time::{Duration, SystemTime};
 
@@ -32,9 +36,10 @@ use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BLUE1, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, GREEN,
     GREEN1, GUTTER, INPUT_ICON, MAGENTA, ORANGE, RED, VISUAL, YELLOW, ago_label, render_split,
 };
+use crate::tabs;
 
-/// The list box's title icon.
-const PLATE_ICON: &str = "\u{f0ae}";
+/// The list box's title icon, also before the mode line's Your move count.
+pub(crate) const PLATE_ICON: &str = "\u{f0ae}";
 /// An open group's header.
 const FOLD_OPEN: &str = "\u{f47c}";
 /// A folded group's header.
@@ -61,14 +66,15 @@ const SESSION_ROOM: usize = 22;
 
 /// Draws the plate as the start screen in `area` (the right-hand side),
 /// inside a 2-column, 1-row margin, with Done today counted from local
-/// midnight of `now` in `tz`.
+/// midnight of `now` in `tz`. Returns `area`, all of which is the plate's,
+/// and how many rows the list shows.
 pub(crate) fn render(
     state: &AppState,
     now: SystemTime,
     tz: &TimeZone,
     area: Rect,
     buf: &mut Buffer,
-) {
+) -> (Rect, usize) {
     let board = Board::new(state, local_midnight(now, tz));
     let outer = Rect {
         x: area.x.saturating_add(2),
@@ -76,21 +82,54 @@ pub(crate) fn render(
         width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(2),
     };
-    render_boxes(&board, state, now, outer, buf);
+    (area, render_boxes(&board, state, now, outer, buf))
+}
+
+/// Draws the plate floating over the shown session: a cleared rect 92% ×
+/// 86% of the tab body inside `right`, centred, holding the list and the
+/// preview, with Done today counted from local midnight of `now` in `tz`.
+/// Returns that rect and how many rows the list shows.
+pub(crate) fn render_float(
+    state: &AppState,
+    now: SystemTime,
+    tz: &TimeZone,
+    right: Rect,
+    buf: &mut Buffer,
+) -> (Rect, usize) {
+    let [_, body] = tabs::areas(right);
+    let rect = float_rect(body);
+    Clear.render(rect, buf);
+    let board = Board::new(state, local_midnight(now, tz));
+    (rect, render_boxes(&board, state, now, rect, buf))
+}
+
+/// The float's rect in the tab `body`: 92% of its width and 86% of its
+/// height, centred.
+fn float_rect(body: Rect) -> Rect {
+    let share =
+        |size: u16, percent: u32| u16::try_from(u32::from(size) * percent / 100).unwrap_or(size);
+    let width = share(body.width, 92);
+    let height = share(body.height, 86);
+    Rect {
+        x: body.x + (body.width - width) / 2,
+        y: body.y + (body.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Draws `board`'s list box and preview box in `outer`: side by side from
 /// [`WIDE`] columns, the list taking 52% (at least 40 columns), else the
-/// list over the preview, 60/40.
+/// list over the preview, 60/40. Returns how many rows the list shows.
 fn render_boxes(
     board: &Board<'_>,
     state: &AppState,
     now: SystemTime,
     outer: Rect,
     buf: &mut Buffer,
-) {
+) -> usize {
     if outer.is_empty() {
-        return;
+        return 0;
     }
     let [list_area, preview_area] = if outer.width >= WIDE {
         let share = u16::try_from(u32::from(outer.width) * 52 / 100).unwrap_or(outer.width);
@@ -99,11 +138,12 @@ fn render_boxes(
     } else {
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(outer)
     };
-    render_list(board, state, now, list_area, buf);
+    let page = render_list(board, state, now, list_area, buf);
     match board.selected_row() {
         Some(row) => render_preview(row, group_of(board, row.key), state, now, preview_area, buf),
         None => render_nothing(preview_area, buf),
     }
+    page
 }
 
 /// The group the row with `key` sits in.
@@ -134,8 +174,14 @@ impl ListLine {
 }
 
 /// Draws the list box: the title, the groups and their rows, the counts in
-/// the bottom border.
-fn render_list(board: &Board<'_>, state: &AppState, now: SystemTime, area: Rect, buf: &mut Buffer) {
+/// the bottom border. Returns how many rows it shows.
+fn render_list(
+    board: &Board<'_>,
+    state: &AppState,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) -> usize {
     let title = Line::from(vec![
         span(format!(" {PLATE_ICON} "), ORANGE),
         Span::styled("Plate ", bold(FG)),
@@ -177,6 +223,7 @@ fn render_list(board: &Board<'_>, state: &AppState, now: SystemTime, area: Rect,
         }
     }
     draw_lines(&lines, board.selected, inner, buf);
+    usize::from(inner.height)
 }
 
 /// A group's header: its fold icon, its name bold in its colour and its

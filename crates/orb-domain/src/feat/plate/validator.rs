@@ -4,8 +4,8 @@ use crate::AppState;
 use crate::feat::control::protocol::{ApiError, ErrorCode};
 use crate::feat::control::target::{self, Resolved};
 use crate::feat::control::validator::not_settled;
-use crate::feat::plate::{PlateItem, Verb};
-use crate::ids::{PaneId, PlateItemId};
+use crate::feat::plate::{PlateItem, RowKey, Verb};
+use crate::ids::{PaneId, PlateItemId, SessionId};
 
 /// What a colonist is told when it tries to add a plate item.
 pub(crate) const COLONIST_REFUSED: &str = "colonists report to their chief";
@@ -56,15 +56,184 @@ pub(crate) fn known_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, 
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, format!("no item {}", id.0)))
 }
 
+/// Where ⏎ on a plate row takes the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoTarget {
+    /// An agent's pane of a live session.
+    Agent { session: SessionId, pane: PaneId },
+    /// A shell pane of a live session.
+    Shell { session: SessionId, pane: PaneId },
+    /// The session itself: its pane is gone, or it's settled.
+    Session(SessionId),
+}
+
+/// Why ⏎ can't go anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoError {
+    /// The row's session was deleted or is being deleted.
+    SessionGone,
+}
+
+/// The message box's words for [`GoError::SessionGone`].
+pub(crate) const SESSION_GONE: &str = "the session is gone";
+
+/// Where ⏎ on the row with `key`, from `session`, goes. orb's row goes to
+/// its agent's pane. An item goes to its pane while that pane is still in
+/// its live session, and to the session itself once the pane is gone or the
+/// session is settled, so entering it resumes it.
+pub(crate) fn go_target(
+    app: &AppState,
+    key: RowKey,
+    session: SessionId,
+) -> Result<GoTarget, GoError> {
+    let found = app
+        .sessions
+        .session(session)
+        .filter(|_| !app.sessions.deleting.contains(&session))
+        .ok_or(GoError::SessionGone)?;
+    let item = match key {
+        RowKey::Agent(pane) => return Ok(GoTarget::Agent { session, pane }),
+        RowKey::Item(id) => app.plate.item(id),
+    };
+    let pane = item
+        .map(|item| item.pane)
+        .filter(|&pane| found.settled_at.is_none() && app.layouts.owner_of(pane) == Some(session));
+    Ok(match pane {
+        Some(pane) if app.sessions.runs_agent(session, pane, &app.layouts) => {
+            GoTarget::Agent { session, pane }
+        }
+        Some(pane) => GoTarget::Shell { session, pane },
+        None => GoTarget::Session(session),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{known_item, verb};
+    use super::{GoError, GoTarget, go_target, known_item, verb};
+    use crate::AppState;
     use crate::feat::control::protocol::ErrorCode;
+    use crate::feat::layout::state::test_entry;
+    use crate::feat::layout::tree::Split;
     use crate::feat::plate::state::test_item;
-    use crate::feat::plate::{ItemState, Plate};
+    use crate::feat::plate::{ItemState, Plate, PlateItem, RowKey};
     use crate::feat::sessions::state::AgentStatus;
-    use crate::ids::PlateItemId;
-    use crate::intent_handler::test_support::{agent, state_with};
+    use crate::ids::{PaneId, PlateItemId, SessionId};
+    use crate::intent_handler::test_support::{agent, settle, state_with};
+
+    /// Session 1 running agent 1 in pane 1, with item 1 from session
+    /// `session`'s pane `pane`.
+    fn with_item(session: i64, pane: i64) -> AppState {
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        app.plate = Plate::from_saved(vec![PlateItem {
+            session: SessionId(session),
+            pane: PaneId(pane),
+            ..test_item(1, ItemState::YourMove)
+        }]);
+        app
+    }
+
+    /// Where ⏎ on item 1 of `app`, from session `session`, goes.
+    fn target_of(app: &AppState, session: i64) -> Result<GoTarget, GoError> {
+        go_target(app, RowKey::Item(PlateItemId(1)), SessionId(session))
+    }
+
+    #[rstest::rstest]
+    fn go_target_of_an_agent_item_is_its_pane() {
+        // Given item 1 from agent 1's pane in session 1.
+        let app = with_item(1, 1);
+
+        // When working out where ⏎ goes.
+        let target = target_of(&app, 1);
+
+        // Then it's the agent's pane.
+        assert_eq!(
+            target,
+            Ok(GoTarget::Agent {
+                session: SessionId(1),
+                pane: PaneId(1)
+            }),
+            "an item from a live agent's pane should go to that pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn go_target_of_a_shell_pane_item_is_that_pane() {
+        // Given item 1 from shell pane 50, split off session 1's agent.
+        let mut app = with_item(1, 50);
+        app.layouts
+            .split(SessionId(1), Split::Right, test_entry(50));
+
+        // When working out where ⏎ goes.
+        let target = target_of(&app, 1);
+
+        // Then it's the shell pane.
+        assert_eq!(
+            target,
+            Ok(GoTarget::Shell {
+                session: SessionId(1),
+                pane: PaneId(50)
+            }),
+            "an item from a shell pane should go to that pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn go_target_of_an_item_whose_pane_is_gone_is_its_session() {
+        // Given item 1 from pane 99, no longer in session 1.
+        let app = with_item(1, 99);
+
+        // When working out where ⏎ goes.
+        let target = target_of(&app, 1);
+
+        // Then it's the session.
+        assert_eq!(
+            target,
+            Ok(GoTarget::Session(SessionId(1))),
+            "an item whose pane is gone should go to its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn go_target_of_a_settled_sessions_item_is_its_session() {
+        // Given item 1 from agent 1's pane, session 1 settled with the pane
+        // still in its layout.
+        let app = settle(with_item(1, 1), &[1]);
+
+        // When working out where ⏎ goes.
+        let target = target_of(&app, 1);
+
+        // Then it's the session, so entering it resumes it.
+        assert_eq!(
+            target,
+            Ok(GoTarget::Session(SessionId(1))),
+            "an item from a settled session should go to the session"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::deleted(2, false)]
+    #[case::deleting(1, true)]
+    fn go_target_of_a_deleted_or_deleting_session_is_refused(
+        #[case] session: i64,
+        #[case] deleting: bool,
+    ) {
+        // Given item 1 from session `session`, which is gone or being
+        // deleted.
+        let mut app = with_item(session, 1);
+        if deleting {
+            app.sessions.deleting.insert(SessionId(session));
+        }
+
+        // When working out where ⏎ goes.
+        let target = target_of(&app, session);
+
+        // Then it's refused.
+        assert_eq!(
+            target,
+            Err(GoError::SessionGone),
+            "an item whose session is gone should go nowhere"
+        );
+    }
 
     #[rstest::rstest]
     fn unknown_verb_names_every_verb() {

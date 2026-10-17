@@ -5,8 +5,9 @@
 //! active session's branch, then its place, `<project>/<title>`. On the
 //! right, `N running`, `fetching origin/<base>…` while Start fetches, or
 //! `starting session…` with a spinner, how many agents need an approval or
-//! an answer and how many have a finished turn the user hasn't read, and the
-//! local time in the mode's colour. When the line is too narrow, the right
+//! an answer, how many have a finished turn the user hasn't read and how
+//! many items are the user's move on the plate, and the local time in the
+//! mode's colour. When the line is too narrow, the right
 //! side stays whole and the left side is cut at its end.
 
 use std::borrow::Cow;
@@ -15,6 +16,7 @@ use std::time::SystemTime;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use orb_domain::feat::picker::state::PickerState;
+use orb_domain::feat::plate::{Board, GroupKind, local_midnight};
 use orb_domain::feat::sessions::state::{AgentStatus, Sessions, SidebarItem};
 use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
@@ -23,6 +25,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::plate::PLATE_ICON;
 use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, COMPLETED_ICON, FG_DARK, FOLDER, GREEN, GREEN1,
     GUTTER, INPUT_ICON, MAGENTA, ORANGE, SPINNER, SPINNER_FRAME, YELLOW,
@@ -36,8 +39,8 @@ const ARROW_LEFT: &str = "\u{e0b2}";
 const CLOCK: &str = "\u{f017}";
 
 /// Draws the mode line into `area`: the mode, the active session's branch and
-/// project on the left; the activity, the approval, input and unread counts
-/// and the time `now` in `tz` on the right. The right side keeps its width,
+/// project on the left; the activity, the approval, input, unread and Your
+/// move counts and the time `now` in `tz` on the right. The right side keeps its width,
 /// and the left is cut at its end.
 pub(crate) fn render(
     state: &AppState,
@@ -47,7 +50,8 @@ pub(crate) fn render(
     buf: &mut Buffer,
 ) {
     let (mode, colour) = mode(state);
-    let right = right(&state.sessions, colour, now, tz);
+    let your_move = Board::new(state, local_midnight(now, tz)).count(GroupKind::YourMove);
+    let right = right(&state.sessions, your_move, colour, now, tz);
     let right_width = u16::try_from(right.width())
         .unwrap_or(u16::MAX)
         .min(area.width);
@@ -72,6 +76,7 @@ fn mode(state: &AppState) -> (&'static str, Color) {
         }
         Focus::Picker => ("PICKER", YELLOW),
         Focus::Rename | Focus::Search => ("INSERT", GREEN),
+        Focus::Plate => ("PLATE", ORANGE),
     }
 }
 
@@ -116,8 +121,15 @@ fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
     Line::from(spans)
 }
 
-/// x · y: the activity and the counts, then the clock block.
-fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> Line<'static> {
+/// x · y: the activity and the counts, `your_move` the plate's Your move
+/// rows, orb's included, then the clock block. A count of zero is left out.
+fn right(
+    sessions: &Sessions,
+    your_move: usize,
+    colour: Color,
+    now: SystemTime,
+    tz: &TimeZone,
+) -> Line<'static> {
     let counts = [
         (
             APPROVAL_ICON,
@@ -130,6 +142,7 @@ fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> 
             MAGENTA,
         ),
         (COMPLETED_ICON, sessions.unread_count(), GREEN),
+        (PLATE_ICON, your_move, ORANGE),
     ];
     let mut spans: Vec<Span<'static>> = activity(sessions, now)
         .map(|activity| on(format!("{activity}  "), ORANGE, BG_DARK))
@@ -206,17 +219,18 @@ mod tests {
     use crate::test_support::sessions_for;
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::plate::{ItemState, Plate, PlateItem, Verb};
     use orb_domain::feat::sessions::state::{
         Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
     };
-    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
+    use orb_domain::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
     use orb_domain::{AppState, Focus, PaneMode};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Color;
 
     use super::render;
-    use crate::sidebar::{BLUE, FG_DARK, GREEN, GREEN1, MAGENTA, YELLOW};
+    use crate::sidebar::{BLUE, FG_DARK, GREEN, GREEN1, MAGENTA, ORANGE, YELLOW};
 
     /// 2023-11-14 22:13:20 UTC, at spinner frame 0.
     const NOW: u64 = 1_700_000_000;
@@ -359,6 +373,7 @@ mod tests {
     #[case::picker(Focus::Picker, YELLOW)]
     #[case::search(Focus::Search, GREEN)]
     #[case::rename(Focus::Rename, GREEN)]
+    #[case::plate(Focus::Plate, ORANGE)]
     fn mode_block_takes_the_mode_colour(#[case] focus: Focus, #[case] colour: Color) {
         // Given a selected agent with that focus.
         let state = selected(focus);
@@ -444,6 +459,19 @@ mod tests {
         // Then the mode block names that mode.
         let text = text(&buffer);
         assert!(text.starts_with(block), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn plate_focus_reads_plate() {
+        // Given the plate with the keys.
+        let state = selected(Focus::Plate);
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the mode block reads PLATE.
+        let text = text(&buffer);
+        assert!(text.starts_with(" PLATE "), "mode line was '{text}'");
     }
 
     #[rstest::rstest]
@@ -825,6 +853,91 @@ mod tests {
         // Then no unread count shows.
         let text = text(&buffer);
         assert!(!text.contains('\u{f058}'), "mode line was '{text}'");
+    }
+
+    /// Item `id` on the plate in `state`, from session 1's pane 1.
+    fn plate_item(id: i64, state: ItemState) -> PlateItem {
+        PlateItem {
+            id: PlateItemId(id),
+            verb: Verb::Review,
+            state,
+            title: format!("item {id}"),
+            what: None,
+            links: Vec::new(),
+            urgent: false,
+            session: SessionId(1),
+            session_title: "orb".to_owned(),
+            pane: PaneId(1),
+            harness: Some(HarnessId::new("claude")),
+            changed_at: SystemTime::UNIX_EPOCH,
+            done_at: None,
+            created_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// An idle agent and `items` on the plate.
+    fn with_items(items: Vec<PlateItem>) -> AppState {
+        AppState {
+            plate: Plate::from_saved(items),
+            ..with_sessions(sessions(vec![agent(1, AgentStatus::Idle)]))
+        }
+    }
+
+    #[rstest::rstest]
+    fn your_move_count_shows_with_the_plate_icon() {
+        // Given two items that are the user's move and one waiting on others.
+        let state = with_items(vec![
+            plate_item(1, ItemState::YourMove),
+            plate_item(2, ItemState::YourMove),
+            plate_item(3, ItemState::Waiting),
+        ]);
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the plate icon shows the two in orange.
+        assert_eq!(
+            cell_at(&buffer, "\u{f0ae} 2").map(|cell| cell.fg),
+            Some(ORANGE),
+            "Your move count foreground in '{}'",
+            text(&buffer)
+        );
+    }
+
+    #[rstest::rstest]
+    fn your_move_count_counts_orb_rows() {
+        // Given one item that is the user's move and an agent waiting for an
+        // approval.
+        let state = AppState {
+            plate: Plate::from_saved(vec![plate_item(1, ItemState::YourMove)]),
+            ..with_sessions(sessions(vec![
+                agent(1, AgentStatus::Idle),
+                agent(2, AgentStatus::NeedsApproval),
+            ]))
+        };
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the Your move count holds the item and orb's approval row.
+        let text = text(&buffer);
+        assert!(text.contains("\u{f0ae} 2"), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn your_move_count_hides_at_zero() {
+        // Given only a waiting item and a parked one on the plate.
+        let state = with_items(vec![
+            plate_item(1, ItemState::Waiting),
+            plate_item(2, ItemState::Parked { by_user: true }),
+        ]);
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then no Your move count shows.
+        let text = text(&buffer);
+        assert!(!text.contains('\u{f0ae}'), "mode line was '{text}'");
     }
 
     #[rstest::rstest]

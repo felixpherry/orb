@@ -27,10 +27,11 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier};
 
-use super::{BACKGROUND, layout, render};
+use super::{BACKGROUND, Drawn, layout, render};
 use crate::sidebar::{
     APPROVAL_ICON, BLACK, BLUE, COMMENT, COMPLETED_ICON, GUTTER, INPUT_ICON, MAGENTA, YELLOW,
 };
+use crate::tabs;
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::keymap::{Keys, LEADER, Scope, keymap, press};
@@ -2149,7 +2150,7 @@ fn hidden_sidebar_returns_no_layout() {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
     let mut sidebar_layout = None;
     let Ok(_) = terminal.draw(|frame| {
-        (sidebar_layout, _, _) = render(
+        sidebar_layout = render(
             frame,
             &state,
             &HashMap::new(),
@@ -2162,7 +2163,8 @@ fn hidden_sidebar_returns_no_layout() {
             &mut PickerScroll::default(),
             &mut HitMap::default(),
             &mut Vec::new(),
-        );
+        )
+        .sidebar;
     });
 
     // Then there's no sidebar layout to replace the last drawn one.
@@ -2284,5 +2286,142 @@ fn click_on_a_tab_with_floats_shown_keeps_the_keys_in_the_float() {
             Intent::FocusPane(PaneId(3))
         ])),
         "a tab click keeps the floats shown"
+    );
+}
+
+/// What drawing `state` on an 80x40 screen keeps, and the screen.
+fn drawn_tall(state: &AppState) -> (Drawn, Buffer) {
+    let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 40));
+    let mut drawn = Drawn::default();
+    let Ok(_) = terminal.draw(|frame| {
+        drawn = render(
+            frame,
+            state,
+            &HashMap::new(),
+            None,
+            &Keys::new(keymap(), Scope::SIDEBAR),
+            SystemTime::UNIX_EPOCH,
+            &TimeZone::UTC,
+            BACKGROUND,
+            &mut SidebarScroll::default(),
+            &mut PickerScroll::default(),
+            &mut HitMap::default(),
+            &mut Vec::new(),
+        );
+    });
+    (drawn, terminal.backend().buffer().clone())
+}
+
+/// The shown session's tab bar and tab body on `buffer` with the default
+/// sidebar.
+fn tab_areas(buffer: &Buffer) -> [Rect; 2] {
+    tabs::areas(right_of(buffer))
+}
+
+/// The top-left cell of a rect 92% as wide and 86% as tall as `body`,
+/// centred in it.
+fn float_corner(body: Rect) -> Position {
+    let width = body.width * 92 / 100;
+    let height = body.height * 86 / 100;
+    Position::new(
+        body.x + (body.width - width) / 2,
+        body.y + (body.height - height) / 2,
+    )
+}
+
+#[rstest::rstest]
+fn plate_floats_over_the_shown_session_while_it_has_the_keys() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the plate's list box is in the tab body.
+    let [_, body] = tab_areas(&buffer);
+    assert!(
+        text(&buffer, body).contains("\u{f0ae} Plate"),
+        "tab body was\n{}",
+        text(&buffer, body)
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_is_92_by_86_percent_of_the_tab_body() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the list box's corner is at the top left of a centred rect 92%
+    // as wide and 86% as tall as the tab body.
+    let [_, body] = tab_areas(&buffer);
+    let corner = float_corner(body);
+    assert_eq!(
+        buffer.cell(corner).map(Cell::symbol),
+        Some("╭"),
+        "the float should start at {corner:?}, screen was\n{}",
+        text(&buffer, buffer.area)
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_leaves_the_tab_bar_and_sidebar_drawn() {
+    // Given session 1 shown, once with the sidebar holding the keys.
+    let before = draw_tall(&shown(Focus::Sidebar));
+
+    // When the plate has the keys.
+    let buffer = draw_tall(&shown(Focus::Plate));
+
+    // Then the tab bar and the sidebar read as they did.
+    let [bar, _] = tab_areas(&buffer);
+    let [sidebar, _, _] = layout(buffer.area, &SidebarView::default());
+    assert_eq!(
+        (text(&buffer, bar), text(&buffer, sidebar)),
+        (text(&before, bar), text(&before, sidebar)),
+        "the float should cover only the tab body"
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_is_not_drawn_without_the_keys() {
+    // Given session 1 shown, the sidebar with the keys.
+    let state = shown(Focus::Sidebar);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the tab body has no plate.
+    let [_, body] = tab_areas(&buffer);
+    assert!(
+        !text(&buffer, body).contains("Plate"),
+        "tab body was\n{}",
+        text(&buffer, body)
+    );
+}
+
+#[rstest::rstest]
+fn keyed_plate_reports_its_page() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let (drawn, buffer) = drawn_tall(&state);
+
+    // Then the page is the rows inside the list box under its top inset.
+    let [_, body] = tab_areas(&buffer);
+    let top = float_corner(body);
+    let bottom = (top.y..body.bottom())
+        .find(|&y| {
+            buffer
+                .cell((top.x, y))
+                .is_some_and(|cell| cell.symbol() == "╰")
+        })
+        .unwrap_or(top.y);
+    assert_eq!(
+        drawn.plate_page,
+        Some(usize::from(bottom.saturating_sub(top.y + 2))),
+        "the keyed plate should report how many rows its list shows"
     );
 }

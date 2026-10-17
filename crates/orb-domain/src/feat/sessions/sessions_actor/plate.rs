@@ -1,5 +1,5 @@
 //! The plate's items: brought back at start, then added, changed and closed
-//! for agents.
+//! for agents, and saved after the user's x, p and u.
 
 use super::*;
 use crate::feat::plate::{
@@ -117,6 +117,19 @@ impl SessionsActor {
         self.state.write().plate.replace(item);
         self.report.changed();
         Ok(())
+    }
+
+    /// Saves item `id` as the plate has it, after the user's x, p or u; a
+    /// failure shows in the message box. An item no longer there is left
+    /// alone.
+    pub(super) fn store_plate_item(&self, id: PlateItemId) {
+        let Some(item) = self.state.read().plate.item(id).cloned() else {
+            return;
+        };
+        if let Err(report) = self.store.save_plate_item(&item) {
+            let error = save_failed(&self.services.log, &report);
+            self.report.report(Outcome::Failed(error));
+        }
     }
 }
 

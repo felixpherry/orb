@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
 use crate::feat::sessions::state::ProjectKind;
-use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
+use crate::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +145,9 @@ pub enum SessionsCommand {
     SaveUi,
     /// Save the jump list as it now is in the app state.
     SaveJumps,
+    /// Save plate item `item` as the app state has it, after the user's x, p
+    /// or u.
+    SavePlateItem(PlateItemId),
     /// Remove the project from `<C-g> n` and the project filter; its sessions
     /// stay.
     RemoveProject(ProjectId),

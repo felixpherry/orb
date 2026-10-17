@@ -479,6 +479,22 @@ fn new_session_opens_when_nothing_was_active_and_still_isnt() {
 }
 
 #[rstest::rstest]
+fn ready_session_waits_while_the_plate_has_the_keys() {
+    // Given session 1 ready while it is still active.
+    let active = Some(SessionId(1));
+
+    // When deciding what to do while the plate has the keys.
+    let decision = started_attach(active, active, Focus::Plate, false);
+
+    // Then it waits until the plate gives the keys back.
+    assert_eq!(
+        decision,
+        StartedAttach::Wait,
+        "a session that finishes starting waits behind the plate"
+    );
+}
+
+#[rstest::rstest]
 #[case(Focus::Picker)]
 #[case(Focus::Rename)]
 #[case(Focus::Search)]
@@ -2751,6 +2767,41 @@ fn release_of_a_key_orb_took_never_reaches_the_pane() -> io::Result<()> {
     // Then the program gets only `z`.
     let typed = log_holding(&test.dir.path().join("typed"), "z");
     assert_eq!(typed, "z", "the release of orb's key stays with orb");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn keys_in_the_plate_reach_no_pane() -> io::Result<()> {
+    // Given the plate opened with `<C-g> o` from a pane whose program
+    // records what it's sent, floating over its session.
+    let mut test = keys_in_a_raw_pane()?;
+    for (code, modifiers) in [
+        (KeyCode::Char('g'), KeyModifiers::CONTROL),
+        (KeyCode::Char('o'), KeyModifiers::NONE),
+    ] {
+        test.app.handle(
+            key_input(code, modifiers, KeyEventKind::Press),
+            &mut io::sink(),
+        )?;
+    }
+    assert_eq!(
+        test.state.read().focus,
+        Focus::Plate,
+        "`<C-g> o` gives the plate the keys"
+    );
+
+    // When `q` is typed in the plate, then Esc gives the keys back to the
+    // pane and `z` is typed there.
+    for code in [KeyCode::Char('q'), KeyCode::Esc, KeyCode::Char('z')] {
+        test.app.handle(
+            key_input(code, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut io::sink(),
+        )?;
+    }
+
+    // Then the program gets only `z`.
+    let typed = log_holding(&test.dir.path().join("typed"), "z");
+    assert_eq!(typed, "z", "a key typed in the plate stays with orb");
     Ok(())
 }
 

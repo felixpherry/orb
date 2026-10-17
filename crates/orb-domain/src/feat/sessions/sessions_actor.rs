@@ -574,6 +574,7 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::Visit(pane) => self.visit(pane),
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
+            SessionsCommand::SavePlateItem(id) => self.store_plate_item(id),
             SessionsCommand::RemoveProject(id) => self.remove_project(id),
             SessionsCommand::NewColony {
                 world,

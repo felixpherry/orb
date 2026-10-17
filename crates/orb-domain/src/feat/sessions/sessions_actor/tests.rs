@@ -2805,6 +2805,47 @@ async fn api_plate_done_stamps_done_at() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 #[tokio::test]
+async fn save_plate_item_writes_the_items_state_to_the_store() -> Result<(), Report<StoreError>> {
+    // Given a review on the plate, saved in a store file, then closed by the
+    // user in the app state only.
+    let (actor, state, _dir, path) = spawned_over_a_file().await?;
+    let id = api_plate_add(&actor, new_review("review the plan")).await?;
+    let done = SystemTime::UNIX_EPOCH + Duration::from_secs(50);
+    let finished = state
+        .read()
+        .plate
+        .item(id)
+        .and_then(|item| item.finished(done));
+    if let Some(item) = finished {
+        state.write().plate.replace(item);
+    }
+
+    // When the sessions actor is told to save it, then shut down.
+    actor
+        .tell(SessionsCommand::SavePlateItem(id))
+        .await
+        .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
+    tokio::time::timeout(LIMIT, crate::stop_gracefully(&actor))
+        .await
+        .change_context(StoreError)
+        .attach("the actor didn't stop in time")?;
+
+    // Then the store file has it done, closed when the user closed it.
+    let saved: Vec<(ItemState, Option<SystemTime>)> = Store::open(&path)?
+        .plate_items()?
+        .into_iter()
+        .map(|item| (item.state, item.done_at))
+        .collect();
+    assert_eq!(
+        saved,
+        [(ItemState::Done, Some(done))],
+        "the save should write the item as the app state has it"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
 async fn api_plate_done_of_a_done_item_keeps_its_close_time() -> Result<(), Report<StoreError>> {
     // Given a review an agent closed.
     let (actor, state, _dir, _path) = spawned_over_a_file().await?;

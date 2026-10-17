@@ -1,14 +1,48 @@
 //! How the user is looking at the plate.
 
-use super::board::RowKey;
+use std::time::SystemTime;
 
-/// How the user is looking at the plate. Written by the intent handler.
+use super::board::RowKey;
+use super::state::ItemState;
+use crate::Focus;
+use crate::ids::PlateItemId;
+
+/// How the user is looking at the plate. Written by the intent handler;
+/// `page` by the frontend after each draw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlateView {
     /// The selected row.
     pub cursor: PlateCursor,
     /// Done today shows its rows; folded at start.
     pub done_open: bool,
+    /// Where closing the plate gives the keys back: the sidebar or a pane.
+    pub back: Focus,
+    /// The first key of `gg` or `<C-g> o`, while the second is awaited.
+    pub pending: Option<PlatePrefix>,
+    /// The last x or p, which u reverts. Kept only while orb runs.
+    pub undo: Option<PlateUndo>,
+    /// How many rows the list showed when last drawn, for half-page moves.
+    pub page: usize,
+}
+
+/// The first key of a two-key sequence inside the plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatePrefix {
+    /// `g`, the first of `gg`.
+    G,
+    /// `<C-g>`, the first of `<C-g> o`.
+    Leader,
+}
+
+/// An item as it was before the last x or p.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlateUndo {
+    /// The item that changed.
+    pub item: PlateItemId,
+    /// Its state before the change.
+    pub state: ItemState,
+    /// When it last changed before the change.
+    pub changed_at: SystemTime,
 }
 
 /// The plate's selection, kept by row key so it stays on its row as rows

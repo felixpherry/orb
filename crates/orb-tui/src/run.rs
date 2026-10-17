@@ -99,7 +99,6 @@ use orb_domain::feat::sessions::child_env::{pane_env, terminal_browser_env};
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
 use orb_domain::feat::sessions::state::{Notice, Sessions};
 use orb_domain::feat::sessions::validator::validate_new_session;
-use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::ids::{AgentId, PaneId, SessionId};
@@ -298,7 +297,7 @@ where
 fn after_pane(focus: Focus) -> Focus {
     match focus {
         Focus::Pane => Focus::Sidebar,
-        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => focus,
+        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => focus,
     }
 }
 
@@ -308,7 +307,7 @@ fn after_pane(focus: Focus) -> Focus {
 /// default while attached without a pane.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
-        (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
+        (Focus::Sidebar | Focus::Plate, _) => SetCursorStyle::SteadyBlock,
         (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
         (Focus::Pane, Some(style)) => style,
         (Focus::Pane, None) => SetCursorStyle::DefaultUserShape,
@@ -489,14 +488,19 @@ impl App {
                     pane.resize(PaneSize::new(place.content(), self.cell));
                 }
             }
-            let (sidebar_layout, picker_page) = self.draw(terminal, &mut last_cursor)?;
+            let drawn = self.draw(terminal, &mut last_cursor)?;
             // Navigation scrolls by what was just drawn.
-            if let Some(layout) = sidebar_layout
+            if let Some(layout) = drawn.sidebar
                 && self.state.read().sidebar.layout != layout
             {
                 self.state.write().sidebar.layout = layout;
             }
-            if let Some(page) = picker_page
+            if let Some(page) = drawn.plate_page
+                && self.state.read().plate.view().page != page
+            {
+                self.state.write().plate.view_mut().page = page;
+            }
+            if let Some(page) = drawn.picker_page
                 && self
                     .state
                     .read()
@@ -578,7 +582,7 @@ impl App {
         let state = self.state.read();
         match state.focus {
             Focus::Pane => state.shown_layout()?.focused(),
-            Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => None,
+            Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => None,
         }
     }
 
@@ -738,6 +742,11 @@ impl App {
             (Focus::Picker, _) if list_intent.is_some() => list_intent.flatten(),
             // The rename box and the search take the picker's keys.
             (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
+            // The plate takes every key while it has them.
+            (Focus::Plate, _) => {
+                self.keys.dismiss();
+                Some(keymap::plate_route(key))
+            }
             (Focus::Pane, Some(mode)) => {
                 // A pane mode takes every key; none reaches the pane's program.
                 self.keys.dismiss();
@@ -1043,14 +1052,14 @@ impl App {
     /// Draws one frame. The terminal shows only the finished frame, the
     /// panes' images placed in the same update as the cells, and a
     /// hidden cursor goes back to `last_cursor`, where it last showed, so it
-    /// never visibly moves. Returns the sidebar's layout and the picker's page.
+    /// never visibly moves. Returns what the loop keeps of the frame.
     fn draw(
         &mut self,
         terminal: &mut OrbTerminal,
         last_cursor: &mut Option<Position>,
-    ) -> io::Result<(Option<SidebarLayout>, Option<usize>)> {
+    ) -> io::Result<render::Drawn> {
         let now = SystemTime::now();
-        let mut drawn = (None, None, None);
+        let mut drawn = render::Drawn::default();
         self.sidebar_scroll
             .follow_keys(self.state.read().focus == Focus::Sidebar);
         let mut images = Vec::new();
@@ -1074,14 +1083,13 @@ impl App {
         })?;
         self.compositor
             .compose(terminal.backend_mut(), &images, &self.panes)?;
-        let (sidebar_layout, picker_page, cursor) = drawn;
-        match (cursor, *last_cursor) {
-            (Some(_), _) => *last_cursor = cursor,
+        match (drawn.cursor, *last_cursor) {
+            (Some(_), _) => *last_cursor = drawn.cursor,
             (None, Some(parked)) => terminal.set_cursor_position(parked)?,
             (None, None) => {}
         }
         ratatui::crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
-        Ok((sidebar_layout, picker_page))
+        Ok(drawn)
     }
 
     /// Shows the cursor shape for where the keys are in the outer terminal.

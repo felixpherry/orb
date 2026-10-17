@@ -195,6 +195,34 @@ impl PlateItem {
             ..self.clone()
         })
     }
+
+    /// The item parked by the user at `now`, or back to the user's move at
+    /// `now` when it's parked; `None` for a done item.
+    #[must_use]
+    pub fn parked_or_back(&self, now: SystemTime) -> Option<Self> {
+        let state = match self.state {
+            ItemState::YourMove | ItemState::Waiting => ItemState::Parked { by_user: true },
+            ItemState::Parked { .. } => ItemState::YourMove,
+            ItemState::Done => return None,
+        };
+        Some(Self {
+            state,
+            changed_at: now,
+            ..self.clone()
+        })
+    }
+
+    /// The item back in `state`, last changed at `changed_at`, with no close
+    /// time: how it was before an x or a p.
+    #[must_use]
+    pub fn restored(&self, state: ItemState, changed_at: SystemTime) -> Self {
+        Self {
+            state,
+            changed_at,
+            done_at: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// An item an agent asks to add, before orb gives it an id and its times.
@@ -690,6 +718,70 @@ mod tests {
 
         // Then there's nothing to change.
         assert_eq!(finished, None, "a done item stays as it was");
+    }
+
+    #[rstest::rstest]
+    #[case::your_move(ItemState::YourMove)]
+    #[case::waiting(ItemState::Waiting)]
+    fn parked_or_back_parks_your_move_and_waiting_items(#[case] state: ItemState) {
+        // Given an open item that isn't parked.
+        let item = test_item(1, state);
+
+        // When the user parks it.
+        let parked = item.parked_or_back(at(50));
+
+        // Then it's parked by the user, its age counting from now.
+        assert_eq!(
+            parked.map(|item| (item.state, item.changed_at)),
+            Some((ItemState::Parked { by_user: true }, at(50))),
+            "p should park the item now"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::by_the_user(true)]
+    #[case::offered(false)]
+    fn parked_or_back_brings_a_parked_item_back(#[case] by_user: bool) {
+        // Given a parked item.
+        let item = test_item(1, ItemState::Parked { by_user });
+
+        // When the user presses p on it.
+        let back = item.parked_or_back(at(50));
+
+        // Then it's the user's move again, its age counting from now.
+        assert_eq!(
+            back.map(|item| (item.state, item.changed_at)),
+            Some((ItemState::YourMove, at(50))),
+            "p on a parked item should bring it back"
+        );
+    }
+
+    #[rstest::rstest]
+    fn parked_or_back_leaves_a_done_item() {
+        // Given a done item.
+        let item = test_item(1, ItemState::Done);
+
+        // When the user presses p on it.
+        let parked = item.parked_or_back(at(50));
+
+        // Then there's nothing to change.
+        assert_eq!(parked, None, "a done item can't be parked");
+    }
+
+    #[rstest::rstest]
+    fn restored_clears_the_close_time() {
+        // Given a done item, done at 20 s.
+        let item = test_item(1, ItemState::Done);
+
+        // When restoring it to the user's move as of 10 s.
+        let restored = item.restored(ItemState::YourMove, at(10));
+
+        // Then it's open again with no close time.
+        assert_eq!(
+            (restored.state, restored.changed_at, restored.done_at),
+            (ItemState::YourMove, at(10), None),
+            "restoring should bring back the state and age and drop done_at"
+        );
     }
 
     #[rstest::rstest]

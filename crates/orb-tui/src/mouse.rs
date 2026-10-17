@@ -16,7 +16,9 @@
 //! click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
 //! closes it like `Esc`. A click in the text of the sidebar search, a
-//! picker's input or the rename box moves its cursor there.
+//! picker's input or the rename box moves its cursor there. While the
+//! plate has the keys, a click off it closes it like `Esc`, and only the
+//! wheel over the sidebar acts besides.
 //!
 //! The wheel over any pane goes to its program
 //! while the program reads the mouse, sends arrow keys while it's on the
@@ -34,6 +36,7 @@
 
 use std::time::{Duration, Instant};
 
+use orb_domain::feat::plate::PlateKey;
 use orb_domain::feat::sessions::state::SidebarItem;
 use orb_domain::ids::PaneId;
 use orb_domain::{Focus, Intent};
@@ -63,7 +66,8 @@ pub(crate) struct HitMap {
     /// Each shown pane's content area, and whether its program read the
     /// mouse when it was drawn.
     panes: Vec<(Rect, PaneId, bool)>,
-    /// The open picker's or rename box's popup.
+    /// The open picker's or rename box's popup, or the plate while it has
+    /// the keys.
     overlay: Option<Rect>,
     /// Where the wheel moves the open picker's selection: its popup, or the
     /// session or worktree picker's list box.
@@ -214,7 +218,8 @@ impl HitMap {
         self.stacks.push((area, order, shown));
     }
 
-    /// Records where the open picker or rename box was drawn.
+    /// Records where the open picker or rename box was drawn, or the plate
+    /// while it has the keys.
     pub(crate) fn record_overlay(&mut self, area: Rect) {
         self.overlay = Some(area);
     }
@@ -229,7 +234,8 @@ impl HitMap {
         self.picker_rows.push((area, index));
     }
 
-    /// Whether `at` is on the open picker or rename box.
+    /// Whether `at` is on the open picker or rename box, or the plate while
+    /// it has the keys.
     pub(crate) fn on_overlay(&self, at: Position) -> bool {
         self.overlay.is_some_and(|area| area.contains(at))
     }
@@ -422,6 +428,9 @@ fn route_event(
     if let Some(routed) = follow_gesture(event.kind, at, clicks) {
         return routed;
     }
+    if focus == Focus::Plate {
+        return route_plate(event.kind, at, hits, clicks, now);
+    }
     if let MouseEventKind::Down(MouseButton::Left) = event.kind
         && let Some(routed) = press_frame(at, hits, focus, clicks, now)
     {
@@ -546,6 +555,34 @@ fn route_tab_bar(
             MouseRoute::Nothing
         }
     })
+}
+
+/// Where a mouse event goes while the plate has the keys: a left click off
+/// the plate closes it as `Esc` does, the wheel over the sidebar scrolls its
+/// view, and everything else does nothing. Before the plate is drawn, a
+/// click does nothing.
+fn route_plate(
+    kind: MouseEventKind,
+    at: Position,
+    hits: &HitMap,
+    clicks: &mut Clicks,
+    now: Instant,
+) -> MouseRoute {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left)
+            if hits.overlay.is_some() && !hits.on_overlay(at) =>
+        {
+            clicks.click(None, now);
+            MouseRoute::Intents(vec![Intent::Plate(PlateKey::Close)])
+        }
+        MouseEventKind::ScrollUp if hits.sidebar.contains(at) => {
+            MouseRoute::ScrollSidebar(-WHEEL_LINES)
+        }
+        MouseEventKind::ScrollDown if hits.sidebar.contains(at) => {
+            MouseRoute::ScrollSidebar(WHEEL_LINES)
+        }
+        _ => MouseRoute::Nothing,
+    }
 }
 
 /// Routes a left drag or release by the gesture its press started, and
@@ -710,7 +747,7 @@ fn route_click(
             };
         }
         Focus::Pane => Some(Intent::LeavePane),
-        Focus::Sidebar | Focus::Picker | Focus::Rename => None,
+        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Plate => None,
     };
     if hits.on_sidebar_input(at) {
         return intents([lead, Some(Intent::Search)]);
@@ -751,6 +788,7 @@ pub(crate) fn from_pixels(event: MouseEvent, cell: CellSize) -> Option<(MouseEve
 mod tests {
     use std::time::{Duration, Instant};
 
+    use orb_domain::feat::plate::PlateKey;
     use orb_domain::feat::sessions::state::SidebarItem;
     use orb_domain::ids::{PaneId, SessionId};
     use orb_domain::{Focus, Intent};
@@ -1087,6 +1125,98 @@ mod tests {
             routed,
             MouseRoute::Nothing,
             "the start screen takes no clicks"
+        );
+    }
+
+    /// `hits()` with the plate floating over columns 32 to 77, lines 2 to
+    /// 17, over both panes.
+    fn plate_hits() -> HitMap {
+        let mut hits = hits();
+        hits.record_overlay(Rect::new(32, 2, 46, 16));
+        hits
+    }
+
+    #[rstest::rstest]
+    #[case::sidebar_row(5, 4)]
+    #[case::tab_bar(40, 0)]
+    #[case::pane_beside_the_plate(30, 10)]
+    fn click_outside_the_plate_closes_it(#[case] column: u16, #[case] row: u16) {
+        // Given the plate has the keys, floating over the shown session.
+        // When clicking off the plate.
+        let routed = route_with(
+            left_click(column, row),
+            &plate_hits(),
+            Focus::Plate,
+            &mut Clicks::default(),
+        );
+
+        // Then the click closes the plate, as Esc does, and nothing else.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::Plate(PlateKey::Close)]),
+            "a click off the plate closes it"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::drawn(plate_hits())]
+    #[case::not_drawn_yet(hits())]
+    fn click_inside_the_plate_does_nothing(#[case] hits: HitMap) {
+        // Given the plate has the keys, over agent 1's pane where drawn.
+        // When clicking where the plate is, or before it's drawn.
+        let routed = route_with(
+            left_click(40, 5),
+            &hits,
+            Focus::Plate,
+            &mut Clicks::default(),
+        );
+
+        // Then nothing happens, and the pane under it isn't focused.
+        assert_eq!(routed, MouseRoute::Nothing, "the plate takes no clicks");
+    }
+
+    #[rstest::rstest]
+    #[case::under_the_plate(40, 5)]
+    #[case::beside_the_plate(30, 10)]
+    fn wheel_over_a_pane_under_the_plate_does_nothing(#[case] column: u16, #[case] row: u16) {
+        // Given the plate has the keys, floating over the shown session.
+        // When turning the wheel over agent 1's pane.
+        let routed = route_with(
+            mouse(MouseEventKind::ScrollDown, column, row),
+            &plate_hits(),
+            Focus::Plate,
+            &mut Clicks::default(),
+        );
+
+        // Then the pane doesn't scroll.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "the wheel doesn't reach a pane while the plate has the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::down(MouseEventKind::ScrollDown, 3)]
+    #[case::up(MouseEventKind::ScrollUp, -3)]
+    fn wheel_over_the_sidebar_scrolls_it_while_the_plate_has_the_keys(
+        #[case] kind: MouseEventKind,
+        #[case] lines: i16,
+    ) {
+        // Given the plate has the keys, floating over the shown session.
+        // When turning the wheel over the sidebar.
+        let routed = route_with(
+            mouse(kind, 5, 10),
+            &plate_hits(),
+            Focus::Plate,
+            &mut Clicks::default(),
+        );
+
+        // Then the sidebar's view scrolls.
+        assert_eq!(
+            routed,
+            MouseRoute::ScrollSidebar(lines),
+            "the wheel over the sidebar scrolls it"
         );
     }
 

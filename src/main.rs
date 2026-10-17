@@ -39,8 +39,8 @@ use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::ids::PaneId;
 use orb_domain::{
-    AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
-    run_within, stop_gracefully,
+    AppState, Finished, LocalZone, Log, Services, State, ancestry, ends_orb, panic_text,
+    parse_parents, run_within, stop_gracefully,
 };
 use orb_tui::{Frontend, PANE_READER_THREAD};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -178,11 +178,12 @@ fn run(
     let history_dir = orb_root.join("history");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let context = runtime.enter();
+    let tz = TimeZone::system();
     let state = State::new(AppState {
         home,
+        zone: LocalZone(tz.clone()),
         ..AppState::default()
     });
-    let tz = TimeZone::system();
     let frontend = Frontend::new(tz.clone());
     quit_on_signals(frontend.quitter(), log);
     let services = services(&env, claude_dir, pi_sessions, &orb_root, log);

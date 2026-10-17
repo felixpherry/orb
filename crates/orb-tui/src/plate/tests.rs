@@ -12,7 +12,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 
-use super::{DONE_ICON, IDEA_ICON, PARKED_ICON, URGENT_ICON, render};
+use super::{DONE_ICON, IDEA_ICON, PARKED_ICON, URGENT_ICON, render, render_float};
 use crate::sidebar::{APPROVAL_ICON, BLUE, DARK3, DARK5, MAGENTA, RED, VISUAL, YELLOW};
 use crate::test_support::sessions_for;
 
@@ -652,4 +652,80 @@ fn small_area_draws_nothing_outside_itself() {
         .filter(|at| buf.cell(*at).is_some_and(|cell| cell.symbol() != " "))
         .collect();
     assert_eq!(drawn, [], "cells drawn outside the area");
+}
+
+/// Draws `state`'s plate floating over a session whose right-hand side is
+/// all of a `width`×`height` buffer; returns the buffer and the float's rect.
+fn draw_float(state: &AppState, width: u16, height: u16) -> (Buffer, Rect) {
+    let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+    let (rect, _) = render_float(state, now(), &TimeZone::UTC, buf.area, &mut buf);
+    (buf, rect)
+}
+
+/// The columns on `rect`'s top row that hold `symbol`.
+fn top_row_columns(buf: &Buffer, rect: Rect, symbol: &str) -> Vec<u16> {
+    rect.columns()
+        .filter(|at| {
+            buf.cell((at.x, rect.y))
+                .is_some_and(|cell| cell.symbol() == symbol)
+        })
+        .map(|at| at.x)
+        .collect()
+}
+
+#[rstest::rstest]
+fn float_draws_both_boxes_inside_its_rect() {
+    // Given an item in Your move.
+    let state = with_items(vec![item(1, ItemState::YourMove)]);
+
+    // When drawing the float over a 140×40 right side.
+    let (buf, rect) = draw_float(&state, 140, 40);
+
+    // Then the list and the preview start side by side on its top row, the
+    // list at its left edge.
+    let corners = top_row_columns(&buf, rect, "╭");
+    assert!(
+        corners.len() == 2 && corners.first() == Some(&rect.x),
+        "box corners on the float's top row at {corners:?}, float {rect:?}, screen was\n{}",
+        lines(&buf).join("\n")
+    );
+}
+
+#[rstest::rstest]
+fn narrow_float_puts_the_preview_under_the_list() {
+    // Given an item in Your move.
+    let state = with_items(vec![item(1, ItemState::YourMove)]);
+
+    // When drawing the float over an 80×40 right side.
+    let (buf, _) = draw_float(&state, 80, 40);
+
+    // Then the preview's title is below the list's bottom border.
+    let footer = row_of(&buf, "your move ·");
+    let preview = row_of(&buf, "Fix the bug · orb");
+    assert!(
+        footer
+            .zip(preview)
+            .is_some_and(|(footer, preview)| preview > footer),
+        "footer on row {footer:?}, preview title on row {preview:?}"
+    );
+}
+
+#[rstest::rstest]
+fn float_draws_nothing_outside_its_rect() {
+    // Given an item, and a 20×10 right side inside a 40×20 buffer.
+    let state = with_items(vec![item(1, ItemState::YourMove)]);
+    let right = Rect::new(10, 5, 20, 10);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
+
+    // When drawing the float over it.
+    let (rect, _) = render_float(&state, now(), &TimeZone::UTC, right, &mut buf);
+
+    // Then every cell outside the float is still blank.
+    let drawn: Vec<Position> = buf
+        .area
+        .positions()
+        .filter(|at| !rect.contains(*at))
+        .filter(|at| buf.cell(*at).is_some_and(|cell| cell.symbol() != " "))
+        .collect();
+    assert_eq!(drawn, [], "cells drawn outside the float {rect:?}");
 }

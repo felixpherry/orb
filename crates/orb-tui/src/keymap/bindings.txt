@@ -16,6 +16,7 @@
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -64,6 +65,7 @@ s -> ToggleSettle: settle
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -112,6 +114,7 @@ s -> ToggleSettle: settle
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -160,6 +163,7 @@ s -> ToggleSettle: settle
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -206,6 +210,7 @@ r -> Rename: rename
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -252,6 +257,7 @@ r -> Rename: rename
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-g> t +tab
 <C-g> t 1 -> GoToTab(1): tab 1
@@ -298,6 +304,7 @@ r -> Rename: rename
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
 ? -> OpenKeyList: keys
@@ -328,6 +335,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
 ? -> OpenKeyList: keys
@@ -358,6 +366,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
 ? -> OpenKeyList: keys
@@ -388,6 +397,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> l -> FocusPanes: go to panes
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> q -> Quit: quit
 <C-u> -> SelectHalfPageUp: half page up
 ? -> OpenKeyList: keys
@@ -419,6 +429,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> p +pane
 <C-g> p c -> RenamePane: rename pane
 <C-g> p d -> SplitPane(Down): split down
@@ -466,6 +477,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> p +pane
 <C-g> p c -> RenamePane: rename pane
 <C-g> p d -> SplitPane(Down): split down
@@ -513,6 +525,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> p +pane
 <C-g> p c -> RenamePane: rename pane
 <C-g> p d -> SplitPane(Down): split down
@@ -560,6 +573,7 @@ l -> Unfold: open
 <C-g> i -> NewIncognito: incognito
 <C-g> m -> EnterPaneMode(Move): move mode
 <C-g> n -> NewSession: new session
+<C-g> o -> OpenPlate: plate
 <C-g> p +pane
 <C-g> p c -> RenamePane: rename pane
 <C-g> p d -> SplitPane(Down): split down

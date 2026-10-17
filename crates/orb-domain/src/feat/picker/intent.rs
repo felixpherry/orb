@@ -863,7 +863,7 @@ fn pick_hit(state: &mut AppState, agent: AgentId) -> Vec<Command> {
 /// Jumps to `session`: puts the cursor on it and attaches like `⏎` on its
 /// row, recording the move as a jump to the agent in its focused pane, else
 /// its card.
-fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+pub(crate) fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
     let from = state.jump_from();
     let entry = state.entry_row(session);
     pick(state, from, SidebarItem::Session(session), entry)
