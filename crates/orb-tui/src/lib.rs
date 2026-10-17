@@ -1,13 +1,13 @@
 //! The ratatui frontend: reads input, maps keys to intents, drives the
 //! terminal pane, and draws [`AppState`](orb_domain::AppState).
 
-mod dashboard;
 mod graphics;
 mod keymap;
 mod mode_line;
 mod mouse;
 mod outer_terminal;
 mod picker;
+mod plate;
 mod rename;
 mod render;
 mod run;

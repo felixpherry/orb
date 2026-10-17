@@ -89,6 +89,9 @@
 //! It reports a notice for the frontend to announce when an agent it has
 //! polled since orb started finishes a turn, or starts needing an approval or
 //! an answer, in any project, unless the agent is being deleted.
+//!
+//! It keeps the plate's items: at start it deletes those closed before
+//! today, and it adds, changes and closes items for agents.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -133,13 +136,17 @@ use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxService, ZmxSession};
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
+mod links;
 mod panes;
+mod plate;
 mod poll;
 mod projects;
 mod restore;
 mod settle;
 mod start;
 
+use self::plate::restore_plate;
+pub use self::plate::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError};
 use self::poll::{agent_mut, display_title, show};
 use self::projects::{KitCopy, own_folder};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
@@ -503,6 +510,9 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::AddHistoryTab { session, line } => {
                 self.add_pane(session, Placement::TabAfterShown, Some(line));
             }
+            SessionsCommand::OpenBrowserTab { session, url } => self.new_browser_tab(session, &url),
+            SessionsCommand::OpenInBrowser { pane, url } => self.open_in_browser(pane, url),
+            SessionsCommand::OpenOutside(address) => self.open_outside(address),
             SessionsCommand::ResumeAgent { session, agent } => self.resume_agent(session, agent),
             SessionsCommand::SaveLayout(session) => self.save_layout(session),
             SessionsCommand::NewSession {
@@ -565,6 +575,7 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::Visit(pane) => self.visit(pane),
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
+            SessionsCommand::SavePlateItem(id) => self.store_plate_item(id),
             SessionsCommand::RemoveProject(id) => self.remove_project(id),
             SessionsCommand::NewColony {
                 world,
@@ -996,7 +1007,7 @@ pub(crate) fn to_ms(time: SystemTime) -> i64 {
 }
 
 /// Milliseconds since the Unix epoch as a time; negative clamps to the epoch.
-fn from_ms(ms: i64) -> SystemTime {
+pub(crate) fn from_ms(ms: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
 

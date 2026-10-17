@@ -1,8 +1,10 @@
 //! Draws a frame: the sidebar on the left, the shown session's tabs or the
-//! start screen on the right, the mode line at the bottom, and the which-key
-//! popup on top while a key sequence is pending. The message box is drawn
-//! over everything but the mode line.
+//! plate as the start screen on the right, the mode line at the bottom, and
+//! the which-key popup on top while a key sequence is pending. The message
+//! box is drawn over everything but the mode line.
 //! While the sidebar is hidden, the right side takes the full width.
+//! While the plate has the keys over a shown session, it floats over the
+//! session's panes.
 //! An open picker is drawn over everything but the mode line, without the
 //! popup (the session and worktree pickers in their own snacks layout), and
 //! so is the rename box while it has the keys. A confirm opened over a
@@ -32,12 +34,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Color;
 
-use crate::dashboard;
 use crate::graphics::DrawnImages;
 use crate::keymap::Keys;
 use crate::mode_line;
 use crate::mouse::HitMap;
 use crate::picker::{self, PickerScroll};
+use crate::plate;
 use crate::rename;
 use crate::search_picker;
 use crate::session_picker;
@@ -67,16 +69,26 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
     [sidebar, right, mode_line]
 }
 
+/// What a frame drew that the loop keeps: the sidebar's layout unless it's
+/// hidden, the open picker's and the keyed plate's page sizes, and where
+/// the cursor shows.
+#[derive(Debug, Default)]
+pub(crate) struct Drawn {
+    pub sidebar: Option<SidebarLayout>,
+    pub picker_page: Option<usize>,
+    pub plate_page: Option<usize>,
+    pub cursor: Option<Position>,
+}
+
 /// Draws the whole frame. The right side shows the shown layout's tabs with
 /// each of its panes that has a client in `panes`; the focused pane's cursor
 /// shows only while the keys are in it. Without a shown layout, the right
-/// side shows the start screen, with `pane_error` saying why the session
-/// couldn't start. While the sidebar has the keys, the cursor sits on the
-/// first cell of its selected row. `toast` shows in the message box, and the
+/// side shows the plate as the start screen. While the plate has the keys
+/// over a shown layout, it floats over the tab body. While the sidebar has the keys,
+/// the cursor sits on the first cell of its selected row. `toast` shows in the message box, and the
 /// mode line's clock shows `now` in `tz`. Cells nothing coloured get
 /// `background`. Each drawn pane's images go into
-/// `images`. Returns the sidebar's layout unless it's hidden, how
-/// many rows the picker fits when it's open, and where the cursor shows, if anywhere.
+/// `images`. Returns what the loop keeps of the frame (see [`Drawn`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs, the two frontend view states it updates, the hit map it fills, and the frame's pane images"
@@ -85,7 +97,6 @@ pub(crate) fn render(
     frame: &mut Frame,
     state: &AppState,
     panes: &HashMap<PaneId, Pane>,
-    pane_error: Option<&str>,
     toast: Option<&Toast>,
     keys: &Keys,
     now: SystemTime,
@@ -95,7 +106,7 @@ pub(crate) fn render(
     picker_scroll: &mut PickerScroll,
     hits: &mut HitMap,
     images: &mut Vec<DrawnImages>,
-) -> (Option<SidebarLayout>, Option<usize>, Option<Position>) {
+) -> Drawn {
     let mut cursor = None;
     let [sidebar_area, right, mode_area] = layout(frame.area(), &state.sidebar);
     *hits = HitMap::new(sidebar_area, right);
@@ -116,25 +127,21 @@ pub(crate) fn render(
         );
         (selected_y, Some(sidebar_layout), search_cursor)
     };
-    match state.shown_layout() {
-        Some(layout) => {
-            let keys_in_pane = state.focus == Focus::Pane;
-            if let Some(pane_cursor) = tabs::render(
-                state,
-                layout,
-                panes,
-                keys_in_pane,
-                now,
-                right,
-                frame.buffer_mut(),
-                hits,
-                images,
-            ) {
-                cursor = Some(pane_cursor);
-            }
-        }
-        None => dashboard::render(state, pane_error, right, frame.buffer_mut()),
+    if let Some(layout) = state.shown_layout() {
+        let keys_in_pane = state.focus == Focus::Pane;
+        cursor = tabs::render(
+            state,
+            layout,
+            panes,
+            keys_in_pane,
+            now,
+            right,
+            frame.buffer_mut(),
+            hits,
+            images,
+        );
     }
+    let plate_page = render_plate(state, now, right, frame.buffer_mut(), hits);
     mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
     let renaming = state
         .rename
@@ -190,7 +197,34 @@ pub(crate) fn render(
             other => other,
         };
     }
-    (sidebar_layout, picker_page, cursor)
+    Drawn {
+        sidebar: sidebar_layout,
+        picker_page,
+        plate_page,
+        cursor,
+    }
+}
+
+/// Draws the plate in `right`: floating over the shown session while it has
+/// the keys, or as the start screen while no session is shown. While it has
+/// the keys, records where it's drawn as the overlay clicks are checked
+/// against, and returns how many rows its list shows.
+fn render_plate(
+    state: &AppState,
+    now: SystemTime,
+    right: Rect,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) -> Option<usize> {
+    let drawn = match state.shown_layout() {
+        Some(_) => state
+            .plate_floats()
+            .then(|| plate::render_float(state, now, right, buf)),
+        None => Some(plate::render(state, now, right, buf)),
+    };
+    let (area, page) = drawn.filter(|_| state.focus == Focus::Plate)?;
+    hits.record_overlay(area);
+    Some(page)
 }
 
 /// Draws the open `picker` into `area`, over the picker it was opened over

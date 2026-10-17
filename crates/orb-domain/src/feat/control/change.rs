@@ -295,6 +295,31 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn focus_from_the_api_takes_the_keys_out_of_the_plate() {
+        // Given the plate with the keys, floating over shown session 1.
+        let mut state = left_pane_showing_1(&[1, 2], 1);
+        state.focus = Focus::Plate;
+        assert!(state.plate_floats(), "the plate floats over session 1");
+
+        // When an agent focuses session 2's pane, as a desktop notice's
+        // click does.
+        let _ = apply(
+            &mut state,
+            &Change::Focus {
+                session: SessionId(2),
+                pane: Some(PaneId(2)),
+            },
+        );
+
+        // Then the keys are in the pane and the plate no longer floats.
+        assert_eq!(
+            (state.focus, state.plate_floats()),
+            (Focus::Pane, false),
+            "the float closes when the keys leave the plate"
+        );
+    }
+
+    #[rstest::rstest]
     fn focus_on_a_hidden_colonists_pane_opens_its_colonists_row() {
         // Given colonist 2 hidden under colony 1's folded colonists row.
         let mut state = colony_with_colonists([AgentStatus::Idle; 3]);

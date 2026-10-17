@@ -14,7 +14,7 @@ pub mod ids;
 mod intent;
 mod intent_handler;
 
-pub use app_state::{AppState, Focus, PaneMode};
+pub use app_state::{AppState, Focus, LocalZone, PaneMode};
 pub use command::{Command, SearchCommand, SessionsCommand, WorktreesCommand};
 pub use common::{
     Finished, Log, Outcome, Reporter, Services, State, TextInput, ancestry, ends_orb, panic_text,

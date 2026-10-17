@@ -56,8 +56,8 @@ pub(crate) fn pane_agent(app: &AppState, pane: PaneId) -> Option<&Agent> {
         .min_by_key(|agent| !live(agent.status))
 }
 
-/// `kind`'s program and `args` as one shell line, each arg in single quotes
-/// with `'` written `'\''` (POSIX shells and fish both read it).
+/// `kind`'s program and `args` as one shell line, each arg quoted by
+/// [`quoted`].
 pub(crate) fn shell_line(kind: AgentKind, args: &[String]) -> String {
     let program = match kind {
         AgentKind::Claude => "claude",
@@ -68,11 +68,25 @@ pub(crate) fn shell_line(kind: AgentKind, args: &[String]) -> String {
     })
 }
 
-/// `word` in single quotes, its own `'` written `'\''`, which POSIX shells
-/// and fish both read as one word.
-pub(crate) fn quoted(word: &str) -> String {
-    // ponytail: POSIX single quotes; fish reads `\\` and a trailing `\` inside them differently, quote per shell if a word ever carries one.
-    format!("'{}'", word.replace('\'', "'\\''"))
+/// `word` in single quotes, each `'` written `'\''` and each `\` written
+/// `'\\'`: the quote is closed, the character is escaped outside it, and the
+/// quote reopens. POSIX shells and fish both parse the result as one word
+/// holding `word` as is; fish, which reads `\'` and `\\` as escapes inside
+/// single quotes, never sees a bare `\` there. Quoting covers parsing only:
+/// a control character typed into a live prompt acts on the line editor
+/// before the shell parses anything, so a typed line drops control
+/// characters (`Pane::type_line`) and `plate add` and `plate update` refuse
+/// links holding them.
+pub fn quoted(word: &str) -> String {
+    let inner: String = word
+        .chars()
+        .map(|character| match character {
+            '\'' => "'\\''".to_owned(),
+            '\\' => "'\\\\'".to_owned(),
+            other => other.to_string(),
+        })
+        .collect();
+    format!("'{inner}'")
 }
 
 /// Reads `state` every tick until `check` gives an answer, poking the poll
@@ -594,6 +608,7 @@ mod tests {
     #[case(AgentKind::Claude, &[], "claude")]
     #[case(AgentKind::Pi, &["--model", "opus"], "pi '--model' 'opus'")]
     #[case(AgentKind::Claude, &["it's"], r"claude 'it'\''s'")]
+    #[case(AgentKind::Claude, &[r"a\'(cmd)"], r"claude 'a'\\''\''(cmd)'")]
     fn shell_line_quotes_each_argument(
         #[case] kind: AgentKind,
         #[case] args: &[&str],

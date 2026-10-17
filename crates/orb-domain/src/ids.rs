@@ -1,4 +1,5 @@
-//! The ids of agents, sessions, panes and projects: their rows in orb's store.
+//! The ids of agents, sessions, panes, projects and plate items: their rows in
+//! orb's store.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,3 +29,9 @@ impl PaneId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProjectId(pub i64);
+
+/// Identifies a plate item across launches (its row in orb's store); never
+/// reused after the item is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlateItemId(pub i64);

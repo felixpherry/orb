@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
 use crate::feat::sessions::state::ProjectKind;
-use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
+use crate::ids::{AgentId, PaneId, PlateItemId, ProjectId, SessionId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,15 @@ pub enum SessionsCommand {
     /// Open a tab right after `session`'s shown tab, and show it, whose
     /// fresh shell runs `line`; closing it shows that tab again.
     AddHistoryTab { session: SessionId, line: String },
+    /// Open a tab right after `session`'s shown tab, and show it, whose
+    /// fresh shell runs terminal-browser on `url`; that tab becomes the
+    /// session's browser tab.
+    OpenBrowserTab { session: SessionId, url: String },
+    /// Open `url` as a new tab of the terminal-browser in pane `pane`.
+    OpenInBrowser { pane: PaneId, url: String },
+    /// Open `address`, a URL or an absolute path, with the desktop's own
+    /// opener.
+    OpenOutside(String),
     /// Open a tab in `session` whose fresh shell resumes `agent`'s
     /// conversation, and show it.
     ResumeAgent { session: SessionId, agent: AgentId },
@@ -145,6 +154,9 @@ pub enum SessionsCommand {
     SaveUi,
     /// Save the jump list as it now is in the app state.
     SaveJumps,
+    /// Save plate item `item` as the app state has it, after the user's x, p
+    /// or u.
+    SavePlateItem(PlateItemId),
     /// Remove the project from `<C-g> n` and the project filter; its sessions
     /// stay.
     RemoveProject(ProjectId),

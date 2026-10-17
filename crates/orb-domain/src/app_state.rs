@@ -3,11 +3,15 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::SystemTime;
+
+use jiff::tz::TimeZone;
 
 use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::{PickerMemory, PickerState};
+use crate::feat::plate::{BrowserTabs, Plate, local_midnight};
 use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Agent, Notice, NoticeKind, Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -29,6 +33,8 @@ pub enum Focus {
     Rename,
     /// Keys edit the sidebar's search and move between its matches.
     Search,
+    /// Keys move through the plate and act on its rows.
+    Plate,
 }
 
 /// A sticky mode the keys can be in while they are in a pane.
@@ -38,6 +44,24 @@ pub enum PaneMode {
     Resize,
     /// Keys swap the focused pane with another.
     Move,
+}
+
+/// The user's time zone, read once at start-up; UTC until then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalZone(pub TimeZone);
+
+impl Default for LocalZone {
+    fn default() -> Self {
+        Self(TimeZone::UTC)
+    }
+}
+
+impl LocalZone {
+    /// The start of `now`'s day here: the local midnight "today" counts from.
+    #[must_use]
+    pub fn midnight(&self, now: SystemTime) -> SystemTime {
+        local_midnight(now, &self.0)
+    }
 }
 
 /// Everything the frontend needs to draw a frame and decide whether to exit.
@@ -81,6 +105,19 @@ pub struct AppState {
     /// session) and by the sessions actor, its owner (restoring the saved
     /// list).
     pub jumps: JumpList,
+    /// What needs the user across all of orb (see [`Plate`]). Its items are
+    /// written by the sessions actor, their owner: loaded at start, then each
+    /// agent's add, update and done, and each save of the user's x, p and u,
+    /// which the intent handler writes first. Its view is written by the
+    /// intent handler, and its page size by the frontend after each draw.
+    pub plate: Plate,
+    /// The user's time zone, which "today" on the plate counts in. Set once
+    /// at start-up; nothing writes it after.
+    pub zone: LocalZone,
+    /// Each session's terminal-browser tab that plate links open in (see
+    /// [`BrowserTabs`]). Whether terminal-browser is there is set once at
+    /// start-up; the sessions actor, the owner, writes each tab it opens.
+    pub browser_tabs: BrowserTabs,
     /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
     /// its owner; the intent handler also clears `notice` on the next intent.
     pub worktrees: Worktrees,
@@ -96,6 +133,13 @@ impl AppState {
     /// The pane mode in force: the one turned on, while the keys are in a pane.
     pub fn pane_mode(&self) -> Option<PaneMode> {
         self.pane_mode.filter(|_| self.focus == Focus::Pane)
+    }
+
+    /// Whether the plate floats over the shown session: it has the keys
+    /// while a session is shown. On the start screen it fills the right side
+    /// instead.
+    pub fn plate_floats(&self) -> bool {
+        self.focus == Focus::Plate && self.shown_layout().is_some()
     }
 
     /// The session the right-hand area shows: the active one, while it is

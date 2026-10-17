@@ -13,8 +13,9 @@
 //! Every session's layout (tabs of split panes) is kept and saved; while a
 //! session is attached, each of its panes has a client. The right side shows
 //! the selected session, a tab bar over its shown tab's panes, while it is
-//! attached, else the start screen. Each frame resizes every visible pane to
-//! the inside of its frame; panes of hidden tabs and other sessions keep their size. A
+//! attached, else the plate as the start screen. Each frame resizes every
+//! visible pane to the inside of its frame; panes of hidden tabs and other
+//! sessions keep their size. A
 //! pane that leaves every layout (closed, or its session deleted) is killed
 //! with `zmx kill`. A pane of an attached session whose program ended closes
 //! in its layout. At start every `orb-p*` session on orb's pane dir that no
@@ -39,8 +40,8 @@
 //! back in. Settling
 //! or deleting a session ends its panes' clients; `⏎` on a settled session
 //! brings its panes back the way start-up does. A pane whose program exits
-//! within a second of attaching leaves `session <title> exited at start` on
-//! the start screen.
+//! within a second of attaching leaves `session <title> exited at start` in
+//! the message box.
 //!
 //! When an agent finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
@@ -87,6 +88,7 @@ use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::control::pane_control::{PaneControl, PaneReply, PaneRequest};
+use orb_domain::feat::control::quoted;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
@@ -99,7 +101,6 @@ use orb_domain::feat::sessions::child_env::{pane_env, terminal_browser_env};
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
 use orb_domain::feat::sessions::state::{Notice, Sessions};
 use orb_domain::feat::sessions::validator::validate_new_session;
-use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::ids::{AgentId, PaneId, SessionId};
@@ -144,7 +145,7 @@ const PREVIEW_EVERY: Duration = Duration::from_secs(1);
 /// works, so its wait time, shown in whole seconds, counts up.
 const WAIT_TICK: Duration = Duration::from_secs(1);
 
-/// What the start screen says after an attached program exits within
+/// What the message box says after an attached program exits within
 /// [`EARLY_EXIT`] of starting.
 const EXITED_AT_START: &str = "session exited at start";
 
@@ -298,7 +299,7 @@ where
 fn after_pane(focus: Focus) -> Focus {
     match focus {
         Focus::Pane => Focus::Sidebar,
-        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => focus,
+        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => focus,
     }
 }
 
@@ -308,7 +309,7 @@ fn after_pane(focus: Focus) -> Focus {
 /// default while attached without a pane.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
-        (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
+        (Focus::Sidebar | Focus::Plate, _) => SetCursorStyle::SteadyBlock,
         (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
         (Focus::Pane, Some(style)) => style,
         (Focus::Pane, None) => SetCursorStyle::DefaultUserShape,
@@ -352,8 +353,6 @@ struct App {
     /// Pastes waiting for their pane's program to turn bracketed paste on,
     /// so they land in its prompt instead of running line by line.
     pastes: HashMap<PaneId, String>,
-    /// Shown on the start screen when a pane's client couldn't start.
-    pane_error: Option<String>,
     /// The message box: the latest error or notice, until it times out.
     toasts: Toasts,
     /// The session a worker last made ready, until it opens or is dropped.
@@ -441,7 +440,6 @@ impl App {
             broken: HashSet::new(),
             typing: HashMap::new(),
             pastes: HashMap::new(),
-            pane_error: None,
             toasts: Toasts::default(),
             ready: None,
             env,
@@ -492,14 +490,19 @@ impl App {
                     pane.resize(PaneSize::new(place.content(), self.cell));
                 }
             }
-            let (sidebar_layout, picker_page) = self.draw(terminal, &mut last_cursor)?;
+            let drawn = self.draw(terminal, &mut last_cursor)?;
             // Navigation scrolls by what was just drawn.
-            if let Some(layout) = sidebar_layout
+            if let Some(layout) = drawn.sidebar
                 && self.state.read().sidebar.layout != layout
             {
                 self.state.write().sidebar.layout = layout;
             }
-            if let Some(page) = picker_page
+            if let Some(page) = drawn.plate_page
+                && self.state.read().plate.view().page != page
+            {
+                self.state.write().plate.view_mut().page = page;
+            }
+            if let Some(page) = drawn.picker_page
                 && self
                     .state
                     .read()
@@ -581,7 +584,7 @@ impl App {
         let state = self.state.read();
         match state.focus {
             Focus::Pane => state.shown_layout()?.focused(),
-            Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => None,
+            Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => None,
         }
     }
 
@@ -741,6 +744,11 @@ impl App {
             (Focus::Picker, _) if list_intent.is_some() => list_intent.flatten(),
             // The rename box and the search take the picker's keys.
             (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
+            // The plate takes every key while it has them.
+            (Focus::Plate, _) => {
+                self.keys.dismiss();
+                Some(keymap::plate_route(key))
+            }
             (Focus::Pane, Some(mode)) => {
                 // A pane mode takes every key; none reaches the pane's program.
                 self.keys.dismiss();
@@ -886,7 +894,6 @@ impl App {
                     log_unsent(&self.log, "sessions", &command, sent);
                     return;
                 }
-                self.pane_error = None;
                 self.reconcile();
                 self.sync_focus();
             }
@@ -1047,14 +1054,14 @@ impl App {
     /// Draws one frame. The terminal shows only the finished frame, the
     /// panes' images placed in the same update as the cells, and a
     /// hidden cursor goes back to `last_cursor`, where it last showed, so it
-    /// never visibly moves. Returns the sidebar's layout and the picker's page.
+    /// never visibly moves. Returns what the loop keeps of the frame.
     fn draw(
         &mut self,
         terminal: &mut OrbTerminal,
         last_cursor: &mut Option<Position>,
-    ) -> io::Result<(Option<SidebarLayout>, Option<usize>)> {
+    ) -> io::Result<render::Drawn> {
         let now = SystemTime::now();
-        let mut drawn = (None, None, None);
+        let mut drawn = render::Drawn::default();
         self.sidebar_scroll
             .follow_keys(self.state.read().focus == Focus::Sidebar);
         let mut images = Vec::new();
@@ -1065,7 +1072,6 @@ impl App {
                 frame,
                 &state,
                 &self.panes,
-                self.pane_error.as_deref(),
                 self.toasts.shown(Instant::now()),
                 &self.keys,
                 now,
@@ -1079,14 +1085,13 @@ impl App {
         })?;
         self.compositor
             .compose(terminal.backend_mut(), &images, &self.panes)?;
-        let (sidebar_layout, picker_page, cursor) = drawn;
-        match (cursor, *last_cursor) {
-            (Some(_), _) => *last_cursor = cursor,
+        match (drawn.cursor, *last_cursor) {
+            (Some(_), _) => *last_cursor = drawn.cursor,
             (None, Some(parked)) => terminal.set_cursor_position(parked)?,
             (None, None) => {}
         }
         ratatui::crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
-        Ok((sidebar_layout, picker_page))
+        Ok(drawn)
     }
 
     /// Shows the cursor shape for where the keys are in the outer terminal.
@@ -1161,9 +1166,8 @@ fn write_history(dir: &Path, pane: PaneId, text: &str) -> Result<PathBuf, Report
 /// removed. `exec` ends the pane's shell with the editor, so quitting it
 /// closes the pane. `$EDITOR` is left unquoted so `code -w` splits into words.
 fn history_line(path: &Path) -> String {
-    // The path in single quotes, its own `'` written `'\''`, which POSIX
-    // shells and fish both read as one word.
-    let file = format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    // The path as one word to POSIX shells and fish alike (see `quoted`).
+    let file = quoted(&path.to_string_lossy());
     format!(
         "exec sh -c 'f=$1; case ${{EDITOR:-less}} in *vi|*vim|*nvim) at=+;; *less) at=+G;; *) at=;; esac; ${{EDITOR:-less}} $at \"$f\"; rm -f \"$f\"' orb-history {file}"
     )

@@ -22,6 +22,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Clicking a desktop notification opens that agent's pane with your keys in it, on macOS (with terminal-notifier) and on Linux.
 - Agent rows in the sidebar show a time before the `✳` or `π` mark: the turn so far while working, the wait while waiting, else the time since the last turn.
 - `orb integration install` also installs 17 workflow skills that take an approved plan to an open pull request.
+- The plate: one list of what needs you across all of orb, grouped as Your move, Waiting on others, Parked and Done today, with a preview of each item and its links. orb adds its own row for each agent waiting for approval or an answer.
+- `<C-g> o` opens the plate over the session on screen. Inside it, `j`/`k` move, `⏎` goes to the item's pane, `x` marks it done, `p` parks it or brings it back, `u` undoes, `z` shows Done today, and `gx` or `1`–`9` open its links: a web link (a full `https://…` address) or an `.html` file in the session's one terminal-browser tab, other files in `$EDITOR`, else `less`.
+- `orb plate add|update|done|list` let agents add, change, close and list plate items. A colonist's add is refused with the new `colonist` code.
+- The mode line reads `PLATE` while the plate has the keys, and counts its Your move items in orange.
+- The orb skill teaches agents the plate. plan-with-me adds an item to approve the plan, and ship-plan one to review the PR. docs/keys.md has a line to add to your global agent instructions.
 
 ### Changed
 
@@ -31,6 +36,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The mode line's input count is magenta, as in the sidebar.
 - pi's copy of orb's skills moves from `~/.pi/agent/skills` to `~/.agents/skills`; the install removes the old copy.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
+- The start screen is the plate. The ORB banner and its counts are gone.
+- A pane that can't start shows its reason in the message box instead of under the start screen.
+- Plate items are saved, so they survive a restart. This upgrades orb's saved data, and orb keeps a copy of the old file first. Done items are cleared at the first start after midnight.
 
 ### Fixed
 

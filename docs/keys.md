@@ -68,9 +68,17 @@ ln -sf "$(dirname "$(dirname "$(dirname "$(readlink -f "$(command -v pi)")")")")
 
 If you use pi-amplike, also change its `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`. amplike has its own subagent tool, and pi won't start with both.
 
+### Agents and the plate
+
+`orb integration install` teaches agents the plate through the orb skill, and plan-with-me and ship-plan add an item when they finish. Agents follow it more reliably with one line in your global agent instructions: `~/.claude/CLAUDE.md` for Claude Code and `~/.pi/agent/AGENTS.md` for pi. Add it to your own files yourself; orb's install never writes them.
+
+```text
+When you end a turn that needs the user (a decision, a review, something to read or walk, an answer), add one plate item with `orb plate add`. Offer follow-up ideas with `--verb idea`. Close your item with `orb plate done <id>` once the user's step is done. If you're a colonist, report to your chief instead.
+```
+
 ### Files
 
-orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`, the search index in `userdata/search.sqlite`, worktrees in `worktrees/`, and a log in `orb.log`.
+orb keeps its own files under `~/.orb/`: saved state and plate items in `userdata/state.sqlite`, the search index in `userdata/search.sqlite`, worktrees in `worktrees/`, and a log in `orb.log`.
 
 ## Keys
 
@@ -99,6 +107,7 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the pane out to a new tab (in a pane), go to N |
 | `<C-g> Space` | Session picker |
 | `<C-g> a` | Go to the next agent that needs you: approval, then input, then a finished chat you haven't read, longest waiting first; press again for the next, wrapping at the end. It reaches agents the project filter hides, leaves out failed agents and settled sessions, and with nobody waiting says `No agent needs you` |
+| `<C-g> o` | The plate: what needs you, across all of orb. Over a shown session it opens as a float; on the start screen it moves the keys into it. Again, or `Esc`, closes |
 | `<C-g> n` | New session |
 | `<C-g> P` | Projects: `a` adds one, `d` removes one, `⏎` starts a session |
 | `<C-g> f` | Show one project's sessions (sidebar only) |
@@ -125,9 +134,24 @@ In the sidebar:
 | `/` or `i` | Search |
 | `l` / `h` | Show / fold a card's agent rows or a colony's colonists, or open / close the Settled shelf |
 
+In the plate:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move |
+| `⏎` | Go to the item's pane with the keys in it. With the pane gone, open its session (resuming it if settled). With the session deleted, orb says `the session is gone` |
+| `gx`, `1`–`9` | Open the item's first link, or link N. A web link (a full `https://…` address) or an `.html` file opens in the session's one terminal-browser tab, opened the first time and reused after. Any other file opens in `$EDITOR`, else `less`, in a new tab. Without terminal-browser, the system opener takes it |
+| `x` | Mark done (moves it to Done today) |
+| `p` | Park, or bring a parked item back to Your move |
+| `u` | Undo the last `x` or `p` |
+| `z` | Open / fold Done today |
+| `Esc` | Close; the keys go back where they were |
+
+The plate lists every item agents added, grouped as Your move, Waiting on others, Parked and Done today, and ignores the project filter. orb adds its own row for each agent waiting for approval or an answer; the row leaves once the agent stops waiting, and `x` and `p` don't act on it.
+
 Pickers: type to filter, `<C-j>`/`<C-k>` or arrows to move, `⏎` to pick, `Esc` to close. The projects, worlds, session, `Send to` and worktree pickers open as a list where letters are commands, listed at the bottom of the picker; `/` starts typing a filter there.
 
-`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, a pick in the session, search or `Send to` picker, and `<C-g> a` are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
+`<C-[>`/`<C-]>` work like neovim's jump list. Entering a session's panes, moving to another of its panes, `gg`/`G`, a search ended by `⏎`, a new session, a pick in the session, search or `Send to` picker, `⏎` in the plate, and `<C-g> a` are jumps; `j`/`k` aren't. orb keeps the newest 20 across restarts.
 
 ## Mouse
 
@@ -143,6 +167,7 @@ orb captures the mouse from the moment it starts.
 - A click on a float brings it to the top with the keys, dragging its frame moves it, and a click on a tiled pane hides the floats.
 - With no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. It never moves the selection. Over a picker's list it moves the picker's selection.
 - A click outside a picker or the rename box closes it, as `Esc` does.
+- While the plate has the keys, a click off it closes it, as `Esc` does. The start-screen plate takes no clicks.
 - A click on the sidebar's search box starts a search, and a click in any input's text moves the cursor there.
 
 kitty's Shift+drag still selects with kitty's own selection, past orb.

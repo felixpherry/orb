@@ -1,12 +1,14 @@
 //! The [`IntentHandler`]: the single decision point for all user input.
 
+use std::time::SystemTime;
+
 use crate::command::SessionsCommand;
 use crate::feat::layout::intent::{SizeStep, SwapStep};
 use crate::feat::pane::intent::enter_session;
 use crate::feat::picker::intent::{PickerKey, project_item};
 use crate::feat::picker::state::PickerKind;
 use crate::feat::sessions::state::SidebarItem;
-use crate::feat::{git, jumps, layout, pane, picker, sessions, sidebar};
+use crate::feat::{git, jumps, layout, pane, picker, plate, sessions, sidebar};
 use crate::ids::SessionId;
 use crate::{AppState, Command, Focus, Intent};
 
@@ -143,6 +145,8 @@ impl IntentHandler {
             Intent::Search => sidebar::intent::search(state),
             Intent::ToggleSettle => sessions::intent::toggle_settle(state),
             Intent::Delete => sessions::intent::delete(state),
+            Intent::OpenPlate => plate::intent::open(state),
+            Intent::Plate(key) => plate::intent::key(state, *key, SystemTime::now()),
         };
         if let Some(left) = left
             && state.focus == Focus::Pane
