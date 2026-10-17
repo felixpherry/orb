@@ -5666,6 +5666,32 @@ fn send_to_agent_opens_every_unsettled_agent_but_the_panes_own() {
 }
 
 #[rstest::rstest]
+fn send_to_list_follows_the_project_filter() {
+    // Given alpha (agents 11 and 12) and beta (agent 21), filtered to
+    // alpha, with the keys in agent 11's pane.
+    let mut state = with_project_agents(&["alpha", "beta"]);
+    if let Some(alpha) = state.sessions.projects.first_mut() {
+        alpha.agents.push(agent(12, AgentStatus::Idle));
+    }
+    state.sessions.sessions = sessions_for(&state.sessions.projects);
+    state.layouts = layouts_for(&state.sessions.projects);
+    state.sessions.filter = Some(ProjectId(1));
+    state.focus = Focus::Pane;
+    state.attached = [SessionId(11)].into();
+    state.sessions.enter(SessionId(11));
+
+    // When handling SendToAgent.
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+
+    // Then only alpha's other agent is listed.
+    assert_eq!(
+        session_ids(&state),
+        [SessionId(12)],
+        "the Send to list should keep to the project filter"
+    );
+}
+
+#[rstest::rstest]
 fn send_to_list_holds_colonists_agents() {
     // Given colony 1 with colonists 2 and 3, and the keys in the colony's
     // pane.
@@ -5911,12 +5937,24 @@ fn enter_in_the_key_list_closes_it() {
     let mut state = key_list();
 
     // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then it closes and the keys go back to the sidebar.
+    assert_eq!(
+        (picker_kind(&state), state.focus),
+        (None, Focus::Sidebar),
+        "⏎ closes the key list"
+    );
+}
+
+#[rstest::rstest]
+fn enter_in_the_key_list_runs_nothing() {
+    // Given the key list opened from the sidebar.
+    let mut state = key_list();
+
+    // When confirming.
     let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then it closes, runs nothing, and the keys go back to the sidebar.
-    assert_eq!(
-        (picker_kind(&state), state.focus, commands),
-        (None, Focus::Sidebar, vec![]),
-        "⏎ only closes the key list"
-    );
+    // Then no command goes out.
+    assert_eq!(commands, vec![], "⏎ in the key list runs nothing");
 }

@@ -406,6 +406,7 @@ mod tests {
     #[case(Intent::GoToTab(9), "tab 9")]
     #[case(Intent::ChangeWorkspace, "session's worktree")]
     #[case(Intent::OpenWorktreePicker, "all worktrees")]
+    #[case(Intent::OpenKeyList, "keys")]
     fn navigation_intents_display_what_they_do(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key names where the intent goes or what
         // it acts on.
@@ -426,12 +427,6 @@ mod tests {
     fn open_search_displays_as_grep() {
         // Given / When / Then: which-key labels OpenSearch "grep".
         assert_eq!(Intent::OpenSearch.to_string(), "grep", "which-key label");
-    }
-
-    #[rstest::rstest]
-    fn open_key_list_displays_as_keys() {
-        // Given / When / Then: which-key labels OpenKeyList "keys".
-        assert_eq!(Intent::OpenKeyList.to_string(), "keys", "which-key label");
     }
 
     #[rstest::rstest]
