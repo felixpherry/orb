@@ -41,12 +41,12 @@ use orb_domain::{
     AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter, Services,
     SessionsCommand, State,
 };
-use orb_term::{CellSize, GraphicsSupport, PaneEvent};
+use orb_term::{CellSize, GraphicsSupport, Pane, PaneEvent};
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -2798,6 +2798,139 @@ fn history_failure_shows_why() -> io::Result<()> {
         test.state.read().sessions.error.as_deref(),
         Some("couldn't save the pane's history"),
         "a history that can't be written should say so"
+    );
+    Ok(())
+}
+
+/// A client that prints `hello world` in pane 1 and keeps running; in any
+/// other pane it takes raw input, prints `ready`, and writes what it gets to
+/// `typed`.
+fn hello_beside_a_recorder(session: &ZmxSession) -> Vec<OsString> {
+    if session.name == pane(1).zmx_name() {
+        return says_hello(session);
+    }
+    [
+        "/bin/sh",
+        "-c",
+        "/bin/stty raw -echo; printf ready; exec /bin/cat > typed",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// As [`hello_beside_a_recorder`], but the other panes print nothing.
+fn hello_beside_a_silent_recorder(session: &ZmxSession) -> Vec<OsString> {
+    if session.name == pane(1).zmx_name() {
+        return says_hello(session);
+    }
+    [
+        "/bin/sh",
+        "-c",
+        "/bin/stty raw -echo; exec /bin/cat > typed",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Panes 1 and 2 side by side in attached session 1, their clients run by
+/// `attach`, once the loop has handled pane 1's output.
+fn hello_beside(attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Result<LoopTest> {
+    let mut test = loop_app(FakeZmx::listing(""), attach)?;
+    test.attach(&[pane(1), pane(2)]);
+    if !test.handle_until_output(pane(1))? {
+        return Err(io::Error::other("pane 1 printed nothing within 5 s"));
+    }
+    Ok(test)
+}
+
+impl LoopTest {
+    /// Waits up to five seconds for pane `id`'s program to print; whether
+    /// it did.
+    fn printed(&self, id: PaneId) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if self.app.panes.get(&id).is_some_and(Pane::has_output) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+}
+
+#[rstest::rstest]
+fn send_text_pastes_the_selection() -> io::Result<()> {
+    // Given `hello` highlighted in pane 1, which shows `hello world`, and
+    // pane 2 ready for input.
+    let mut test = hello_beside(hello_beside_a_recorder)?;
+    if !test.printed(pane(2)) {
+        return Err(io::Error::other("pane 2 printed nothing within 5 s"));
+    }
+    if let Some(source) = test.app.panes.get(&pane(1)) {
+        let (area, now) = (Rect::new(0, 0, 40, 10), Instant::now());
+        source.select_start(Position::new(0, 0), area, now);
+        source.select_update(Position::new(5, 0), area, now);
+    }
+
+    // When the loop sends pane 1's text to pane 2.
+    test.app.execute(&Command::SendText {
+        from: pane(1),
+        to: pane(2),
+    });
+
+    // Then pane 2's program gets `hello`.
+    let typed = log_holding(&test.dir.path().join("typed"), "hello");
+    assert_eq!(typed, "hello", "the selection should be pasted");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn send_text_pastes_the_screen_without_a_selection() -> io::Result<()> {
+    // Given pane 1 showing `hello world` with nothing highlighted, and pane
+    // 2 ready for input.
+    let mut test = hello_beside(hello_beside_a_recorder)?;
+    if !test.printed(pane(2)) {
+        return Err(io::Error::other("pane 2 printed nothing within 5 s"));
+    }
+
+    // When the loop sends pane 1's text to pane 2.
+    test.app.execute(&Command::SendText {
+        from: pane(1),
+        to: pane(2),
+    });
+
+    // Then pane 2's program gets pane 1's screen.
+    let typed = log_holding(&test.dir.path().join("typed"), "hello world");
+    assert_eq!(typed, "hello world", "the screen should be pasted");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn send_text_to_a_pane_without_output_waits_for_its_first_output() -> io::Result<()> {
+    // Given pane 1 showing `hello world`, and pane 2, which hasn't printed.
+    let mut test = hello_beside(hello_beside_a_silent_recorder)?;
+
+    // When the loop sends pane 1's text to pane 2, then `early` is pasted
+    // there, then pane 2 prints for the first time.
+    test.app.execute(&Command::SendText {
+        from: pane(1),
+        to: pane(2),
+    });
+    let early = PaneRequest::Send {
+        pane: pane(2),
+        text: "early".into(),
+    };
+    let (tx, _rx) = mpsc::channel();
+    test.app
+        .handle(LoopEvent::Control(early, tx), &mut io::sink())?;
+    test.app
+        .handle(LoopEvent::Pane(pane(2), PaneEvent::Output), &mut io::sink())?;
+
+    // Then pane 1's text reaches pane 2 only after that first output.
+    let typed = log_holding(&test.dir.path().join("typed"), "hello world");
+    assert_eq!(
+        typed, "earlyhello world",
+        "a paste into a silent pane waits for its first output"
     );
     Ok(())
 }

@@ -192,6 +192,7 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
         PickerKind::Projects | PickerKind::ManageProjects => "Projects",
         PickerKind::Worlds | PickerKind::ManageWorlds => "Worlds",
         PickerKind::Sessions { .. } => "Sessions",
+        PickerKind::SendTo { .. } => "Send to",
         PickerKind::Worktrees => "Worktrees",
         PickerKind::Search { .. } => "Search",
         PickerKind::ProjectFilter => "Filter projects",
@@ -227,6 +228,7 @@ pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
                     &[("a/b/w/i/s", "filter"), ("c", "colonists"), ("d", "close")]
                 }
                 PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "close")],
+                PickerKind::SendTo { .. } => &[],
                 _ => &[("d", "delete")],
             };
             [("↑↓/j/k", "rows"), ("/", "search")]
@@ -271,6 +273,7 @@ fn confirm_verb(kind: &PickerKind) -> Option<&'static str> {
         PickerKind::ManageProjects => Some("new session"),
         PickerKind::Worlds | PickerKind::ManageWorlds => Some("new colony"),
         PickerKind::Sessions { .. } => Some("open"),
+        PickerKind::SendTo { .. } => Some("send"),
         PickerKind::ProjectFilter => Some("filter"),
         _ => Some("select"),
     }

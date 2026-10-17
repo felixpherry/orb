@@ -282,6 +282,7 @@ impl App {
         }
         self.respawned.remove(&id);
         self.typing.remove(&id);
+        self.pastes.remove(&id);
         self.broken.insert(id);
         let text = {
             let mut app = self.state.write();
@@ -427,6 +428,7 @@ impl App {
             self.pane_sessions.remove(id);
             self.respawned.remove(id);
             self.typing.remove(id);
+            self.pastes.remove(id);
         }
         let unbroken: Vec<PaneId> = self
             .broken
@@ -461,6 +463,7 @@ impl App {
                 }
                 None => {
                     self.typing.remove(&id);
+                    self.pastes.remove(&id);
                     self.pane_error = Some("couldn't start zmx attach".to_owned());
                     let mut app = self.state.write();
                     if let Some(owner) = app.layouts.owner_of(id) {
@@ -526,14 +529,20 @@ impl App {
         resume_plan(&spawning, &listed)
     }
 
-    /// Types pane `id`'s waiting resume command, once, now that its client
-    /// printed: zmx's `session "…" created` banner comes before the shell
-    /// starts, and the shell reads the line at its first prompt.
+    /// Types pane `id`'s waiting resume command, then pastes its waiting
+    /// text, once each, now that its client printed: zmx's `session "…"
+    /// created` banner comes before the shell starts, and the shell reads
+    /// the line at its first prompt.
     pub(super) fn type_resume(&mut self, id: PaneId) {
         if let Some(line) = self.typing.remove(&id)
             && let Some(pane) = self.panes.get(&id)
         {
             pane.type_line(&line);
+        }
+        if let Some(text) = self.pastes.remove(&id)
+            && let Some(pane) = self.panes.get(&id)
+        {
+            pane.paste(&text);
         }
     }
 

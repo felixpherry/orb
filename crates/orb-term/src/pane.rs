@@ -314,6 +314,12 @@ impl Pane {
         lock(&self.emulator).select_finish()
     }
 
+    /// The highlighted selection's text, leaving it highlighted; `None` when
+    /// nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        lock(&self.emulator).selected_text()
+    }
+
     /// Tells the child the pane gained or lost focus, if it asked to know.
     pub fn focus(&self, focused: bool) {
         lock(&self.emulator).focus(focused);

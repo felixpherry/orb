@@ -231,8 +231,9 @@ fn render_open_picker(
     (rows, (!picker.listing()).then_some(cursor))
 }
 
-/// Draws `picker` over `area` with its own look, the session and worktree
-/// pickers in their snacks layout and the rest in the select popup.
+/// Draws `picker` over `area` with its own look, the session (and `Send
+/// to`) and worktree pickers in their snacks layout and the rest in the
+/// select popup.
 /// Returns how many rows fit and where the terminal cursor goes.
 fn render_picker(
     picker: &PickerState,
@@ -244,7 +245,7 @@ fn render_picker(
     hits: &mut HitMap,
 ) -> (usize, Position) {
     match picker.kind() {
-        PickerKind::Sessions { .. } => session_picker::render(
+        PickerKind::Sessions { .. } | PickerKind::SendTo { .. } => session_picker::render(
             picker,
             &state.sessions,
             &state.attached,

@@ -1,11 +1,11 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). The frontend loop carries out
-//! the pane commands (`Attach`, `Detach`, `SendCtrlG`, `OpenHistory`) and the
-//! quick reads (`ListDirectories`, `ListBranches`, `LoadPreview`) itself. Each actor's
-//! commands are grouped in its own list, which the loop forwards whole:
-//! [`SessionsCommand`] (sessions, projects, panes, layouts, the sidebar's
-//! saved state), [`WorktreesCommand`] (rescan, delete) and [`SearchCommand`]
-//! (query, preview).
+//! the pane commands (`Attach`, `Detach`, `SendCtrlG`, `OpenHistory`,
+//! `SendText`) and the quick reads (`ListDirectories`, `ListBranches`,
+//! `LoadPreview`) itself. Each actor's commands are grouped in its own list,
+//! which the loop forwards whole: [`SessionsCommand`] (sessions, projects,
+//! panes, layouts, the sidebar's saved state), [`WorktreesCommand`] (rescan,
+//! delete) and [`SearchCommand`] (query, preview).
 
 use std::path::PathBuf;
 
@@ -28,6 +28,9 @@ pub enum Command {
     /// Write pane `pane`'s history to a file and open it in a float of
     /// `session` running `$EDITOR`, else `less`.
     OpenHistory { session: SessionId, pane: PaneId },
+    /// Paste pane `from`'s highlighted selection, else its screen, into
+    /// pane `to`, once `to`'s program has printed.
+    SendText { from: PaneId, to: PaneId },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),
     /// List the directory's subdirectories into the open directory picker.

@@ -345,6 +345,8 @@ struct App {
     broken: HashSet<PaneId>,
     /// Resume commands waiting for their fresh pane's first output.
     typing: HashMap<PaneId, String>,
+    /// Pastes waiting for their pane's first output.
+    pastes: HashMap<PaneId, String>,
     /// Shown on the start screen when a pane's client couldn't start.
     pane_error: Option<String>,
     /// The message box: the latest error or notice, until it times out.
@@ -433,6 +435,7 @@ impl App {
             respawned: HashSet::new(),
             broken: HashSet::new(),
             typing: HashMap::new(),
+            pastes: HashMap::new(),
             pane_error: None,
             toasts: Toasts::default(),
             ready: None,
@@ -895,6 +898,7 @@ impl App {
                 }
             }
             Command::OpenHistory { session, pane } => self.open_history(*session, *pane),
+            Command::SendText { from, to } => self.send_text(*from, *to),
             Command::ListBranches(cwd) => {
                 let refs = self.git.refs(cwd);
                 let mut app = self.state.write();
@@ -955,6 +959,32 @@ impl App {
                 self.state.write().sessions.error =
                     Some("couldn't save the pane's history".to_owned());
             }
+        }
+    }
+
+    /// Pastes pane `from`'s highlighted selection, else its screen, into
+    /// pane `to`, or keeps it until `to`'s program first prints. A pane
+    /// added earlier in this turn gets its client first. Nothing is pasted
+    /// from a pane without a client or with no text, nor into a pane that
+    /// has no client.
+    fn send_text(&mut self, from: PaneId, to: PaneId) {
+        let Some(text) = self
+            .panes
+            .get(&from)
+            .map(|pane| pane.selected_text().unwrap_or_else(|| pane.text(0)))
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        if !self.panes.contains_key(&to) {
+            self.reconcile();
+        }
+        match self.panes.get(&to) {
+            Some(pane) if pane.has_output() => pane.paste(&text),
+            Some(_) => {
+                self.pastes.insert(to, text);
+            }
+            None => {}
         }
     }
 
@@ -1141,15 +1171,17 @@ fn list_directories(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The session picker's selected agent and its transcript, when the
-/// transcript's length isn't the one its preview was read at. A transcript
-/// that can't be measured is left alone, and so is every other picker: the
-/// search picker's previews come from the search index.
+/// The session (or `Send to`) picker's selected agent and its transcript,
+/// when the transcript's length isn't the one its preview was read at. A
+/// transcript that can't be measured is left alone, and so is every other
+/// picker: the search picker's previews come from the search index.
 fn stale_preview(state: &AppState) -> Option<(AgentId, PathBuf)> {
-    let picker = state
-        .picker
-        .as_ref()
-        .filter(|picker| matches!(picker.kind(), PickerKind::Sessions { .. }))?;
+    let picker = state.picker.as_ref().filter(|picker| {
+        matches!(
+            picker.kind(),
+            PickerKind::Sessions { .. } | PickerKind::SendTo { .. }
+        )
+    })?;
     let id = picker.selected_agent_id()?;
     let transcript = state
         .sessions

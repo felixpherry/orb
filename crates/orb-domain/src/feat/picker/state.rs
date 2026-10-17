@@ -174,6 +174,9 @@ pub enum PickerKind {
         colonists: bool,
         scope: Option<SessionId>,
     },
+    /// `<C-g> y`: pick the agent that gets pane `from`'s selection or
+    /// screen.
+    SendTo { from: PaneId },
     /// `<C-g> W`: orb's worktrees, to look over and delete.
     Worktrees,
     /// `d` in the worktree picker: confirm force-removing the worktree at
@@ -285,6 +288,15 @@ impl PickerState {
                 colonists: false,
                 scope: Some(colony),
             },
+            ..Self::sessions(items, return_to)
+        }
+    }
+
+    /// The `Send to` list for pane `from`'s text over `items`, in the order
+    /// given, opening in list mode with nothing typed.
+    pub fn send_to(items: Vec<PickerItem>, from: PaneId, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::SendTo { from },
             ..Self::sessions(items, return_to)
         }
     }

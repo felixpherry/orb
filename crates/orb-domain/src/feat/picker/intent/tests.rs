@@ -3,7 +3,7 @@ use crate::feat::git::git_service::{GitRef, WorktreeFacts};
 use crate::feat::layout::state::{Layouts, SessionLayout, test_entry};
 use crate::feat::layout::tree::Split;
 use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::{PickTarget, PickerKind, PickerState, SessionFilter};
+use crate::feat::picker::state::{ListMemory, PickTarget, PickerKind, PickerState, SessionFilter};
 use crate::feat::sessions::state::{
     Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
     SidebarItem, SidebarRow, layouts_for, sessions_for,
@@ -5601,5 +5601,230 @@ fn picking_a_hidden_colonists_agent_opens_its_colonists_row() {
     assert!(
         state.sessions.colonists_open.contains(&SessionId(1)),
         "picking a hidden colonist's agent should open its colonists row"
+    );
+}
+
+/// Agents 1, 2 and 3 (`third`, titled `reviewer`), each in a session of
+/// its own, with the keys in agent 1's pane of shown session 1.
+fn in_agent_1s_pane(third: AgentStatus) -> AppState {
+    let mut state = AppState {
+        focus: Focus::Pane,
+        attached: [SessionId(1)].into(),
+        ..state_with(
+            vec![
+                agent(1, AgentStatus::Idle),
+                agent(2, AgentStatus::Idle),
+                named(agent(3, third), "reviewer"),
+            ],
+            1,
+        )
+    };
+    state.sessions.enter(SessionId(1));
+    state
+}
+
+/// [`in_agent_1s_pane`] after `<C-g> y`: the `Send to` list on agent 3,
+/// listing 3, 2.
+fn sending(third: AgentStatus) -> AppState {
+    let mut state = in_agent_1s_pane(third);
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+    state
+}
+
+/// What the session picker remembers in the `Send to` tests: the blocked
+/// filter and `zz` typed.
+fn remembered() -> ListMemory {
+    ListMemory {
+        filter: SessionFilter::Blocked,
+        colonists: false,
+        text: "zz".into(),
+    }
+}
+
+#[rstest::rstest]
+fn send_to_agent_opens_every_unsettled_agent_but_the_panes_own() {
+    // Given agents 1–4, the keys in agent 1's pane, and session 4 settled.
+    let mut state = settle(
+        AppState {
+            focus: Focus::Pane,
+            attached: [SessionId(1)].into(),
+            ..state_with((1..=4).map(|id| agent(id, AgentStatus::Idle)).collect(), 1)
+        },
+        &[4],
+    );
+    state.sessions.enter(SessionId(1));
+
+    // When handling SendToAgent (`<C-g> y`).
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+
+    // Then the `Send to` list holds agents 3 and 2.
+    assert_eq!(
+        session_ids(&state),
+        [SessionId(3), SessionId(2)],
+        "the list should hold every unsettled agent but the pane's own"
+    );
+}
+
+#[rstest::rstest]
+fn send_to_list_holds_colonists_agents() {
+    // Given colony 1 with colonists 2 and 3, and the keys in the colony's
+    // pane.
+    let mut state = AppState {
+        focus: Focus::Pane,
+        attached: [SessionId(1)].into(),
+        ..colony_with_colonists([AgentStatus::Idle; 3])
+    };
+    state.sessions.enter(SessionId(1));
+
+    // When handling SendToAgent.
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+
+    // Then the colonists' agents are listed.
+    assert_eq!(
+        session_ids(&state),
+        [SessionId(3), SessionId(2)],
+        "the list should hold colonists' agents too"
+    );
+}
+
+#[rstest::rstest]
+fn send_to_agent_opens_with_empty_search_whatever_the_session_picker_remembers() {
+    // Given the keys in agent 1's pane, and the session picker remembering
+    // `zz` typed.
+    let mut state = in_agent_1s_pane(AgentStatus::Idle);
+    state.picker_memory.sessions = remembered();
+
+    // When handling SendToAgent.
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+
+    // Then the list opens with nothing typed.
+    assert_eq!(
+        picker_text(&state),
+        Some(""),
+        "the Send to list should open with an empty search"
+    );
+}
+
+#[rstest::rstest]
+fn send_to_list_leaves_the_session_picker_memory_alone() {
+    // Given the session picker's memory, and the `Send to` list with `x`
+    // typed in its search.
+    let mut state = in_agent_1s_pane(AgentStatus::Idle);
+    state.picker_memory.sessions = remembered();
+    IntentHandler::handle(&Intent::SendToAgent, &mut state);
+    IntentHandler::handle(&Intent::PickerStartSearch, &mut state);
+    let state = typed(state, &['x']);
+
+    // When closing it with `Esc` twice.
+    let state = escaped(escaped(state));
+
+    // Then the session picker remembers what it did.
+    assert_eq!(
+        state.picker_memory.sessions,
+        remembered(),
+        "the Send to list should not touch the session picker's memory"
+    );
+}
+
+#[rstest::rstest]
+fn send_pick_returns_send_text_after_attaching_the_target() {
+    // Given the `Send to` list from agent 1's pane on idle agent 3.
+    let mut state = sending(AgentStatus::Idle);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then pane 1's text is pasted into pane 3 once session 3 is attached.
+    let at = |wanted: &Command| commands.iter().position(|command| command == wanted);
+    let attach = at(&Command::Attach(SessionId(3)));
+    let send = at(&Command::SendText {
+        from: PaneId(1),
+        to: PaneId(3),
+    });
+    assert!(
+        attach.is_some() && send > attach,
+        "the paste should come after the attach, got {commands:?}"
+    );
+}
+
+#[rstest::rstest]
+fn send_pick_moves_the_keys_into_the_target_pane() {
+    // Given the `Send to` list from agent 1's pane on idle agent 3.
+    let mut state = sending(AgentStatus::Idle);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the cursor is on agent 3's row and the keys are in its pane.
+    assert_eq!(
+        (state.sessions.cursor, state.focus, shown_focus(&state)),
+        (Some(agent_row(3, 3)), Focus::Pane, Some(PaneId(3))),
+        "sending should move the keys into the target agent's pane"
+    );
+}
+
+#[rstest::rstest]
+fn send_pick_records_a_jump() {
+    // Given the `Send to` list from agent 1's pane on idle agent 3.
+    let mut state = sending(AgentStatus::Idle);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then agent 1's row, then agent 3's, are recorded.
+    assert_eq!(
+        state.jumps.entries(),
+        [agent_row(1, 1), agent_row(3, 3)],
+        "sending should record a jump from the pane left"
+    );
+}
+
+#[rstest::rstest]
+#[case::approval(AgentStatus::NeedsApproval, "reviewer is waiting for approval")]
+#[case::answer(AgentStatus::NeedsInput, "reviewer is waiting for an answer")]
+fn send_pick_on_a_waiting_agent_says_what_it_waits_for(
+    #[case] status: AgentStatus,
+    #[case] expected: &str,
+) {
+    // Given the `Send to` list on agent 3, waiting.
+    let mut state = sending(status);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the mode line names it and what it waits for.
+    assert_eq!(
+        state.sessions.error.as_deref(),
+        Some(expected),
+        "a paste would answer its prompt"
+    );
+}
+
+#[rstest::rstest]
+fn send_pick_on_an_agent_waiting_for_approval_sends_nothing() {
+    // Given the `Send to` list on agent 3, waiting for an approval.
+    let mut state = sending(AgentStatus::NeedsApproval);
+
+    // When confirming.
+    let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then nothing is asked for.
+    assert!(commands.is_empty(), "a refused send asks for nothing");
+}
+
+#[rstest::rstest]
+fn send_pick_on_an_agent_waiting_for_approval_keeps_the_list_open() {
+    // Given the `Send to` list on agent 3, waiting for an approval.
+    let mut state = sending(AgentStatus::NeedsApproval);
+
+    // When confirming.
+    IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+    // Then the list is still open with the keys, so another agent can be
+    // picked.
+    assert_eq!(
+        (picker_kind(&state), state.focus),
+        (Some(PickerKind::SendTo { from: PaneId(1) }), Focus::Picker),
+        "a refused send should leave the list open"
     );
 }

@@ -1,8 +1,8 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
 //! or adding a directory, `Tab` opening one, `d` removing a project in the
 //! projects screen, `⏎` picking a session in the session or search picker,
-//! `d` deleting a session in the session picker, and `d` deleting a
-//! worktree.
+//! `<C-g> y` opening the `Send to` list and `⏎` sending in it, `d` deleting
+//! a session in the session picker, and `d` deleting a worktree.
 
 use std::time::SystemTime;
 
@@ -10,10 +10,11 @@ use crate::feat::picker::list::PickerItem;
 
 use wherror::Error;
 
-use crate::feat::picker::state::PickerKind;
-use crate::feat::sessions::state::{ProjectKind, SessionKind, SidebarItem};
+use crate::feat::layout::state::SessionLayout;
+use crate::feat::picker::state::{PickerKind, PickerState};
+use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind, SidebarItem};
 use crate::feat::worktrees::state::{Verdict, users, verdict};
-use crate::ids::SessionId;
+use crate::ids::{PaneId, SessionId};
 use crate::{AppState, Focus};
 
 /// Why `<C-g> ,` can't open the Colonists picker.
@@ -247,6 +248,79 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     }
 }
 
+/// Why `<C-g> y` can't open the `Send to` list.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum SendToAgentError {
+    /// The keys aren't in a pane.
+    NotInPane,
+    /// No session is shown.
+    NothingShown,
+    /// The shown layout has no focused pane.
+    NoFocusedPane,
+}
+
+/// Allow opening the `Send to` list while the keys are in a pane of the
+/// shown session; gives that pane, whose text is sent.
+///
+/// # Errors
+///
+/// Returns [`SendToAgentError::NotInPane`] when the keys are elsewhere,
+/// [`SendToAgentError::NothingShown`] when no session is shown, and
+/// [`SendToAgentError::NoFocusedPane`] when its layout has no focused pane.
+pub fn validate_send_to_agent(state: &AppState) -> Result<PaneId, SendToAgentError> {
+    if state.focus != Focus::Pane {
+        return Err(SendToAgentError::NotInPane);
+    }
+    if state.shown_session().is_none() {
+        return Err(SendToAgentError::NothingShown);
+    }
+    state
+        .shown_layout()
+        .and_then(SessionLayout::focused)
+        .ok_or(SendToAgentError::NoFocusedPane)
+}
+
+/// Why `⏎` in the `Send to` list can't send to the highlighted agent.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum SendToPickError {
+    /// No agent row of the `Send to` list is highlighted.
+    NoSelection,
+    /// The row's session is gone or being deleted, or its pane no longer
+    /// runs one of its agents.
+    Gone,
+    /// The agent waits for an approval (`approval`) or for an answer, which
+    /// a paste would give.
+    Blocked { approval: bool },
+}
+
+/// Allow sending to the agent highlighted in the `Send to` list; gives its
+/// session and pane.
+///
+/// # Errors
+///
+/// Returns [`SendToPickError::NoSelection`] unless an agent row of the
+/// `Send to` list is highlighted, [`SendToPickError::Gone`] when its pane no
+/// longer runs one of its session's agents, and [`SendToPickError::Blocked`]
+/// when the agent waits for an approval or an answer.
+pub fn validate_send_to_pick(state: &AppState) -> Result<(SessionId, PaneId), SendToPickError> {
+    let (session, pane) = state
+        .picker
+        .as_ref()
+        .filter(|picker| matches!(picker.kind(), PickerKind::SendTo { .. }))
+        .and_then(PickerState::selected_agent)
+        .ok_or(SendToPickError::NoSelection)?;
+    if !state.sessions.runs_agent(session, pane, &state.layouts) {
+        return Err(SendToPickError::Gone);
+    }
+    match state.sessions.agent_in(pane).map(|agent| agent.status) {
+        Some(AgentStatus::NeedsApproval) => Err(SendToPickError::Blocked { approval: true }),
+        Some(AgentStatus::NeedsInput) => Err(SendToPickError::Blocked { approval: false }),
+        _ => Ok((session, pane)),
+    }
+}
+
 /// Why closing the session picker's highlighted agent can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
@@ -339,9 +413,10 @@ mod tests {
 
     use super::{
         AddDirectoryError, CloseListedAgentError, DeleteWorktreeError, OpenDirectoryError,
-        PickProjectError, PickSessionError, RemoveProjectError, validate_add_directory,
-        validate_close_listed_agent, validate_delete_worktree, validate_open_directory,
-        validate_pick_project, validate_pick_session, validate_remove_project,
+        PickProjectError, PickSessionError, RemoveProjectError, SendToAgentError,
+        validate_add_directory, validate_close_listed_agent, validate_delete_worktree,
+        validate_open_directory, validate_pick_project, validate_pick_session,
+        validate_remove_project, validate_send_to_agent,
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
@@ -383,6 +458,25 @@ mod tests {
         let names = names.iter().map(|name| (*name).to_owned()).collect();
         picker.show_directories(Path::new(HOME), names);
         picker
+    }
+
+    #[rstest::rstest]
+    fn send_to_agent_with_nothing_shown_is_refused() {
+        // Given the keys in a pane with no session shown.
+        let state = AppState {
+            focus: Focus::Pane,
+            ..AppState::default()
+        };
+
+        // When validating `<C-g> y`.
+        let result = validate_send_to_agent(&state);
+
+        // Then it is refused: there's no pane to send from.
+        assert_eq!(
+            result,
+            Err(SendToAgentError::NothingShown),
+            "sending needs a shown pane"
+        );
     }
 
     #[rstest::rstest]

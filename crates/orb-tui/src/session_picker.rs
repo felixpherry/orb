@@ -3,7 +3,8 @@
 //! preview box, side by side from 120 columns and stacked below that.
 //!
 //! The list box is titled `Sessions`, followed by the active filter
-//! (`Sessions · blocked`) unless it shows all. Its input row holds the typed text and how many sessions are shown
+//! (`Sessions · blocked`) unless it shows all; the `<C-g> y` list, drawn the
+//! same way, is titled `Send to`. Its input row holds the typed text and how many sessions are shown
 //! out of those listed, over an orange rule. Each row is one agent running in
 //! a session's pane: the agent's status icon, its dim `<project>/` and bright
 //! `<session>/<agent>`, and how long the agent has worked or since its last
@@ -135,8 +136,11 @@ pub(crate) fn boxed(title: Option<Line<'static>>) -> Block<'static> {
 
 /// ` Sessions `, or ` Colonists ` in the Colonists picker, then
 /// ` · <filter>` unless the filter is all, then ` · colonists` while
-/// colonists' agents are shown.
+/// colonists' agents are shown; ` Send to ` in the `<C-g> y` list.
 fn title(kind: &PickerKind) -> Line<'static> {
+    if let PickerKind::SendTo { .. } = kind {
+        return Line::from(span(" Send to ", BLUE));
+    }
     let (filter, colonists, scope) = match kind {
         PickerKind::Sessions {
             filter,
@@ -1433,6 +1437,47 @@ mod tests {
 
         // Then the hints name the filters and close, but not `c`.
         let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · d close · ⏎ open · Esc close";
+        assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
+    }
+
+    /// The `<C-g> y` list from pane 9 over `sessions`' agents.
+    fn send_to_picker(sessions: &Sessions) -> PickerState {
+        PickerState::send_to(
+            session_items(
+                sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+                true,
+                None,
+            ),
+            PaneId(9),
+            Focus::Pane,
+        )
+    }
+
+    #[rstest::rstest]
+    fn send_to_list_is_titled_send_to() {
+        // Given the `<C-g> y` list.
+        let sessions = two();
+
+        // When drawing it.
+        let (buf, _) = draw(&send_to_picker(&sessions), &sessions, 140, 30);
+
+        // Then the title row is ` Send to `.
+        let title = line_of(&buf, "Send to");
+        assert!(title.contains(" Send to "), "title row was {title}");
+    }
+
+    #[rstest::rstest]
+    fn send_to_hints_leave_out_the_filter_keys() {
+        // Given the `<C-g> y` list.
+        let sessions = two();
+
+        // When drawing it.
+        let (buf, _) = draw(&send_to_picker(&sessions), &sessions, 140, 30);
+
+        // Then the hints name rows, search, send and close only.
+        let expected = "↑↓/j/k rows · / search · ⏎ send · Esc close";
         assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
     }
 

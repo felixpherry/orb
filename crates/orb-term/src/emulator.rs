@@ -617,11 +617,16 @@ impl Emulator {
         }
     }
 
-    /// Ends the selection, which stays highlighted, and returns its text:
-    /// lines joined by `\n`, no newline at the end. `None` when nothing is
-    /// selected.
+    /// Ends the selection, which stays highlighted, and returns its text
+    /// (see [`Emulator::selected_text`]).
     pub(crate) fn select_finish(&mut self) -> Option<String> {
         self.edge_scrolled = None;
+        self.selected_text()
+    }
+
+    /// The selection's text, which stays highlighted: lines joined by `\n`,
+    /// no newline at the end. `None` when nothing is selected.
+    pub(crate) fn selected_text(&self) -> Option<String> {
         let text = self.term.selection_to_string()?;
         let text = text.trim_end_matches('\n');
         (!text.is_empty()).then(|| text.to_owned())
@@ -1441,6 +1446,24 @@ mod tests {
         assert!(
             !reversed(&emulator, 0..3, 0),
             "the press should replace the selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_text_reads_the_selection_and_leaves_it() {
+        // Given a selection over `one`.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"one");
+        drag(&mut emulator, (0, 0), (3, 0));
+
+        // When reading the selected text.
+        let text = emulator.selected_text();
+
+        // Then it is `one`, still highlighted.
+        assert_eq!(
+            (text.as_deref(), reversed(&emulator, 0..3, 0)),
+            (Some("one"), true),
+            "reading the selection should leave it drawn"
         );
     }
 

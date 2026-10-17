@@ -16,9 +16,10 @@ use crate::feat::picker::state::{
     PickTarget, PickerKind, PickerState, SessionFilter, session_items, worktree_items,
 };
 use crate::feat::picker::validator::{
-    DeleteWorktreeError, validate_add_directory, validate_close_listed_agent,
+    DeleteWorktreeError, SendToPickError, validate_add_directory, validate_close_listed_agent,
     validate_delete_worktree, validate_open_colonists, validate_open_directory,
-    validate_pick_project, validate_pick_session, validate_remove_project,
+    validate_pick_project, validate_pick_session, validate_remove_project, validate_send_to_agent,
+    validate_send_to_pick,
 };
 use crate::feat::sessions::intent::new_session;
 use crate::feat::sessions::intent::{
@@ -114,6 +115,27 @@ pub(crate) fn open_colonists(state: &mut AppState) -> Vec<Command> {
     );
     let picker = PickerState::colonists(items, colony, state.focus).recall(&memory);
     open_picker(state, picker);
+    preview_command(state)
+}
+
+/// Opens the `Send to` list from the focused pane over every unsettled
+/// agent but the pane's own, colonists' included, with nothing typed and
+/// without the session picker's memory, loading the selected row's preview.
+pub(crate) fn open_send_to(state: &mut AppState) -> Vec<Command> {
+    let Ok(from) = validate_send_to_agent(state) else {
+        return vec![];
+    };
+    let items = session_items(
+        &state.sessions,
+        &state.layouts,
+        SessionFilter::All,
+        true,
+        None,
+    )
+    .into_iter()
+    .filter(|item| !matches!(item, PickerItem::Session { pane, .. } if *pane == from))
+    .collect();
+    open_picker(state, PickerState::send_to(items, from, state.focus));
     preview_command(state)
 }
 
@@ -578,6 +600,7 @@ fn confirm(state: &mut AppState) -> Vec<Command> {
                 _ => vec![],
             }
         }
+        Some(&PickerKind::SendTo { from }) => send_to_picked(state, from),
         Some(PickerKind::Worktrees) => vec![],
         Some(PickerKind::DeleteWorktree { .. }) => leave_delete_worktree(state),
         Some(PickerKind::Directories { world: true, .. }) => pick_world_root(state),
@@ -845,6 +868,32 @@ fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Com
     let mut commands = pick(state, from, agent, agent);
     commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
     commands
+}
+
+/// `⏎` in the `Send to` list: closes it, jumps into the picked agent's pane
+/// as the session picker does, then has the loop paste pane `from`'s text
+/// into it. An agent waiting for an approval or an answer is refused on the
+/// mode line, by name, and the list stays open.
+fn send_to_picked(state: &mut AppState, from: PaneId) -> Vec<Command> {
+    match validate_send_to_pick(state) {
+        Ok((session, pane)) => {
+            close_picker(state);
+            let mut commands = pick_agent(state, session, pane);
+            commands.push(Command::SendText { from, to: pane });
+            commands
+        }
+        Err(SendToPickError::Blocked { approval }) => {
+            if let Some((_, pane)) = state.picker.as_ref().and_then(PickerState::selected_agent) {
+                let name = state
+                    .layouts
+                    .agent_name(pane, state.sessions.agent_in(pane));
+                let wait = if approval { "approval" } else { "an answer" };
+                state.sessions.error = Some(format!("{name} is waiting for {wait}"));
+            }
+            vec![]
+        }
+        Err(SendToPickError::NoSelection | SendToPickError::Gone) => vec![],
+    }
 }
 
 /// Closes agent pane `pane` of `session`, answered `Yes` in its confirm:

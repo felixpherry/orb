@@ -415,6 +415,7 @@ l -> Unfold: open
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-g> w -> ChangeWorkspace: session's worktree
+<C-g> y -> SendToAgent: send to agent
 
 ## pane of an Incognito session
 <C-g> +<leader>
@@ -458,6 +459,7 @@ l -> Unfold: open
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
+<C-g> y -> SendToAgent: send to agent
 
 ## pane of a colony
 <C-g> +<leader>
@@ -502,6 +504,7 @@ l -> Unfold: open
 <C-g> t n -> NewTab: new tab
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
+<C-g> y -> SendToAgent: send to agent
 
 ## pane with nothing shown
 <C-g> +<leader>
@@ -547,3 +550,4 @@ l -> Unfold: open
 <C-g> t r -> RenameTab: rename tab
 <C-g> t x -> CloseTab: close tab
 <C-g> w -> ChangeWorkspace: session's worktree
+<C-g> y -> SendToAgent: send to agent
