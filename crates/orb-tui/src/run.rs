@@ -949,7 +949,7 @@ impl App {
     }
 
     /// Writes pane `pane`'s history, as plain text, to its file under the
-    /// history folder, and asks for a float of `session` whose shell opens
+    /// history folder, and asks for a new tab of `session` whose shell opens
     /// that file in `$EDITOR`, else `less` (see [`history_line`]). A pane
     /// without a client does nothing; a file that can't be written shows why
     /// and is logged.
@@ -958,7 +958,7 @@ impl App {
             return;
         };
         match write_history(&self.history_dir, pane, &text) {
-            Ok(path) => self.execute(&Command::Sessions(SessionsCommand::AddHistoryFloat {
+            Ok(path) => self.execute(&Command::Sessions(SessionsCommand::AddHistoryTab {
                 session,
                 line: history_line(&path),
             })),

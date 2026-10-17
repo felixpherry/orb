@@ -26,7 +26,7 @@ pub enum Command {
     Detach,
     /// Write Ctrl g to the focused pane.
     SendCtrlG,
-    /// Write pane `pane`'s history to a file and open it in a float of
+    /// Write pane `pane`'s history to a file and open it in a new tab of
     /// `session` running `$EDITOR`, else `less`.
     OpenHistory { session: SessionId, pane: PaneId },
     /// Paste pane `from`'s highlighted selection, else its screen, into
@@ -65,9 +65,9 @@ pub enum SessionsCommand {
     StackPane(SessionId),
     /// Open a tab of one new pane in `session`.
     NewTab(SessionId),
-    /// Open a float on top of `session`'s floats, showing them, whose fresh
-    /// shell runs `line`.
-    AddHistoryFloat { session: SessionId, line: String },
+    /// Open a tab right after `session`'s shown tab, and show it, whose
+    /// fresh shell runs `line`; closing it shows that tab again.
+    AddHistoryTab { session: SessionId, line: String },
     /// Open a tab in `session` whose fresh shell resumes `agent`'s
     /// conversation, and show it.
     ResumeAgent { session: SessionId, agent: AgentId },

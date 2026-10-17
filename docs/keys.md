@@ -94,7 +94,7 @@ orb keeps its own files under `~/.orb/`: saved state in `userdata/state.sqlite`,
 | `<C-g> p d/r/s/f/x/c` | Pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> p w/e/i` | Floats: show / hide, pane to float or float to tab, pin a float |
 | `<C-g> r` / `<C-g> m` | Resize mode / move mode for the focused pane (`h/j/k/l` or arrows; `Esc` leaves) |
-| `<C-g> [` | Open the pane's history in `$EDITOR` (else `less`) in a float; quitting closes it (in a pane) |
+| `<C-g> [` | Open the pane's history in `$EDITOR` (else `less`) in a new tab; quitting closes it (in a pane) |
 | `<C-g> y` | Paste the pane's selection, or its screen, into a picked agent's prompt and go there (in a pane) |
 | `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the pane out to a new tab (in a pane), go to N |
 | `<C-g> Space` | Session picker |

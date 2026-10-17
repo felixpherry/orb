@@ -34,7 +34,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 - **`handle` is a single match, then four steps every intent shares.** Each arm is one call into that feature's `intent.rs`; only quitting keeps a small function beside the match (intent_handler.rs:214). After the match, `handle` records a focus move as a jump (intent_handler.rs:156), marks an agent pane the keys entered as seen through the sessions feature (:158), reveals the cursor (:159), and puts the cursor on the active row when the keys leave a pane (:160-174).
 - **Shared ids sit in one module.** Agent, session, pane and project ids are in crates/orb-domain/src/ids.rs.
 - **Real work always leaves as a command.** Starting, settling or searching never happens inside the handler.
-- **The loop runs a few commands itself.** Attaching and detaching panes, passing Ctrl-g to the attached pane, writing a pane's history for its editor float (`OpenHistory`), pasting one pane's text into another (`SendText`), and quick reads such as a branch or folder list for a picker, the key list's keys (`ListKeys`) or the session picker's preview.
+- **The loop runs a few commands itself.** Attaching and detaching panes, passing Ctrl-g to the attached pane, writing a pane's history for its editor tab (`OpenHistory`), pasting one pane's text into another (`SendText`), and quick reads such as a branch or folder list for a picker, the key list's keys (`ListKeys`) or the session picker's preview.
 - **Every other command belongs to exactly one actor.** It is a variant of `SessionsCommand` (command.rs:54), `WorktreesCommand` (command.rs:169) or `SearchCommand` (command.rs:178), and the loop sends it straight to that actor with one `tell`. Nothing sits in between.
 
 ## Actors

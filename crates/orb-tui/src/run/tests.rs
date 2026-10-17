@@ -2928,7 +2928,7 @@ fn open_history_line_opens_the_editor_at_the_bottom() {
     // Given a history file whose path has a space and a quote.
     let path = Path::new("/home/me/it's here/pane-1.txt");
 
-    // When making the line its float's shell runs.
+    // When making the line its tab's shell runs.
     let line = history_line(path);
 
     // Then it runs `$EDITOR`, else `less`, at the bottom, removes the file

@@ -1072,6 +1072,55 @@ fn new_tab_is_appended_and_shown() {
 }
 
 #[rstest::rstest]
+fn new_tab_after_shown_goes_right_after_the_shown_tab_and_shows_it() {
+    // Given three tabs, the first shown.
+    let mut layouts = three_tabs();
+
+    // When opening a tab of pane 20 after the shown one.
+    layouts.new_tab_after_shown(OWNER, entry(20));
+
+    // Then it is the second of four tabs, shown, focused on pane 20.
+    assert_eq!(
+        (tab_count(&layouts), active(&layouts), focused(&layouts)),
+        (4, Some(1), Some(PaneId(20))),
+        "the new tab should sit right after the tab it was opened from"
+    );
+}
+
+#[rstest::rstest]
+fn closing_a_tab_opened_after_the_shown_one_shows_that_tab_again() {
+    // Given three tabs, the first shown, and a tab of pane 20 opened after it.
+    let mut layouts = three_tabs();
+    layouts.new_tab_after_shown(OWNER, entry(20));
+
+    // When pane 20 closes.
+    layouts.close_pane(PaneId(20));
+
+    // Then the first tab is shown again.
+    assert_eq!(
+        (tab_count(&layouts), focused(&layouts)),
+        (3, Some(PaneId(7))),
+        "closing it should go back to the tab it was opened from"
+    );
+}
+
+#[rstest::rstest]
+fn new_tab_after_shown_from_a_float_gives_the_new_tab_the_keys() {
+    // Given a shown float with the keys over pane 7.
+    let mut layouts = with_float();
+
+    // When opening a tab of pane 21 after the shown one.
+    layouts.new_tab_after_shown(OWNER, entry(21));
+
+    // Then pane 21 has the keys, not the float.
+    assert_eq!(
+        focused(&layouts),
+        Some(PaneId(21)),
+        "the new tab should not open under the floats"
+    );
+}
+
+#[rstest::rstest]
 fn go_to_tab_past_the_last_changes_nothing() {
     // Given three tabs, the first shown.
     let mut layouts = three_tabs();

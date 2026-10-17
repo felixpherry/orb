@@ -2933,13 +2933,13 @@ fn resume_agent_for_an_unknown_agent_adds_no_pane() -> Result<(), Report<StoreEr
     Ok(())
 }
 
-/// The line a history float's shell runs in the tests below.
+/// The line a history tab's shell runs in the tests below.
 const HISTORY_LINE: &str = "exec less +G /tmp/pane-1.txt";
 
 #[rstest::rstest]
 #[tokio::test]
-async fn add_history_float_puts_a_shown_float_on_top_whose_pane_runs_the_line()
--> Result<(), Report<StoreError>> {
+async fn add_history_tab_shows_a_new_tab_whose_pane_runs_the_line() -> Result<(), Report<StoreError>>
+{
     // Given agent aa's one-pane session and the actor started through its
     // mailbox.
     let store = Store::open_in_memory()?;
@@ -2947,35 +2947,37 @@ async fn add_history_float_puts_a_shown_float_on_top_whose_pane_runs_the_line()
     let zmx = zmx_running(&store);
     let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
 
-    // When asking for a history float there.
+    // When asking for a history tab there.
     ask_within(
         &actor,
-        SessionsCommand::AddHistoryFloat {
+        SessionsCommand::AddHistoryTab {
             session: inserted.session,
             line: HISTORY_LINE.to_owned(),
         },
     )
     .await?;
 
-    // Then a float has the keys, shown, and its shell runs the line.
-    let float = {
+    // Then a second tab is shown, and its pane has the keys and runs the
+    // line.
+    let shown = {
         let app = state.read();
         app.layouts.get(inserted.session).and_then(|layout| {
-            let pane = layout.focused().filter(|_| layout.float_focused())?;
-            app.layouts.entry(pane).map(|entry| entry.resume.clone())
+            let pane = layout.focused().filter(|_| !layout.float_focused())?;
+            let line = app.layouts.entry(pane)?.resume.clone();
+            Some((layout.tabs().len(), layout.active(), line))
         })
     };
     assert_eq!(
-        float,
-        Some(Some(HISTORY_LINE.to_owned())),
-        "the history float should be shown on top, running the line"
+        shown,
+        Some((2, 1, Some(HISTORY_LINE.to_owned()))),
+        "the history should open in a new shown tab, running the line"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn add_history_float_saves_no_resume_line() -> Result<(), Report<StoreError>> {
+async fn add_history_tab_saves_no_resume_line() -> Result<(), Report<StoreError>> {
     // Given a store file with agent aa's one-pane session and the actor
     // started through its mailbox.
     let dir = tempfile::tempdir().change_context(StoreError)?;
@@ -2985,19 +2987,19 @@ async fn add_history_float_saves_no_resume_line() -> Result<(), Report<StoreErro
     let zmx = zmx_running(&store);
     let (actor, state) = spawned(store, &listing(Vec::new()), zmx).await?;
 
-    // When asking for a history float there.
+    // When asking for a history tab there.
     ask_within(
         &actor,
-        SessionsCommand::AddHistoryFloat {
+        SessionsCommand::AddHistoryTab {
             session: inserted.session,
             line: HISTORY_LINE.to_owned(),
         },
     )
     .await?;
 
-    // Then the float's saved pane row has no resume line, so a restart
+    // Then the tab's saved pane row has no resume line, so a restart
     // never runs it again.
-    let float = state
+    let tab = state
         .read()
         .layouts
         .get(inserted.session)
@@ -3006,7 +3008,7 @@ async fn add_history_float_saves_no_resume_line() -> Result<(), Report<StoreErro
         .layouts()?
         .panes
         .into_iter()
-        .find(|row| Some(row.id) == float)
+        .find(|row| Some(row.id) == tab)
         .map(|row| row.resume);
     assert_eq!(saved, Some(None), "the history line lives in memory only");
     Ok(())

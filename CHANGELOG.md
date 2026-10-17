@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The session, Colonists and search pickers keep their filter and typed text until orb quits.
 - When typed text in the session picker matches only settled agents, the empty list says how many (`N settled matches · s to show`).
 - A pane with no name and no agent title is called by the title its program sets (htop, vim, your shell's prompt) instead of `shell`.
-- `<C-g> [` in a pane opens its history as plain text in a float running `$EDITOR`, else `less`, at the bottom in vi, vim, nvim and less; quitting the editor closes the float.
+- `<C-g> [` in a pane opens its history as plain text in a new tab running `$EDITOR`, else `less`, at the bottom in vi, vim, nvim and less; quitting the editor closes the tab and goes back to the tab it was opened from.
 - `<C-g> y` in a pane lists the other agents of unsettled sessions; picking one pastes the pane's selection, else its screen, into that agent's prompt without sending it, and moves you there. An agent waiting for approval or an answer is refused.
 - `<C-g> ?`, and `?` in the sidebar, list every key that works where you are, Alt and jump keys included; typing filters the list.
 - `<C-g> a` takes you to the next agent that needs you: waiting for approval, then for input, then a finished chat you haven't read, longest waiting first. Press it again for the next one. It reaches agents the project filter hides, and says `No agent needs you` when nobody does.

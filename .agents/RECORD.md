@@ -331,7 +331,7 @@ Entries are added or amended **only with human approval**.
 - (layout) While a float has the keys, the tab bar's layout name shows the float layout instead of the tab's.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
-- (keybinds) `<C-g> [` in a pane opens that pane's history, as plain text, in a floating pane running `$EDITOR`, else `less`, and the float closes when the editor quits.
+- (keybinds) `<C-g> [` in a pane opens that pane's history, as plain text, in a new tab right after the shown one, running `$EDITOR`, else `less`; the floats hide so the tab has the keys. When the editor quits the tab closes and the tab it was opened from shows again.
 - (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell, the card is folded or the card is a one-agent colonist, and it follows every focus change inside the session.
 - (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.

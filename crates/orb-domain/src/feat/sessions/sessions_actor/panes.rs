@@ -5,10 +5,11 @@ use super::*;
 impl SessionsActor {
     /// Adds a shell pane in `session`'s directory where `placement` says: in
     /// the shown tab re-tiled by pane count unless it was changed by hand,
-    /// splitting the focused pane, in a new tab, or as a float. A session with no layout
-    /// (its last pane closed) gets a first tab of that shell from
-    /// [`Placement::Tab`] and is reported ready to open once it's saved; the other
-    /// placements do nothing there. `line`, if any, is typed into the new
+    /// splitting the focused pane, in a new tab at the end or right after the
+    /// shown one, or as a float. A session with no layout (its last pane
+    /// closed) gets a first tab of that shell from [`Placement::Tab`] and is
+    /// reported ready to open once it's saved; the other placements do
+    /// nothing there. `line`, if any, is typed into the new
     /// shell once it first prints; it's kept in memory only, so a restart
     /// never types it again. Then saves the layout. A pane that can't be
     /// saved shows why.
@@ -40,6 +41,7 @@ impl SessionsActor {
                 Placement::Stack => app.layouts.stack(session, entry),
                 Placement::Tab if first => app.layouts.insert(session, SessionLayout::of(entry)),
                 Placement::Tab => app.layouts.new_tab(session, entry),
+                Placement::TabAfterShown => app.layouts.new_tab_after_shown(session, entry),
                 Placement::Float => app.layouts.add_float(session, entry),
             }
         }

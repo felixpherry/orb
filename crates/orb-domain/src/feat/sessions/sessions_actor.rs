@@ -500,8 +500,8 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::AddFloat(session) => self.add_pane(session, Placement::Float, None),
             SessionsCommand::StackPane(session) => self.add_pane(session, Placement::Stack, None),
             SessionsCommand::NewTab(session) => self.add_pane(session, Placement::Tab, None),
-            SessionsCommand::AddHistoryFloat { session, line } => {
-                self.add_pane(session, Placement::Float, Some(line));
+            SessionsCommand::AddHistoryTab { session, line } => {
+                self.add_pane(session, Placement::TabAfterShown, Some(line));
             }
             SessionsCommand::ResumeAgent { session, agent } => self.resume_agent(session, agent),
             SessionsCommand::SaveLayout(session) => self.save_layout(session),
@@ -743,8 +743,10 @@ enum Placement {
     Split(Split),
     /// Stacked with the shown tab's focused pane.
     Stack,
-    /// In a new tab, or the first tab of a session without a layout.
+    /// In a new tab at the end, or the first tab of a session without a layout.
     Tab,
+    /// In a new tab right after the shown one, over hidden floats.
+    TabAfterShown,
     /// On top of the session's floats, which are shown.
     Float,
 }

@@ -722,6 +722,18 @@ impl Layouts {
         }
     }
 
+    /// Puts a tab of the one pane `pane` right after the shown tab, shows it
+    /// and hides the floats (pinned ones stay drawn), so `pane` has the keys.
+    /// Closing it shows the tab it was opened from again.
+    pub fn new_tab_after_shown(&mut self, owner: SessionId, pane: PaneEntry) {
+        if let Some(layout) = self.sessions.get_mut(&owner) {
+            layout.active = (layout.active + 1).min(layout.tabs.len());
+            layout.tabs.insert(layout.active, Tab::new(pane.id));
+            layout.floats.hide();
+            layout.panes.insert(pane.id, pane);
+        }
+    }
+
     /// Puts `pane` on top of `owner`'s floats in the staggered spot and shows them.
     pub fn add_float(&mut self, owner: SessionId, pane: PaneEntry) {
         let body = self.body;

@@ -116,8 +116,8 @@ pub enum Intent {
     /// Send Ctrl g to the focused pane's program (`<C-g> <C-g>`, since
     /// `<C-g>` alone is orb's leader).
     SendCtrlG,
-    /// Open the focused pane's history, as plain text, in a float running
-    /// `$EDITOR`, else `less`; quitting it closes the float. Only while the
+    /// Open the focused pane's history, as plain text, in a new tab running
+    /// `$EDITOR`, else `less`; quitting it closes the tab. Only while the
     /// keys are in a pane.
     OpenHistory,
     /// Open the `Send to` list of every unsettled agent but the focused

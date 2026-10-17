@@ -84,7 +84,7 @@ pub(crate) fn send_ctrl_g(state: &mut AppState) -> Vec<Command> {
     }
 }
 
-/// Asks the loop to open the focused pane's history in a float.
+/// Asks the loop to open the focused pane's history in a new tab.
 pub(crate) fn open_history(state: &mut AppState) -> Vec<Command> {
     match validate_open_history(state) {
         Ok((session, pane)) => vec![Command::OpenHistory { session, pane }],
