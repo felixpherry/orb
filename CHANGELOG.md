@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - pi's copy of orb's skills moves from `~/.pi/agent/skills` to `~/.agents/skills`; the install removes the old copy.
 - Clearer which-key labels: `<C-g> e` toggle sidebar, `<C-g> h` go to sidebar, `<C-g> l` go to panes, `<C-g> t 1`–`9` tab 1–9, `<C-g> w` session's worktree, `<C-g> W` all worktrees.
 
+### Fixed
+
+- On macOS, `orb agent wait` and `orb agent prompt --wait` stop once the caller hangs up, even when it hangs up right after asking. Before, such a wait ran to its timeout.
+
 ## [0.1.0] - 2026-10-16
 
 The first release.
