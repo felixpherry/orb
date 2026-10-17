@@ -4,12 +4,13 @@
 use std::time::SystemTime;
 
 use super::board::{Board, RowKey};
+use super::links;
 use super::state::PlateItem;
 use super::validator::{GoError, GoTarget, SESSION_GONE, go_target};
 use super::view::{PlatePrefix, PlateUndo};
 use crate::command::SessionsCommand;
 use crate::feat::picker::intent::{pick, pick_agent, pick_session};
-use crate::ids::PlateItemId;
+use crate::ids::{PaneId, PlateItemId, SessionId};
 use crate::{AppState, Command, Focus};
 
 /// A key the plate takes while it has the keys.
@@ -43,6 +44,8 @@ pub enum PlateKey {
     Leader,
     /// `o`, which acts only after `<C-g>`.
     O,
+    /// `1`–`9`: open that link of the selected item.
+    Link(usize),
     /// Any other key: it ends a sequence and does nothing.
     Other,
 }
@@ -67,16 +70,18 @@ pub(crate) fn open(state: &mut AppState) -> Vec<Command> {
 }
 
 /// A key inside the plate at `now`. A pending `g` or `<C-g>` is taken
-/// first: `g` then `g` selects the first row, `<C-g>` then `o` closes, and
-/// anything else after either only ends it. Without one: the moves, `⏎`,
-/// `x`, `p`, `u`, `z`, `Esc`, and `g` / `<C-g>` starting a sequence.
-/// Nothing happens unless the plate has the keys.
+/// first: `g` then `g` selects the first row, `g` then `x` opens the
+/// selected item's first link, `<C-g>` then `o` closes, and anything else
+/// after either only ends it. Without one: the moves, `⏎`, `x`, `p`, `u`,
+/// `z`, `Esc`, a digit opening that link, and `g` / `<C-g>` starting a
+/// sequence. Nothing happens unless the plate has the keys.
 pub(crate) fn key(state: &mut AppState, key: PlateKey, now: SystemTime) -> Vec<Command> {
     if state.focus != Focus::Plate {
         return vec![];
     }
     match (state.plate.view_mut().pending.take(), key) {
         (Some(PlatePrefix::G), PlateKey::G) => select(state, now, Pick::First),
+        (Some(PlatePrefix::G), PlateKey::Done) => return links::open_link(state, now, 1),
         (Some(PlatePrefix::Leader), PlateKey::O) | (None, PlateKey::Close) => return close(state),
         (None, PlateKey::Next) => select(state, now, Pick::Down(1)),
         (None, PlateKey::Prev) => select(state, now, Pick::Up(1)),
@@ -90,6 +95,7 @@ pub(crate) fn key(state: &mut AppState, key: PlateKey, now: SystemTime) -> Vec<C
         (None, PlateKey::Done) => return change(state, now, PlateItem::finished),
         (None, PlateKey::Park) => return change(state, now, PlateItem::parked_or_back),
         (None, PlateKey::Undo) => return undo(state, now),
+        (None, PlateKey::Link(n)) => return links::open_link(state, now, n),
         (Some(_), _) | (None, PlateKey::O | PlateKey::Other) => {}
     }
     vec![]
@@ -177,24 +183,34 @@ fn go(state: &mut AppState, now: SystemTime) -> Vec<Command> {
             return vec![];
         }
     };
+    give_back(state);
+    match target {
+        GoTarget::Agent { session, pane } => pick_agent(state, session, pane),
+        GoTarget::Shell { session, pane } => enter_pane(state, session, pane),
+        GoTarget::Session(session) => pick_session(state, session),
+    }
+}
+
+/// Hands the keys back to where they came into the plate from: the pane
+/// while a session is shown, else the sidebar.
+pub(super) fn give_back(state: &mut AppState) {
     let view = state.plate.view_mut();
     view.pending = None;
     state.focus = match (view.back, state.shown_session()) {
         (Focus::Pane, Some(_)) => Focus::Pane,
         _ => Focus::Sidebar,
     };
-    match target {
-        GoTarget::Agent { session, pane } => pick_agent(state, session, pane),
-        GoTarget::Shell { session, pane } => {
-            let from = state.jump_from();
-            state.layouts.reveal(session, pane);
-            let row = state.entry_row(session);
-            let mut commands = pick(state, from, row, row);
-            commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
-            commands
-        }
-        GoTarget::Session(session) => pick_session(state, session),
-    }
+}
+
+/// Shows pane `pane` of `session` in its tab and enters the session with
+/// the keys in it, as ⏎ on its card does with that pane focused.
+pub(super) fn enter_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
+    let from = state.jump_from();
+    state.layouts.reveal(session, pane);
+    let row = state.entry_row(session);
+    let mut commands = pick(state, from, row, row);
+    commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
+    commands
 }
 
 /// `x` or `p`: makes `change` at `now` to the selected item, keeping how it
@@ -1061,7 +1077,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn x_right_after_g_leaves_the_item_open() {
+    fn gx_never_closes_the_item() {
         // Given item 1 in Your move, selected.
         let mut state = your_move(1);
 
@@ -1072,7 +1088,7 @@ mod tests {
         assert_eq!(
             (commands, state_of(&state, 1)),
             (vec![], Some(ItemState::YourMove)),
-            "x after g should only end the g"
+            "gx opens a link; it never marks the item done"
         );
     }
 

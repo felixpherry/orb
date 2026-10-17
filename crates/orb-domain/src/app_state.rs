@@ -11,7 +11,7 @@ use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::{PickerMemory, PickerState};
-use crate::feat::plate::{Plate, local_midnight};
+use crate::feat::plate::{BrowserTabs, Plate, local_midnight};
 use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Agent, Notice, NoticeKind, Session, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -114,6 +114,10 @@ pub struct AppState {
     /// The user's time zone, which "today" on the plate counts in. Set once
     /// at start-up; nothing writes it after.
     pub zone: LocalZone,
+    /// Each session's terminal-browser tab that plate links open in (see
+    /// [`BrowserTabs`]). Whether terminal-browser is there is set once at
+    /// start-up; the sessions actor, the owner, writes each tab it opens.
+    pub browser_tabs: BrowserTabs,
     /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
     /// its owner; the intent handler also clears `notice` on the next intent.
     pub worktrees: Worktrees,

@@ -12,12 +12,16 @@
 pub(crate) mod api;
 pub mod board;
 pub(crate) mod intent;
+pub(crate) mod links;
+pub mod opener;
 pub mod state;
 pub(crate) mod validator;
 pub mod view;
 
 pub use board::{Board, BoardRow, Group, GroupKind, OrbAsk, RowKey, RowSource, orb_rows};
 pub use intent::PlateKey;
+pub use links::BrowserTabs;
+pub use opener::{LinkOpener, LinkService};
 pub use state::{
     ItemState, Link, LinkKind, NewPlateItem, Plate, PlateChange, PlateItem, PlateRefusal, Verb,
     local_midnight,

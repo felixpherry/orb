@@ -68,6 +68,15 @@ pub enum SessionsCommand {
     /// Open a tab right after `session`'s shown tab, and show it, whose
     /// fresh shell runs `line`; closing it shows that tab again.
     AddHistoryTab { session: SessionId, line: String },
+    /// Open a tab right after `session`'s shown tab, and show it, whose
+    /// fresh shell runs terminal-browser on `url`; that tab becomes the
+    /// session's browser tab.
+    OpenBrowserTab { session: SessionId, url: String },
+    /// Open `url` as a new tab of the terminal-browser in pane `pane`.
+    OpenInBrowser { pane: PaneId, url: String },
+    /// Open `address`, a URL or an absolute path, with the desktop's own
+    /// opener.
+    OpenOutside(String),
     /// Open a tab in `session` whose fresh shell resumes `agent`'s
     /// conversation, and show it.
     ResumeAgent { session: SessionId, agent: AgentId },

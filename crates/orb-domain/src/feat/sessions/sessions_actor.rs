@@ -137,6 +137,7 @@ use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxService, ZmxSession};
 use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
+mod links;
 mod panes;
 mod plate;
 mod poll;
@@ -512,6 +513,9 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::AddHistoryTab { session, line } => {
                 self.add_pane(session, Placement::TabAfterShown, Some(line));
             }
+            SessionsCommand::OpenBrowserTab { session, url } => self.new_browser_tab(session, &url),
+            SessionsCommand::OpenInBrowser { pane, url } => self.open_in_browser(pane, url),
+            SessionsCommand::OpenOutside(address) => self.open_outside(address),
             SessionsCommand::ResumeAgent { session, agent } => self.resume_agent(session, agent),
             SessionsCommand::SaveLayout(session) => self.save_layout(session),
             SessionsCommand::NewSession {

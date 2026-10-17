@@ -30,6 +30,7 @@ use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::notify::none::NoneNotifier;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::{SoundError, SoundPlayer, SoundService};
+use orb_domain::feat::plate::LinkService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
@@ -1446,6 +1447,7 @@ fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Resul
                     Log::default(),
                 ),
                 log: Log::default(),
+                links: LinkService::none(),
             },
             state: State::default(),
             store,

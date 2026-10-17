@@ -658,6 +658,10 @@ pub(crate) fn plate_route(key: KeyEvent) -> Intent {
         (KeyCode::Char('z'), KeyModifiers::NONE) => PlateKey::ToggleDone,
         (KeyCode::Esc, KeyModifiers::NONE) => PlateKey::Close,
         (KeyCode::Char('o'), KeyModifiers::NONE) => PlateKey::O,
+        (KeyCode::Char(digit @ '1'..='9'), KeyModifiers::NONE) => digit
+            .to_digit(10)
+            .and_then(|n| usize::try_from(n).ok())
+            .map_or(PlateKey::Other, PlateKey::Link),
         _ => PlateKey::Other,
     };
     Intent::Plate(pressed)
@@ -2718,6 +2722,8 @@ mod tests {
     #[case::esc(key(KeyCode::Esc), PlateKey::Close)]
     #[case::leader(LEADER, PlateKey::Leader)]
     #[case::o(key(KeyCode::Char('o')), PlateKey::O)]
+    #[case::one(key(KeyCode::Char('1')), PlateKey::Link(1))]
+    #[case::nine(key(KeyCode::Char('9')), PlateKey::Link(9))]
     fn plate_route_maps_each_key(#[case] pressed: KeyEvent, #[case] expected: PlateKey) {
         // Given the plate with the keys.
 
@@ -2735,7 +2741,7 @@ mod tests {
     #[rstest::rstest]
     #[case::q(key(KeyCode::Char('q')))]
     #[case::alt_h(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT))]
-    #[case::digit(key(KeyCode::Char('1')))]
+    #[case::zero(key(KeyCode::Char('0')))]
     #[case::question(key(KeyCode::Char('?')))]
     fn plate_route_makes_every_other_key_do_nothing(#[case] pressed: KeyEvent) {
         // Given the plate with the keys.

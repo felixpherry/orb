@@ -8,6 +8,7 @@ use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use ratatui::layout::Rect;
 
+use super::links::LinkJob;
 use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
@@ -31,7 +32,11 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
 use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
-use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, PlateRefusal, Verb};
+use crate::feat::plate::links::browser_line;
+use crate::feat::plate::opener::fake::{FakeLinks, LinkCall};
+use crate::feat::plate::{
+    ItemState, LinkService, NewPlateItem, PlateChange, PlateItem, PlateRefusal, Verb,
+};
 use crate::feat::sessions::state::{
     Agent, AgentStatus, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session, SessionKind,
     SidebarItem,
@@ -665,6 +670,7 @@ fn start_in(
             git: GitService::new(git.clone(), Log::default()),
             zmx,
             log: Log::default(),
+            links: LinkService::none(),
         },
         state: state.clone(),
         store,
@@ -703,6 +709,7 @@ fn deps_beside(
             git: GitService::new(git, Log::default()),
             zmx,
             log: Log::default(),
+            links: LinkService::none(),
         },
         state: state.clone(),
         store,
@@ -3385,6 +3392,175 @@ async fn add_history_tab_saves_no_resume_line() -> Result<(), Report<StoreError>
         .find(|row| Some(row.id) == tab)
         .map(|row| row.resume);
     assert_eq!(saved, Some(None), "the history line lives in memory only");
+    Ok(())
+}
+
+/// The link the browser tab tests below open.
+const LINK_URL: &str = "https://example.com/a";
+
+#[rstest::rstest]
+fn open_browser_tab_shows_a_new_tab_running_terminal_browser() -> Result<(), Report<StoreError>> {
+    // Given agent aa's one-pane session.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(Vec::new());
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When opening a browser tab there on a link.
+    actor.new_browser_tab(inserted.session, LINK_URL);
+
+    // Then a second tab is shown whose pane runs terminal-browser on it.
+    let shown = {
+        let app = state.read();
+        app.layouts.get(inserted.session).and_then(|layout| {
+            let pane = layout.focused()?;
+            let line = app.layouts.entry(pane)?.resume.clone();
+            Some((layout.tabs().len(), layout.active(), line))
+        })
+    };
+    assert_eq!(
+        shown,
+        Some((2, 1, Some(browser_line(LINK_URL)))),
+        "the link should open in a new shown tab running terminal-browser"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn open_browser_tab_remembers_its_pane_as_the_sessions_browser_tab()
+-> Result<(), Report<StoreError>> {
+    // Given agent aa's one-pane session.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(Vec::new());
+    let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+    // When opening a browser tab there on a link.
+    actor.new_browser_tab(inserted.session, LINK_URL);
+
+    // Then the new tab's pane is the session's browser tab.
+    let (remembered, shown) = {
+        let app = state.read();
+        let shown = app
+            .layouts
+            .get(inserted.session)
+            .and_then(SessionLayout::focused);
+        (app.browser_tabs.pane(inserted.session, &app.layouts), shown)
+    };
+    assert!(
+        remembered.is_some() && remembered == shown && shown != Some(inserted.pane),
+        "the new tab should be remembered for later links, got {remembered:?} for {shown:?}"
+    );
+    Ok(())
+}
+
+/// Starts the actor over agent aa's one-pane session with `links` as its
+/// opener.
+fn with_links(links: &Arc<FakeLinks>) -> Result<SessionsActor, Report<StoreError>> {
+    let store = Store::open_in_memory()?;
+    insert_agent(&store, "aa")?;
+    let host = listing(Vec::new());
+    let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    actor.services.links = LinkService::new(links.clone());
+    Ok(actor)
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn open_in_browser_asks_the_opener_for_a_tab_in_that_pane() -> Result<(), Report<StoreError>>
+{
+    // Given the actor with a recording opener.
+    let links = Arc::new(FakeLinks::default());
+    let actor = with_links(&links)?;
+
+    // When opening a link in pane 50's browser, and waiting for it.
+    actor
+        .open_link(LinkJob::NewTab {
+            url: LINK_URL.to_owned(),
+            pane: PaneId(50),
+        })
+        .await
+        .change_context(StoreError)?;
+
+    // Then the opener was asked for a tab of that browser.
+    assert_eq!(
+        links.calls(),
+        [LinkCall::NewTab {
+            url: LINK_URL.to_owned(),
+            pane: PaneId(50)
+        }],
+        "the link should open as a new tab of pane 50's browser"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn open_outside_asks_the_desktop_opener() -> Result<(), Report<StoreError>> {
+    // Given the actor with a recording opener.
+    let links = Arc::new(FakeLinks::default());
+    let actor = with_links(&links)?;
+
+    // When opening a file outside orb, and waiting for it.
+    actor
+        .open_link(LinkJob::System("/work/notes.md".to_owned()))
+        .await
+        .change_context(StoreError)?;
+
+    // Then the desktop's opener was asked for it.
+    assert_eq!(
+        links.calls(),
+        [LinkCall::System("/work/notes.md".to_owned())],
+        "the file should go to the desktop's opener"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn a_link_that_fails_to_open_outside_shows_in_the_message_box()
+-> Result<(), Report<StoreError>> {
+    // Given the actor with an opener that fails.
+    let links = Arc::new(FakeLinks::failing());
+    let actor = with_links(&links)?;
+
+    // When opening a link outside orb, and waiting for it.
+    actor
+        .open_link(LinkJob::System(LINK_URL.to_owned()))
+        .await
+        .change_context(StoreError)?;
+
+    // Then the message box says so.
+    assert_eq!(
+        actor.report.shown_error().as_deref(),
+        Some("couldn't open the link"),
+        "a link the desktop can't open should show in the message box"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn a_link_that_fails_to_open_shows_in_the_message_box() -> Result<(), Report<StoreError>> {
+    // Given the actor with an opener that fails.
+    let links = Arc::new(FakeLinks::failing());
+    let actor = with_links(&links)?;
+
+    // When opening a link in pane 50's browser, and waiting for it.
+    actor
+        .open_link(LinkJob::NewTab {
+            url: LINK_URL.to_owned(),
+            pane: PaneId(50),
+        })
+        .await
+        .change_context(StoreError)?;
+
+    // Then the message box says so.
+    assert_eq!(
+        actor.report.shown_error().as_deref(),
+        Some("couldn't open the link"),
+        "a link that can't open should show in the message box"
+    );
     Ok(())
 }
 
@@ -8813,6 +8989,7 @@ impl PaneStatus {
                 git: GitService::new(git, Log::default()),
                 zmx: zmx(agent.pane),
                 log: Log::default(),
+                links: LinkService::none(),
             },
             state: state.clone(),
             store,
@@ -9228,6 +9405,7 @@ async fn spawned_reporting(
             git: GitService::new(git, Log::default()),
             zmx,
             log: Log::default(),
+            links: LinkService::none(),
         },
         state: state.clone(),
         store,

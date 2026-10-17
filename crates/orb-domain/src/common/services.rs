@@ -3,6 +3,7 @@
 use crate::Log;
 use crate::feat::git::git_service::GitService;
 use crate::feat::harness::Harnesses;
+use crate::feat::plate::LinkService;
 use crate::feat::zmx::zmx_service::ZmxService;
 
 /// Every service the actors depend on.
@@ -15,4 +16,6 @@ pub struct Services {
     pub zmx: ZmxService,
     /// orb's log file.
     pub log: Log,
+    /// Opens the plate's links outside orb's panes.
+    pub links: LinkService,
 }
