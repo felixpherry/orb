@@ -187,21 +187,19 @@ fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
 /// `all`, with each one's age at `now`. `hidden` counts the done items the
 /// default left out, and the hint says how to see them.
 pub(crate) fn list(app: &AppState, now: SystemTime, all: bool) -> Reply {
-    let (shown, hidden): (Vec<&PlateItem>, Vec<&PlateItem>) = app
-        .plate
-        .items()
+    let every = app.plate.items();
+    let items: Vec<PlateItemRow> = every
         .iter()
-        .partition(|item| all || item.state.is_open());
+        .filter(|item| all || item.state.is_open())
+        .map(|item| row(item, now))
+        .collect();
+    let hidden = every.len() - items.len();
+    let plural = if hidden == 1 { "" } else { "s" };
     Reply::ok(&PlateResult {
-        items: shown.into_iter().map(|item| row(item, now)).collect(),
-        hidden: hidden.len(),
-        hint: (!hidden.is_empty()).then(|| {
-            format!(
-                "orb plate list --all shows {} done item{}",
-                hidden.len(),
-                if hidden.len() == 1 { "" } else { "s" }
-            )
-        }),
+        items,
+        hidden,
+        hint: (hidden > 0)
+            .then(|| format!("orb plate list --all shows {hidden} done item{plural}")),
     })
 }
 

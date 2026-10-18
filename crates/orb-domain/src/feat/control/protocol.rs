@@ -847,18 +847,13 @@ pub struct WaitResult {
 }
 
 /// `agent prompt --wait`'s result: the turn ended, with everything the
-/// agent wrote since the prompt and when, in unix milliseconds. A long
-/// answer is cut to its end, `truncated`, with `chars` its whole length in
-/// graphemes.
+/// agent wrote since the prompt as `agent reply` gives it, its fields beside
+/// the status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnswerResult {
     pub status: WaitEnd,
-    pub text: String,
-    pub at: Option<i64>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chars: Option<usize>,
+    #[serde(flatten)]
+    pub reply: ReplyResult,
 }
 
 /// `agent reply`'s result: the last reply's text and when it was written,

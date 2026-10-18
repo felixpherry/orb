@@ -250,16 +250,10 @@ pub(super) fn prompt_agent(
         Ok(WaitResult {
             status: WaitEnd::Idle,
         }) => match answer_after_idle(turns, ask.pane, gone, timing, deadline) {
-            Ok(reply) => {
-                let reply = turns::capped(reply, ask.full);
-                Reply::ok(&AnswerResult {
-                    status: WaitEnd::Idle,
-                    text: reply.text,
-                    at: reply.at,
-                    truncated: reply.truncated,
-                    chars: reply.chars,
-                })
-            }
+            Ok(reply) => Reply::ok(&AnswerResult {
+                status: WaitEnd::Idle,
+                reply: turns::capped(reply, ask.full),
+            }),
             Err(error) => Reply::err(error),
         },
         Ok(WaitResult {
@@ -313,14 +307,9 @@ pub(super) fn wait(
         None => agent::wait_done(turns.state, pane, poke, gone, timing, deadline),
     };
     match waited {
-        Ok(WaitResult {
-            status: WaitEnd::Idle,
-        }) => match turns.reply(pane) {
-            Err(failed) if failed.code == ErrorCode::TurnFailed => Reply::err(failed),
-            _ => Reply::ok(&WaitResult {
-                status: WaitEnd::Idle,
-            }),
-        },
+        Ok(done) if done.status == WaitEnd::Idle => turns
+            .failed_turn(pane)
+            .map_or_else(|| Reply::ok(&done), Reply::err),
         Ok(done) => Reply::ok(&done),
         Err(error) => Reply::err(turns.failure(pane, error)),
     }

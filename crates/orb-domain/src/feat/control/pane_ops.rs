@@ -338,31 +338,47 @@ pub(super) fn type_read(
         return Reply::err(error);
     }
     let cap = Instant::now() + ask.cap.unwrap_or(timing.settle_cap);
-    let mut seen: Option<(String, Instant)> = None;
+    let mut screen = Settle::default();
     let settled = poll(timing.tick, Some(cap), gone, || {
         let text = match panes.text(ask.pane, 0) {
             Ok(text) => text,
             Err(error) => return Some(Err(error)),
         };
-        let now = Instant::now();
-        match &seen {
-            Some((last, since)) if *last == text => {
-                (now.duration_since(*since) >= timing.settle).then_some(Ok(text))
-            }
+        screen
+            .held(text, Instant::now())
+            .is_some_and(|held| held >= timing.settle)
+            .then_some(Ok(()))
+    });
+    if let Some(Err(error)) = settled {
+        return Reply::err(error);
+    }
+    Reply::ok(&ReadResult {
+        text: screen_text::cut(&screen_text::trim(screen.last()), None, Some(ask.tail)),
+    })
+}
+
+/// A screen read again and again: the newest text, and since when it has
+/// stayed the same.
+#[derive(Debug, Default)]
+struct Settle(Option<(String, Instant)>);
+
+impl Settle {
+    /// Takes `text`, read at `now`: how long the screen has stayed the same,
+    /// or `None` when it changed.
+    fn held(&mut self, text: String, now: Instant) -> Option<Duration> {
+        match &self.0 {
+            Some((last, since)) if *last == text => Some(now.duration_since(*since)),
             _ => {
-                seen = Some((text, now));
+                self.0 = Some((text, now));
                 None
             }
         }
-    });
-    let text = match settled {
-        Some(Ok(text)) => text,
-        Some(Err(error)) => return Reply::err(error),
-        None => seen.map(|(text, _)| text).unwrap_or_default(),
-    };
-    Reply::ok(&ReadResult {
-        text: screen_text::cut(&screen_text::trim(&text), None, Some(ask.tail)),
-    })
+    }
+
+    /// The newest text read; empty before the first.
+    fn last(&self) -> &str {
+        self.0.as_ref().map_or("", |(text, _)| text)
+    }
 }
 
 /// The default number of lines `run --wait` keeps, and `pane wait` searches
@@ -546,7 +562,7 @@ fn marked_wait(
                 format!("orb pane read {} shows the pane", pane.0),
             ));
         }
-        None => return Err(unstarted(panes, pane, since.prompt, timing.start_gate)?),
+        None => return Err(unstarted(panes, pane, since.prompt, timing.start_gate)),
     }
     let finished = poll(timing.tick, deadline, gone, || match panes.shell(pane) {
         Ok(view) => view
@@ -620,27 +636,25 @@ fn held_back(view: &ShellView, prompt: u64) -> Option<HeldBack> {
 /// `prompt` hadn't started by the end of the start `gate`. When the shell
 /// held it back, `not_run`: the screen is read, then ctrl+c clears the line
 /// so the next one starts clean. Otherwise a timeout saying it may still
-/// run.
-///
-/// # Errors
-///
-/// Returns the screen loop's refusal when the shell, the screen or the
-/// ctrl+c can't be had.
-fn unstarted(
-    panes: &PaneControl,
-    pane: PaneId,
-    prompt: u64,
-    gate: Duration,
-) -> Result<ApiError, ApiError> {
-    let Some(held) = held_back(&panes.shell(pane)?, prompt) else {
-        return Ok(not_started(pane, gate));
+/// run. The screen loop's refusal when the shell, the screen or the ctrl+c
+/// can't be had.
+fn unstarted(panes: &PaneControl, pane: PaneId, prompt: u64, gate: Duration) -> ApiError {
+    let held = match panes.shell(pane) {
+        Ok(view) => held_back(&view, prompt),
+        Err(error) => return error,
     };
-    let screen = panes.text(pane, 0)?;
-    panes.ask(PaneRequest::Keys {
-        pane,
-        keys: vec![KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-    })?;
-    Ok(not_run(pane, held, &screen))
+    let Some(held) = held else {
+        return not_started(pane, gate);
+    };
+    let screen = match panes.text(pane, 0) {
+        Ok(screen) => screen,
+        Err(error) => return error,
+    };
+    let ctrl_c = vec![KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
+    if let Err(error) = panes.ask(PaneRequest::Keys { pane, keys: ctrl_c }) {
+        return error;
+    }
+    not_run(pane, held, &screen)
 }
 
 /// How a wait on the screen ended.
@@ -668,7 +682,7 @@ fn screen_wait(
     timing: PaneTiming,
     watch: bool,
 ) -> Result<Watched, ApiError> {
-    let mut seen: Option<(String, Instant)> = None;
+    let mut screen = Settle::default();
     let mut gate_ends = (!watch).then(Instant::now);
     let mut held = false;
     let waited = poll(timing.tick, deadline, gone, || {
@@ -680,7 +694,7 @@ fn screen_wait(
             };
             if view.held {
                 held = true;
-                seen = None;
+                screen = Settle::default();
                 return None;
             }
             gate_ends.get_or_insert(now + timing.start_gate);
@@ -692,26 +706,27 @@ fn screen_wait(
             Ok(text) => text,
             Err(error) => return Some(Err(error)),
         };
-        match &seen {
-            Some((last, since)) if *last == text => {
-                let quiet = now.duration_since(*since) >= timing.quiet;
-                let gated = gate_ends.is_some_and(|ends| now >= ends);
-                (quiet && gated)
-                    .then(|| Ok(Watched::Quiet(run_result(None, &text, ask.tail, false))))
-            }
-            _ => {
-                seen = Some((text, now));
-                None
-            }
-        }
+        let quiet = screen
+            .held(text, now)
+            .is_some_and(|held| held >= timing.quiet);
+        let gated = gate_ends.is_some_and(|ends| now >= ends);
+        (quiet && gated).then(|| {
+            Ok(Watched::Quiet(run_result(
+                None,
+                screen.last(),
+                ask.tail,
+                false,
+            )))
+        })
     });
-    match waited {
-        Some(outcome) => outcome,
-        None => {
-            let text = seen.map(|(text, _)| text).unwrap_or_default();
-            Ok(Watched::Quiet(run_result(None, &text, ask.tail, false)))
-        }
-    }
+    waited.unwrap_or_else(|| {
+        Ok(Watched::Quiet(run_result(
+            None,
+            screen.last(),
+            ask.tail,
+            false,
+        )))
+    })
 }
 
 /// The seq of shell `view`'s newest mark when the marks it sent since the

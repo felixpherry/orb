@@ -81,8 +81,11 @@ pub(crate) const REPLY_CAP: usize = 12_000;
 /// its last `REPLY_CAP` graphemes, marked `truncated` with `chars` its whole
 /// length.
 pub(crate) fn capped(reply: ReplyResult, full: bool) -> ReplyResult {
+    if full || reply.text.len() <= REPLY_CAP {
+        return reply;
+    }
     let chars = reply.text.graphemes(true).count();
-    if full || chars <= REPLY_CAP {
+    if chars <= REPLY_CAP {
         return reply;
     }
     ReplyResult {
@@ -189,10 +192,15 @@ impl Turns<'_> {
         if error.code != ErrorCode::TurnFailed {
             return error;
         }
-        match self.reply(pane) {
-            Err(found) if found.code == ErrorCode::TurnFailed => found,
-            _ => error,
-        }
+        self.failed_turn(pane).unwrap_or(error)
+    }
+
+    /// The `turn_failed` refusal [`Self::reply`] gives for `pane`, when its
+    /// turn, read as `agent reply` reads it, ended in a failed model call.
+    pub(crate) fn failed_turn(&self, pane: PaneId) -> Option<ApiError> {
+        self.reply(pane)
+            .err()
+            .filter(|found| found.code == ErrorCode::TurnFailed)
     }
 }
 

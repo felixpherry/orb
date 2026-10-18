@@ -190,7 +190,7 @@ fn asked_json(words: &[&str]) -> bool {
 }
 
 /// The words before the first `--`, or all of them without one.
-fn before_dash<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
+fn before_dash<'w, 'a>(words: &'w [&'a str]) -> &'w [&'a str] {
     words.split(|word| *word == "--").next().unwrap_or_default()
 }
 
@@ -530,15 +530,14 @@ pub(super) fn parse(args: &[OsString]) -> Result<Op, UsageError> {
 /// even when it is `--json`.
 fn without_json<'a>(command: &CommandHelp, rest: &[&'a str]) -> Vec<&'a str> {
     let as_typed = command.noun == "pane" && matches!(command.verb, "send" | "type");
-    let mut after_dash = false;
-    rest.iter()
+    let flags = before_dash(rest);
+    let kept = flags
+        .iter()
         .enumerate()
-        .filter(|&(at, &word)| {
-            after_dash |= word == "--";
-            after_dash || word != "--json" || (as_typed && at == 1)
-        })
-        .map(|(_, &word)| word)
-        .collect()
+        .filter(|&(at, &word)| word != "--json" || (as_typed && at == 1))
+        .map(|(_, &word)| word);
+    let after = rest.get(flags.len()..).unwrap_or_default();
+    kept.chain(after.iter().copied()).collect()
 }
 
 /// The request `command` makes from the words after its verb.

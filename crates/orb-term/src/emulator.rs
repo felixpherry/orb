@@ -732,13 +732,8 @@ impl Emulator {
         let mut from = top - above;
         for lines in skip.iter().chain([&(end..end)]) {
             let to = lines.start.clamp(from, end);
-            let rows = i32::try_from(from - top)
-                .ok()
-                .zip(i32::try_from(to - top - 1).ok());
-            if let Some((first, last)) = rows
-                && to > from
-            {
-                pieces.push(self.rows_text(first, last));
+            if to > from {
+                pieces.push(self.text_between(from, to).text);
             }
             from = from.max(lines.end);
         }
