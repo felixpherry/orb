@@ -16,13 +16,15 @@ use crate::feat::control::pane_control::{
     PaneControl, PaneRequest, ShellPhase, ShellView, key_event,
 };
 use crate::feat::control::protocol::{
-    ApiError, Done, ErrorCode, MatchResult, Op, PaneResult, Reply, RunResult, short_name,
+    ApiError, Done, ErrorCode, MatchResult, Op, PaneResult, ReadBack, ReadResult, Reply, RunResult,
+    short_name,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::server::{
     Action, ControlDeps, SPLIT_FLOAT, added, changing, changing_session, tiled,
 };
 use crate::feat::control::target::{Resolved, Target};
+use crate::feat::control::typed_lines::echoed;
 use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace};
 use crate::ids::{PaneId, SessionId};
 
@@ -118,7 +120,7 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
                 text: text.clone(),
             }))
         }
-        Op::PaneKeys { pane, keys } => {
+        Op::PaneKeys { pane, keys, read } => {
             changing(app, Some(Target::Pane(*pane)), caller)?;
             let keys = keys
                 .iter()
@@ -132,14 +134,25 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
                     })
                 })
                 .collect::<Result<_, _>>()?;
-            Ok(Action::Pane(PaneRequest::Keys { pane: *pane, keys }))
+            Ok(typing(
+                PaneRequest::Keys { pane: *pane, keys },
+                *pane,
+                *read,
+            ))
         }
-        Op::PaneType { pane, text } => {
+        Op::PaneType {
+            pane,
+            text,
+            enter,
+            read,
+        } => {
             changing(app, Some(Target::Pane(*pane)), caller)?;
-            Ok(Action::Pane(PaneRequest::Type {
+            let request = PaneRequest::Type {
                 pane: *pane,
                 text: text.clone(),
-            }))
+                enter: *enter,
+            };
+            Ok(typing(request, *pane, *read))
         }
         Op::PaneRun {
             pane,
@@ -198,6 +211,20 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
     }
 }
 
+/// Typing `request` into `pane`, then reading its screen back as `read`
+/// asks, if it does.
+fn typing(request: PaneRequest, pane: PaneId, read: Option<ReadBack>) -> Action {
+    match read {
+        None => Action::Pane(request),
+        Some(read) => Action::TypeRead(TypeRead {
+            request,
+            pane,
+            tail: read.tail.unwrap_or(READ_TAIL),
+            cap: read.timeout.map(Duration::from_millis),
+        }),
+    }
+}
+
 /// The hint for an unknown key name in `pane`: the names `pane keys` knows,
 /// and the command that types text there.
 fn key_names(pane: PaneId) -> String {
@@ -227,6 +254,9 @@ pub(super) fn add_pane(
         Ok(pane) => pane,
         Err(error) => return Reply::err(error),
     };
+    if let Some(line) = &run {
+        deps.typed.remember(pane, line);
+    }
     for request in follow_ups(pane, name, run) {
         if let Err(error) = deps.panes.ask(request) {
             return Reply::err(ApiError {
@@ -260,6 +290,10 @@ pub(crate) struct PaneTiming {
     pub start_gate: Duration,
     /// How long a screen must stay unchanged to count as quiet.
     pub quiet: Duration,
+    /// How long a screen must stay unchanged after typing to be read back.
+    pub settle: Duration,
+    /// How long a read back waits for the screen to settle at most.
+    pub settle_cap: Duration,
 }
 
 impl PaneTiming {
@@ -268,7 +302,88 @@ impl PaneTiming {
         tick: Duration::from_millis(100),
         start_gate: Duration::from_secs(2),
         quiet: Duration::from_secs(1),
+        settle: Duration::from_millis(300),
+        settle_cap: Duration::from_secs(3),
     };
+}
+
+/// The default number of the screen's last lines a read back keeps.
+const READ_TAIL: usize = 20;
+
+/// Typing into a pane, then reading its screen back once it settles.
+#[derive(Debug)]
+pub(super) struct TypeRead {
+    /// The keys or text to type.
+    pub request: PaneRequest,
+    pub pane: PaneId,
+    /// How many of the screen's last lines to keep.
+    pub tail: usize,
+    /// How long to wait for the screen to settle; the timing's cap when
+    /// `None`.
+    pub cap: Option<Duration>,
+}
+
+/// Types `ask`'s keys or text, then reads the pane's screen every tick until
+/// it has changed from the screen before the typing and then stays the same
+/// for `timing.settle`, and replies with its trimmed last lines. At the cap
+/// it replies with the screen as it is then, so a program that redraws all
+/// the time, or one that shows nothing new, still answers. The wait stops
+/// once `gone` says the caller hung up.
+pub(super) fn type_read(
+    panes: &PaneControl,
+    ask: TypeRead,
+    gone: &dyn Fn() -> bool,
+    timing: PaneTiming,
+) -> Reply {
+    let before = match panes.text(ask.pane, 0) {
+        Ok(text) => text,
+        Err(error) => return Reply::err(error),
+    };
+    let cap = Instant::now() + ask.cap.unwrap_or(timing.settle_cap);
+    if let Err(error) = panes.ask(ask.request) {
+        return Reply::err(error);
+    }
+    let mut screen = Settle::default();
+    let mut changed = false;
+    let settled = poll(timing.tick, Some(cap), gone, || {
+        let text = match panes.text(ask.pane, 0) {
+            Ok(text) => text,
+            Err(error) => return Some(Err(error)),
+        };
+        changed |= text != before;
+        let held = screen.held(text, Instant::now());
+        (changed && held.is_some_and(|held| held >= timing.settle)).then_some(Ok(()))
+    });
+    if let Some(Err(error)) = settled {
+        return Reply::err(error);
+    }
+    Reply::ok(&ReadResult {
+        text: screen_text::cut(&screen_text::trim(screen.last()), None, Some(ask.tail)),
+    })
+}
+
+/// A screen read again and again: the newest text, and since when it has
+/// stayed the same.
+#[derive(Debug, Default)]
+struct Settle(Option<(String, Instant)>);
+
+impl Settle {
+    /// Takes `text`, read at `now`: how long the screen has stayed the same,
+    /// or `None` when it changed.
+    fn held(&mut self, text: String, now: Instant) -> Option<Duration> {
+        match &self.0 {
+            Some((last, since)) if *last == text => Some(now.duration_since(*since)),
+            _ => {
+                self.0 = Some((text, now));
+                None
+            }
+        }
+    }
+
+    /// The newest text read; empty before the first.
+    fn last(&self) -> &str {
+        self.0.as_ref().map_or("", |(text, _)| text)
+    }
 }
 
 /// The default number of lines `run --wait` keeps, and `pane wait` searches
@@ -419,10 +534,10 @@ struct Since {
 
 /// Waits on the prompt marks for the command typed after mark `since.typed`:
 /// its start within the start gate, then its end by `deadline`, and replies
-/// with its exit status and output. `not_run` when the shell showed a new
-/// empty prompt instead; `timeout` when `deadline` came first, or when the
-/// shell hadn't answered at all by the end of the gate (it may still run the
-/// command).
+/// with its exit status and output. `not_run` when the shell took the line
+/// without starting it by the end of the gate (see [`unstarted`]); `timeout`
+/// when `deadline` came first, or when the shell hadn't answered at all by
+/// the end of the gate (it may still run the command).
 fn marked_wait(
     panes: &PaneControl,
     ask: &RunAsk,
@@ -452,10 +567,11 @@ fn marked_wait(
                 format!("orb pane read {} shows the pane", pane.0),
             ));
         }
-        None if refused(&panes.shell(pane)?, since.prompt) => {
-            return Err(not_run(pane, &panes.text(pane, 0)?));
+        None => {
+            if let Some(error) = unstarted(panes, pane, since, timing.start_gate) {
+                return Err(error);
+            }
         }
-        None => return Err(not_started(pane, timing.start_gate)),
     }
     let finished = poll(timing.tick, deadline, gone, || match panes.shell(pane) {
         Ok(view) => view
@@ -498,11 +614,65 @@ fn ours_started(view: &ShellView, seq: u64) -> bool {
             .is_some_and(|finished| finished.started > seq)
 }
 
-/// Whether the shell `view` shows a newer prompt than mark `prompt`, empty
-/// and with no command started: it answered the typed line with a prompt
-/// (a syntax error) instead of running it.
-fn refused(view: &ShellView, prompt: u64) -> bool {
-    view.seq > prompt && view.phase == ShellPhase::AtPrompt { leftover: false }
+/// How a shell took a typed line without starting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldBack {
+    /// A new prompt came with the line still on it: the shell rejected it,
+    /// as for a syntax error.
+    Kept,
+    /// A new, empty prompt came.
+    NewPrompt,
+    /// No new prompt came, and the line sits unfinished on the command
+    /// line: the shell waits for more of it (an open quote or bracket).
+    MoreInput,
+}
+
+/// How the shell `view` held back the line typed at the prompt whose newest
+/// mark was `prompt`; `None` while a prompt is still being drawn, a program
+/// runs, nothing was echoed, or the shell sends no marks, when it may still
+/// run the line. `None` too before the shell was seen marking a command
+/// start: one that marks only its prompt shows a running command as text
+/// left on the command line.
+fn held_back(view: &ShellView, prompt: u64) -> Option<HeldBack> {
+    if !view.starts_seen {
+        return None;
+    }
+    let newer = view.seq > prompt;
+    match view.phase {
+        ShellPhase::AtPrompt { leftover: true } if newer => Some(HeldBack::Kept),
+        ShellPhase::AtPrompt { leftover: false } if newer => Some(HeldBack::NewPrompt),
+        ShellPhase::AtPrompt { leftover: true } => Some(HeldBack::MoreInput),
+        _ => None,
+    }
+}
+
+/// Why the line typed into `pane` after `since` hadn't started by the end of
+/// the start `gate`; `None` when it has started after all. The screen is
+/// read first and the shell last, so ctrl+c follows straight on the check
+/// that no command started. When the shell held the line back, `not_run`:
+/// ctrl+c clears the line so the next one starts clean. Otherwise a timeout
+/// saying it may still run. The screen loop's refusal when the screen, the
+/// shell or the ctrl+c can't be had.
+fn unstarted(panes: &PaneControl, pane: PaneId, since: Since, gate: Duration) -> Option<ApiError> {
+    let screen = match panes.text(pane, 0) {
+        Ok(screen) => screen,
+        Err(error) => return Some(error),
+    };
+    let view = match panes.shell(pane) {
+        Ok(view) => view,
+        Err(error) => return Some(error),
+    };
+    if ours_started(&view, since.typed) {
+        return None;
+    }
+    let Some(held) = held_back(&view, since.prompt) else {
+        return Some(not_started(pane, gate));
+    };
+    let ctrl_c = vec![KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
+    if let Err(error) = panes.ask(PaneRequest::Keys { pane, keys: ctrl_c }) {
+        return Some(error);
+    }
+    Some(not_run(pane, held, &screen))
 }
 
 /// How a wait on the screen ended.
@@ -530,7 +700,7 @@ fn screen_wait(
     timing: PaneTiming,
     watch: bool,
 ) -> Result<Watched, ApiError> {
-    let mut seen: Option<(String, Instant)> = None;
+    let mut screen = Settle::default();
     let mut gate_ends = (!watch).then(Instant::now);
     let mut held = false;
     let waited = poll(timing.tick, deadline, gone, || {
@@ -542,7 +712,7 @@ fn screen_wait(
             };
             if view.held {
                 held = true;
-                seen = None;
+                screen = Settle::default();
                 return None;
             }
             gate_ends.get_or_insert(now + timing.start_gate);
@@ -554,26 +724,27 @@ fn screen_wait(
             Ok(text) => text,
             Err(error) => return Some(Err(error)),
         };
-        match &seen {
-            Some((last, since)) if *last == text => {
-                let quiet = now.duration_since(*since) >= timing.quiet;
-                let gated = gate_ends.is_some_and(|ends| now >= ends);
-                (quiet && gated)
-                    .then(|| Ok(Watched::Quiet(run_result(None, &text, ask.tail, false))))
-            }
-            _ => {
-                seen = Some((text, now));
-                None
-            }
-        }
+        let quiet = screen
+            .held(text, now)
+            .is_some_and(|held| held >= timing.quiet);
+        let gated = gate_ends.is_some_and(|ends| now >= ends);
+        (quiet && gated).then(|| {
+            Ok(Watched::Quiet(run_result(
+                None,
+                screen.last(),
+                ask.tail,
+                false,
+            )))
+        })
     });
-    match waited {
-        Some(outcome) => outcome,
-        None => {
-            let text = seen.map(|(text, _)| text).unwrap_or_default();
-            Ok(Watched::Quiet(run_result(None, &text, ask.tail, false)))
-        }
-    }
+    waited.unwrap_or_else(|| {
+        Ok(Watched::Quiet(run_result(
+            None,
+            screen.last(),
+            ask.tail,
+            false,
+        )))
+    })
 }
 
 /// The seq of shell `view`'s newest mark when the marks it sent since the
@@ -596,7 +767,11 @@ fn first_marks(view: &ShellView, command: &str, held: bool) -> Option<u64> {
             .as_ref()
             .is_some_and(|last| ours(last.program.as_deref())),
     };
-    let prompt = held && matches!(view.phase, ShellPhase::AtPrompt { .. }) && view.last.is_none();
+    let prompt =
+        held && matches!(
+            view.phase,
+            ShellPhase::AtPrompt { .. } | ShellPhase::Drawing
+        ) && view.last.is_none();
     (started || prompt).then_some(view.seq)
 }
 
@@ -716,23 +891,28 @@ pub(super) fn last_line(text: &str) -> &str {
 
 /// Reads the pane's screen and `ask.lines` lines of history every tick until
 /// a line matches, from the top, and replies with that line. Text already on
-/// screen counts. `timeout` quoting the pane's last lines once the timeout
-/// passes; a wait stops once `gone` says the caller hung up.
+/// screen counts, but a command line doesn't: the lines a shell's prompt
+/// marks show held command lines are left out, and so is any other line
+/// that echoes one of the lines in `typed` (see [`echoed`]), such as one
+/// typed into a REPL. `timeout` quoting the pane's last lines once the
+/// timeout passes; a wait stops once `gone` says the caller hung up.
 pub(super) fn wait_for(
     panes: &PaneControl,
     ask: &WaitAsk,
+    typed: &[String],
     gone: &dyn Fn() -> bool,
     timing: PaneTiming,
 ) -> Reply {
     let deadline = ask.timeout.map(|limit| Instant::now() + limit);
     let mut last = String::new();
     let found = poll(timing.tick, deadline, gone, || {
-        let text = match panes.text(ask.pane, ask.lines) {
-            Ok(text) => screen_text::trim(&text),
+        let text = match panes.output(ask.pane, ask.lines) {
+            Ok(output) => screen_text::trim(&output.text),
             Err(error) => return Some(Err(error)),
         };
         let line = text
             .lines()
+            .filter(|line| !echoed(line, typed))
             .find(|line| ask.matcher.matches(line))
             .map(str::to_owned);
         last = text;
@@ -765,33 +945,49 @@ fn no_match(ask: &WaitAsk, text: &str) -> ApiError {
 }
 
 /// Why a command line can't go to `pane`: `program` (its first word) runs
-/// there. The hint quits it, runs the line `elsewhere` when given, or forces
-/// it.
+/// there. The hint types the line into the program first, then quits it,
+/// runs the line `elsewhere` when given, or forces it.
 fn busy(pane: PaneId, program: Option<&str>, elsewhere: Option<&str>) -> ApiError {
     let name = program.map_or_else(|| "a program".to_owned(), short_name);
-    let elsewhere = elsewhere.map_or_else(String::new, |command| format!(", use {command}"));
+    let elsewhere = elsewhere.map_or_else(String::new, |command| {
+        format!("; to run it elsewhere: {command}")
+    });
     ApiError::new(
         ErrorCode::Busy,
         format!("{name} is running in pane {}", pane.0),
         format!(
-            "quit it with orb pane keys {} <keys> (ctrl+c stops most programs){elsewhere}, or \
-             add --force to type anyway",
+            "to type a line into it: orb pane type {0} <text> --enter; to quit it: orb pane \
+             keys {0} <keys>{elsewhere}; --force types anyway",
             pane.0
         ),
     )
 }
 
-/// Why a wait gave up: the shell in `pane`, whose screen is `screen`, never
-/// started the typed command.
-fn not_run(pane: PaneId, screen: &str) -> ApiError {
+/// Why a wait gave up: the shell in `pane`, whose screen was `screen`, took
+/// the typed command without starting it, as `held` says, and orb pressed
+/// ctrl+c to clear it.
+fn not_run(pane: PaneId, held: HeldBack, screen: &str) -> ApiError {
     let end = screen_text::cut(&screen_text::trim(screen), None, Some(NOT_RUN_LINES));
+    let how = match held {
+        HeldBack::Kept => {
+            "kept the line without running it (it was rejected, as a syntax error is)"
+        }
+        HeldBack::NewPrompt => "showed a new prompt without running the line",
+        HeldBack::MoreInput => {
+            "is waiting for more of the line (an unfinished quote, bracket or block)"
+        }
+    };
     ApiError::new(
         ErrorCode::NotRun,
         format!(
-            "the shell in pane {} didn't run the command; its screen ends with:\n{end}",
+            "the shell in pane {} {how}, so orb pressed ctrl+c to clear it; its screen ends \
+             with:\n{end}",
             pane.0
         ),
-        format!("fix the command; orb pane read {} shows the screen", pane.0),
+        format!(
+            "fix the command and run it again; orb pane read {} shows the screen",
+            pane.0
+        ),
     )
 }
 
@@ -821,24 +1017,27 @@ mod tests {
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{Matcher, PaneTiming, RunAsk, WaitAsk, run, wait_for};
+    use super::{Matcher, PaneTiming, RunAsk, TypeRead, WaitAsk, run, type_read, wait_for};
     use crate::feat::control::pane_control::{
-        Finished, PaneAnswer, PaneControl, PaneLines, PaneRequest, ShellPhase, ShellView,
+        Finished, PaneAnswer, PaneControl, PaneLines, PaneOutput, PaneRequest, ShellPhase,
+        ShellView,
     };
     use crate::feat::control::protocol::{
-        ApiError, Done, ErrorCode, MatchResult, Reply, RunResult,
+        ApiError, Done, ErrorCode, MatchResult, ReadResult, Reply, RunResult,
     };
     use crate::ids::PaneId;
 
     /// Every request a fake screen loop was asked, in order.
     type Asked = Arc<Mutex<Vec<PaneRequest>>>;
 
-    /// Waits paced for tests: a 1 ms tick, a 50 ms start gate and a 5 ms
-    /// quiet spell.
+    /// Waits paced for tests: a 1 ms tick, a 50 ms start gate, a 5 ms quiet
+    /// spell and settle, and a 50 ms settle cap.
     const QUICK: PaneTiming = PaneTiming {
         tick: Duration::from_millis(1),
         start_gate: Duration::from_millis(50),
         quiet: Duration::from_millis(5),
+        settle: Duration::from_millis(5),
+        settle_cap: Duration::from_millis(50),
     };
 
     /// `items[n]`, or the last item once past the end.
@@ -869,6 +1068,12 @@ mod tests {
                     counts.1 += 1;
                     PaneAnswer::Text(nth(&screens, counts.1 - 1).unwrap_or_default().into())
                 }
+                PaneRequest::Output { .. } => {
+                    counts.1 += 1;
+                    PaneAnswer::Output(PaneOutput {
+                        text: nth(&screens, counts.1 - 1).unwrap_or_default().into(),
+                    })
+                }
                 PaneRequest::Between { .. } => PaneAnswer::Lines(PaneLines {
                     text: lines.to_owned(),
                     truncated: false,
@@ -895,6 +1100,7 @@ mod tests {
                     request,
                     PaneRequest::Shell { .. }
                         | PaneRequest::Read { .. }
+                        | PaneRequest::Output { .. }
                         | PaneRequest::Between { .. }
                 )
             })
@@ -907,6 +1113,7 @@ mod tests {
     fn at_prompt(seq: u64, leftover: bool) -> ShellView {
         ShellView {
             marks_seen: true,
+            starts_seen: true,
             phase: ShellPhase::AtPrompt { leftover },
             last: None,
             seq,
@@ -914,10 +1121,26 @@ mod tests {
         }
     }
 
+    /// A shell drawing its prompt after mark `seq`.
+    fn drawing(seq: u64) -> ShellView {
+        ShellView {
+            phase: ShellPhase::Drawing,
+            ..at_prompt(seq, false)
+        }
+    }
+
+    /// `reply`'s refusal, or a blank `failed` one when it succeeded.
+    fn refusal(reply: Reply) -> ApiError {
+        reply
+            .error
+            .unwrap_or_else(|| ApiError::new(ErrorCode::Failed, "", ""))
+    }
+
     /// A shell running `program`, started by mark `seq`.
     fn running(program: Option<&str>, seq: u64) -> ShellView {
         ShellView {
             marks_seen: true,
+            starts_seen: true,
             phase: ShellPhase::Running {
                 program: program.map(str::to_owned),
                 started: seq,
@@ -996,6 +1219,28 @@ mod tests {
             ),
             (ErrorCode::Busy, "vim is running in pane 12", true, vec![]),
             "a running program refuses the line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn busy_hint_offers_typing_into_the_program_first() {
+        // Given pane 12's shell running python3.
+        let (panes, _) = screen_loop(vec![running(Some("python3"), 3)], vec![], "");
+
+        // When running a command there.
+        let error = refusal(ran(&panes, &ask(false, false)));
+
+        // Then the hint names typing a line in, then quitting, then --force.
+        let hint = error.hint.unwrap_or_default();
+        let at = |what: &str| hint.find(what).unwrap_or(usize::MAX);
+        let (typing, quitting, forcing) = (
+            at("orb pane type 12 <text> --enter"),
+            at("orb pane keys 12"),
+            at("--force"),
+        );
+        assert!(
+            typing < quitting && quitting < forcing && forcing != usize::MAX,
+            "type, quit, then force, in that order: {hint}"
         );
     }
 
@@ -1161,6 +1406,197 @@ mod tests {
             ),
             (ErrorCode::NotRun, true, true),
             "a command the shell never started is not_run, got {}",
+            error.message
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_a_kept_line_is_not_run_saying_it_was_kept() {
+        // Given pane 12's shell at its prompt, then at a new prompt with the
+        // line still on it and no start between.
+        let shells = vec![at_prompt(2, false), at_prompt(4, true)];
+        let (panes, _) = screen_loop(shells, vec!["~> echo 18 >> f; end"], "");
+
+        // When running a command there with --wait.
+        let error = refusal(ran(&panes, &ask(true, false)));
+
+        // Then it is not run, saying the shell kept the line and orb cleared
+        // it.
+        assert_eq!(
+            (
+                error.code,
+                error.message.contains("kept the line"),
+                error.message.contains("orb pressed ctrl+c to clear it"),
+            ),
+            (ErrorCode::NotRun, true, true),
+            "a rejected line is not_run and cleared, got {}",
+            error.message
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_an_unfinished_line_is_not_run_waiting_for_more() {
+        // Given pane 12's shell at its prompt, then with the line on its
+        // command line and no new mark: it waits for more of it.
+        let shells = vec![at_prompt(2, false), at_prompt(2, true)];
+        let (panes, _) = screen_loop(shells, vec!["~> echo (\n"], "");
+
+        // When running a command there with --wait.
+        let error = refusal(ran(&panes, &ask(true, false)));
+
+        // Then it is not run, saying the shell waits for more of the line.
+        assert_eq!(
+            (
+                error.code,
+                error.message.contains("waiting for more of the line")
+            ),
+            (ErrorCode::NotRun, true),
+            "an unfinished line is not_run, got {}",
+            error.message
+        );
+    }
+
+    #[rstest::rstest]
+    fn not_run_presses_ctrl_c_after_the_line() {
+        // Given pane 12's shell at its prompt, then at a new prompt with the
+        // line still on it.
+        let shells = vec![at_prompt(2, false), at_prompt(4, true)];
+        let (panes, asked) = screen_loop(shells, vec!["~>"], "");
+
+        // When running a command there with --wait.
+        ran(&panes, &ask(true, false));
+
+        // Then the line is typed, then ctrl+c pressed to clear it.
+        let ctrl_c = PaneRequest::Keys {
+            pane: PaneId(12),
+            keys: vec![KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        };
+        assert_eq!(
+            typing(&asked),
+            vec![typed_line(), ctrl_c],
+            "a line the shell didn't run is cleared with ctrl+c"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_in_a_shell_that_never_marks_a_start_says_it_may_still_run() {
+        // Given pane 12's shell that marks its prompt but was never seen
+        // marking a command start, its cursor past the typed line after.
+        let prompt_only = |leftover| ShellView {
+            starts_seen: false,
+            ..at_prompt(2, leftover)
+        };
+        let shells = vec![prompt_only(false), prompt_only(true)];
+        let (panes, asked) = screen_loop(shells, vec!["~> just test"], "");
+
+        // When running a command there with --wait.
+        let error = refusal(ran(&panes, &ask(true, false)));
+
+        // Then it is a timeout saying it may still run, and no ctrl+c was
+        // pressed into what may be the running command.
+        assert_eq!(
+            (
+                error.code,
+                error.message.ends_with("it may still run it"),
+                typing(&asked),
+            ),
+            (ErrorCode::Timeout, true, vec![typed_line()]),
+            "without a command start seen, an unfinished-looking line may be running, got {}",
+            error.message
+        );
+    }
+
+    /// A screen loop whose shell is at its prompt for the first `Shell` ask,
+    /// then holds the typed line unfinished until the screen is first read,
+    /// then has run `just` (started by mark 3) to exit 0 after printing
+    /// "a"; it records every request.
+    fn starts_once_read() -> (PaneControl, Asked) {
+        let asked: Asked = Arc::default();
+        let log = Arc::clone(&asked);
+        let seen = Mutex::new((0_usize, false));
+        let panes = PaneControl::new(move |request, reply| {
+            let mut seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+            let answer = match &request {
+                PaneRequest::Shell { .. } => {
+                    seen.0 += 1;
+                    PaneAnswer::Shell(match *seen {
+                        (1, _) => at_prompt(2, false),
+                        (_, false) => at_prompt(2, true),
+                        (_, true) => ended(4, 3, 0),
+                    })
+                }
+                PaneRequest::Read { .. } => {
+                    seen.1 = true;
+                    PaneAnswer::Text("~> just test".into())
+                }
+                PaneRequest::Between { .. } => PaneAnswer::Lines(PaneLines {
+                    text: "a".to_owned(),
+                    truncated: false,
+                }),
+                _ => PaneAnswer::Done,
+            };
+            log.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request);
+            let _ = reply.send(Ok(answer));
+        });
+        (panes, asked)
+    }
+
+    #[rstest::rstest]
+    fn run_wait_presses_no_ctrl_c_when_the_command_starts_at_the_gate() {
+        // Given pane 12's shell holding the typed line unfinished through
+        // the start gate, then running it just before ctrl+c would go.
+        let (panes, asked) = starts_once_read();
+
+        // When running a command there with --wait.
+        ran(&panes, &ask(true, false));
+
+        // Then only the line was typed: no ctrl+c hit the started command.
+        assert_eq!(
+            typing(&asked),
+            vec![typed_line()],
+            "a command seen starting just before ctrl+c isn't interrupted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_a_command_starting_at_the_gate_waits_for_its_end() {
+        // Given pane 12's shell holding the typed line unfinished through
+        // the start gate, then running it just before ctrl+c would go.
+        let (panes, _) = starts_once_read();
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then the reply holds its exit code and output.
+        assert_eq!(
+            result(&reply).map(|result| (result.exit, result.output)),
+            Some((Some(0), "a".to_owned())),
+            "a command that started at the gate is waited on, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_a_prompt_still_drawing_says_it_may_still_run() {
+        // Given pane 12's shell at its prompt, then drawing a new prompt
+        // that hasn't ended.
+        let shells = vec![at_prompt(2, false), drawing(3)];
+        let (panes, asked) = screen_loop(shells, vec!["~>"], "");
+
+        // When running a command there with --wait.
+        let error = refusal(ran(&panes, &ask(true, false)));
+
+        // Then it is a timeout saying it may still run, and no ctrl+c was
+        // pressed.
+        assert_eq!(
+            (
+                error.code,
+                error.message.ends_with("it may still run it"),
+                typing(&asked),
+            ),
+            (ErrorCode::Timeout, true, vec![typed_line()]),
+            "a prompt still drawing may still run the line, got {}",
             error.message
         );
     }
@@ -1473,6 +1909,118 @@ mod tests {
         );
     }
 
+    /// `pane type 12 "print(1)" --enter --read`, keeping `tail` lines.
+    fn type_ask(tail: usize) -> TypeRead {
+        TypeRead {
+            request: PaneRequest::Type {
+                pane: PaneId(12),
+                text: "print(1)".into(),
+                enter: true,
+            },
+            pane: PaneId(12),
+            tail,
+            cap: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn type_read_replies_once_the_screen_settles() {
+        // Given pane 12's screen changing twice, then staying the same.
+        let screens = vec![">>> ", ">>> print(1)", ">>> print(1)\n1\n>>>   "];
+        let (panes, _) = screen_loop(vec![], screens, "");
+
+        // When typing a line there and reading it back.
+        let reply = type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the reply is the settled screen, trimmed.
+        assert_eq!(
+            reply,
+            Reply::ok(&ReadResult {
+                text: ">>> print(1)\n1\n>>>".into()
+            }),
+            "the read waits for the screen to settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_waits_for_the_screen_to_change_from_before_the_typing() {
+        // Given pane 12's screen staying as it was before the typing for
+        // longer than the settle time, then showing the answer.
+        let mut screens = vec![">>>"; 10];
+        screens.push(">>> print(1)\n1\n>>>");
+        let (panes, _) = screen_loop(vec![], screens, "");
+        let capped = PaneTiming {
+            settle_cap: Duration::from_secs(5),
+            ..QUICK
+        };
+
+        // When typing a line there and reading it back.
+        let reply = type_read(&panes, type_ask(20), &|| false, capped);
+
+        // Then the reply is the changed screen, not the one from before.
+        assert_eq!(
+            reply,
+            Reply::ok(&ReadResult {
+                text: ">>> print(1)\n1\n>>>".into()
+            }),
+            "the read waits for a first change before it settles"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_keeps_the_last_tail_lines() {
+        // Given pane 12's screen of four lines.
+        let (panes, _) = screen_loop(vec![], vec!["a\nb\nc\nd"], "");
+
+        // When typing there and reading back the last 2 lines.
+        let reply = type_read(&panes, type_ask(2), &|| false, QUICK);
+
+        // Then the reply is the screen's last 2 lines.
+        assert_eq!(
+            reply,
+            Reply::ok(&ReadResult {
+                text: "c\nd".into()
+            }),
+            "--tail keeps the screen's last lines"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_of_a_screen_that_never_settles_replies_at_the_cap() {
+        // Given pane 12's screen that changes on every read.
+        let screens: Vec<&'static str> = ["a", "b"].repeat(1000);
+        let (panes, _) = screen_loop(vec![], screens, "");
+
+        // When typing there and reading back.
+        let reply = type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the reply is the screen as it was at the cap.
+        assert!(
+            reply.error.is_none() && reply.result.is_some(),
+            "a busy screen is still read back at the cap, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_types_before_it_reads() {
+        // Given pane 12's quiet screen.
+        let (panes, asked) = screen_loop(vec![], vec![">>>"], "");
+
+        // When typing a line there and reading it back.
+        type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the line with its Enter was typed.
+        assert_eq!(
+            typing(&asked),
+            vec![PaneRequest::Type {
+                pane: PaneId(12),
+                text: "print(1)".into(),
+                enter: true,
+            }],
+            "the text and Enter are typed once"
+        );
+    }
+
     /// `pane wait 12` for `matcher`, with no timeout.
     fn wait_ask(matcher: Matcher) -> WaitAsk {
         WaitAsk {
@@ -1487,7 +2035,7 @@ mod tests {
     /// `screens[n]` at the n-th read, with no hang-up.
     fn waited(screens: Vec<&'static str>, ask: &WaitAsk) -> Reply {
         let (panes, _) = screen_loop(vec![], screens, "");
-        wait_for(&panes, ask, &|| false, QUICK)
+        wait_for(&panes, ask, &[], &|| false, QUICK)
     }
 
     /// The reply holding `line` as the line a wait matched.
@@ -1513,6 +2061,49 @@ mod tests {
             reply,
             matched("Listening on :3000"),
             "the wait ends on the first read holding the text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_wait_without_marks_skips_the_echoed_command_line() {
+        // Given pane 12's shell sending no prompt marks, showing the command
+        // line orb typed, then its output too.
+        let screens = vec![
+            "$ sleep 3; echo ZEBRA42",
+            "$ sleep 3; echo ZEBRA42\nZEBRA42",
+        ];
+        let (panes, _) = screen_loop(vec![], screens, "");
+        let typed = vec!["sleep 3; echo ZEBRA42".to_owned()];
+
+        // When waiting for "ZEBRA42".
+        let ask = wait_ask(Matcher::Text("ZEBRA42".into()));
+        let reply = wait_for(&panes, &ask, &typed, &|| false, QUICK);
+
+        // Then the reply is the output line, not the command line.
+        assert_eq!(
+            reply,
+            matched("ZEBRA42"),
+            "the echoed command line never matches"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_wait_skips_a_line_typed_into_a_repl() {
+        // Given pane 12's output, the shell's command lines already left
+        // out, showing a line orb typed into python, then its answer.
+        let screens = vec![">>> print('ZEBRA')", ">>> print('ZEBRA')\nZEBRA\n>>>"];
+        let (panes, _) = screen_loop(vec![], screens, "");
+        let typed = vec!["print('ZEBRA')".to_owned()];
+
+        // When waiting for "ZEBRA".
+        let ask = wait_ask(Matcher::Text("ZEBRA".into()));
+        let reply = wait_for(&panes, &ask, &typed, &|| false, QUICK);
+
+        // Then the reply is python's answer, not the typed line.
+        assert_eq!(
+            reply,
+            matched("ZEBRA"),
+            "a line typed into a REPL never matches"
         );
     }
 
@@ -1585,7 +2176,7 @@ mod tests {
         // When waiting for "done", no timeout, from a caller that has hung
         // up.
         let ask = wait_ask(Matcher::Text("done".into()));
-        let reply = wait_for(&panes, &ask, &|| true, QUICK);
+        let reply = wait_for(&panes, &ask, &[], &|| true, QUICK);
 
         // Then the wait ends saying the caller hung up.
         assert_eq!(

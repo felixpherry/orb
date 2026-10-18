@@ -1,8 +1,8 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::{PlateAsk, list, plan};
 use crate::AppState;
-use crate::feat::control::protocol::{ErrorCode, Op};
+use crate::feat::control::protocol::{ErrorCode, Op, Reply};
 use crate::feat::harness::HarnessId;
 use crate::feat::plate::state::test_item;
 use crate::feat::plate::{ItemState, NewPlateItem, Plate, Verb};
@@ -279,6 +279,44 @@ fn change_of_an_unknown_item_is_not_found(#[case] op: Op) {
 }
 
 #[rstest::rstest]
+fn change_of_an_unknown_item_points_at_the_list_with_done_items() {
+    // Given a plate holding only item 1.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::YourMove)]);
+
+    // When planning an update of item 9.
+    let hint = plan(&app, &update_op(9), None)
+        .err()
+        .and_then(|error| error.hint);
+
+    // Then the hint names the list that shows done items too.
+    assert!(
+        hint.as_deref()
+            .is_some_and(|hint| hint.contains("orb plate list --all")),
+        "a plain list hides done items, so the hint names --all, got {hint:?}"
+    );
+}
+
+#[rstest::rstest]
+fn update_of_a_done_item_points_at_the_list_with_done_items() {
+    // Given item 1, done.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::Done)]);
+
+    // When planning an update of item 1.
+    let hint = plan(&app, &update_op(1), None)
+        .err()
+        .and_then(|error| error.hint);
+
+    // Then the hint names the list that shows it.
+    assert!(
+        hint.as_deref()
+            .is_some_and(|hint| hint.contains("orb plate list --all")),
+        "a done item shows only with --all, got {hint:?}"
+    );
+}
+
+#[rstest::rstest]
 fn update_of_a_done_item_is_a_bad_request() {
     // Given item 1, done.
     let mut app = one_session();
@@ -379,27 +417,22 @@ fn update_with_a_control_character_in_a_link_is_a_bad_request() {
     );
 }
 
-#[rstest::rstest]
-fn list_shows_open_items_and_those_done_today() {
-    // Given an open item, an item closed at 20 s and one closed at 120 s.
-    let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+/// An app whose plate holds waiting item 1, parked item 2 and done items 3
+/// and 4.
+fn plate_of_four() -> AppState {
     let mut app = one_session();
-    let late = {
-        let mut item = test_item(3, ItemState::Done);
-        item.done_at = Some(at(120));
-        item
-    };
     app.plate = Plate::from_saved(vec![
         test_item(1, ItemState::Waiting),
-        test_item(2, ItemState::Done),
-        late,
+        test_item(2, ItemState::Parked { by_user: true }),
+        test_item(3, ItemState::Done),
+        test_item(4, ItemState::Done),
     ]);
+    app
+}
 
-    // When listing with today starting at 100 s.
-    let reply = list(&app, at(200), at(100));
-
-    // Then the open item and the one closed after 100 s are listed.
-    let ids: Vec<i64> = reply
+/// The item IDs `reply` lists, in order.
+fn listed(reply: &Reply) -> Vec<i64> {
+    reply
         .result
         .as_ref()
         .and_then(|result| result.get("items"))
@@ -410,8 +443,51 @@ fn list_shows_open_items_and_those_done_today() {
                 .filter_map(|item| item.get("id").and_then(serde_json::Value::as_i64))
                 .collect()
         })
-        .unwrap_or_default();
-    assert_eq!(ids, [1, 3], "items closed before today aren't listed");
+        .unwrap_or_default()
+}
+
+#[rstest::rstest]
+fn list_leaves_out_done_items() {
+    // Given a waiting, a parked and two done items.
+    let app = plate_of_four();
+
+    // When listing.
+    let reply = list(&app, UNIX_EPOCH, false);
+
+    // Then only the items that aren't done are listed.
+    assert_eq!(listed(&reply), [1, 2], "done items are left out by default");
+}
+
+#[rstest::rstest]
+fn list_says_how_many_done_items_it_hid() {
+    // Given a waiting, a parked and two done items.
+    let app = plate_of_four();
+
+    // When listing.
+    let reply = list(&app, UNIX_EPOCH, false);
+
+    // Then it counts the two done items and says how to see them.
+    let result = reply.result.unwrap_or_default();
+    assert_eq!(
+        (result.get("hidden").cloned(), result.get("hint").cloned()),
+        (
+            Some(2.into()),
+            Some("orb plate list --all shows 2 done items".into())
+        ),
+        "the reply says what it hid"
+    );
+}
+
+#[rstest::rstest]
+fn list_all_includes_done_items() {
+    // Given a waiting, a parked and two done items.
+    let app = plate_of_four();
+
+    // When listing with --all.
+    let reply = list(&app, UNIX_EPOCH, true);
+
+    // Then every item is listed.
+    assert_eq!(listed(&reply), [1, 2, 3, 4], "--all lists done items too");
 }
 
 #[rstest::rstest]
@@ -421,11 +497,7 @@ fn list_row_carries_its_state_and_age() {
     app.plate = Plate::from_saved(vec![test_item(1, ItemState::Waiting)]);
 
     // When listing at 70 s.
-    let reply = list(
-        &app,
-        UNIX_EPOCH + Duration::from_secs(70),
-        SystemTime::UNIX_EPOCH,
-    );
+    let reply = list(&app, UNIX_EPOCH + Duration::from_secs(70), false);
 
     // Then its row reads waiting, 60 s old, with its verb in lowercase.
     let row = reply

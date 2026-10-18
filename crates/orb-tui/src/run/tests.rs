@@ -2606,6 +2606,7 @@ fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
     let typed_text = PaneRequest::Type {
         pane: PaneId(1),
         text: ":wq".into(),
+        enter: false,
     };
     let enter = PaneRequest::Keys {
         pane: PaneId(1),
@@ -2619,6 +2620,29 @@ fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
     // Then the program gets the text and only the key's one Enter.
     let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
     assert_eq!(typed, ":wq\n", "the text is typed with no Enter of its own");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_type_with_enter_presses_enter_after_the_text() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent types `:wq` into pane 1 with Enter.
+    let typed_line = PaneRequest::Type {
+        pane: PaneId(1),
+        text: ":wq".into(),
+        enter: true,
+    };
+    test.app
+        .handle(LoopEvent::Control(typed_line, tx), &mut io::sink())?;
+
+    // Then the program gets the text, then one Enter.
+    let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
+    assert_eq!(typed, ":wq\n", "Enter follows the typed text");
     Ok(())
 }
 
@@ -2741,6 +2765,18 @@ fn prints_prompt_marks(_: &ZmxSession) -> Vec<OsString> {
     .to_vec()
 }
 
+/// A client whose shell prints a line, runs `echo hi` between prompt marks,
+/// and waits at a new prompt.
+fn runs_a_marked_command(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf 'before\\n\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\echo hi\\n\\033]133;C\\033\\\\hi\\n\\033]133;D;0\\033\\\\\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
 /// A client that prints three lines, then waits.
 fn prints_three_lines(_: &ZmxSession) -> Vec<OsString> {
     [
@@ -2780,6 +2816,37 @@ impl LoopTest {
         }
         Ok(last)
     }
+}
+
+#[rstest::rstest]
+fn agent_output_request_leaves_out_the_command_lines() -> io::Result<()> {
+    // Given attached pane 1 whose shell printed a line, then ran `echo hi`
+    // between prompt marks.
+    let mut test = loop_app(FakeZmx::listing(""), runs_a_marked_command)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks for pane 1's output.
+    let request = PaneRequest::Output {
+        pane: PaneId(1),
+        lines: 0,
+    };
+    let answer = test.ask_until(
+        &request,
+        |answer| matches!(answer, PaneAnswer::Output(output) if output.text.contains("hi")),
+    )?;
+
+    // Then it holds the printed lines and the new prompt, not the command
+    // line.
+    let text = match answer {
+        Some(PaneAnswer::Output(output)) => Some(output.text),
+        _ => None,
+    };
+    assert_eq!(
+        text.as_deref(),
+        Some("before\nhi\n$"),
+        "the command line's rows are left out"
+    );
+    Ok(())
 }
 
 #[rstest::rstest]

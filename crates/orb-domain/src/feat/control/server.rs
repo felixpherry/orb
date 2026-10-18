@@ -22,14 +22,15 @@ use crate::feat::control::agent_ops::PromptAsk;
 use crate::feat::control::change::Change;
 use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
-use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
+use crate::feat::control::pane_ops::{PaneTiming, RunAsk, TypeRead, WaitAsk};
 use crate::feat::control::protocol::{
     AgentDetail, AgentKind, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request,
     SettledResult, StartResult,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
-use crate::feat::control::turns::{Prompts, Turns};
+use crate::feat::control::turns::{self, Prompts, Turns};
+use crate::feat::control::typed_lines::TypedLines;
 use crate::feat::control::validator;
 use crate::feat::control::{agent_ops, pane_ops};
 use crate::feat::harness::Harnesses;
@@ -65,6 +66,9 @@ pub struct ControlDeps {
     /// What orb last pasted into each pane's agent; only the control server
     /// reads or writes it.
     pub prompts: Prompts,
+    /// The command lines orb last typed into each pane; only the control
+    /// server reads or writes it.
+    pub typed: TypedLines,
 }
 
 impl ControlDeps {
@@ -228,6 +232,8 @@ pub(super) enum Action {
     Ending { change: Change, ended: Ended },
     /// Typing the screen loop does into a pane: a send, keys or a type.
     Pane(PaneRequest),
+    /// Keys or a type, then the pane's screen read back once it settles.
+    TypeRead(TypeRead),
     /// A command line typed into a shell pane, then maybe waited on.
     Run(RunAsk),
     /// A wait until a pane shows a matching line.
@@ -255,8 +261,9 @@ pub(super) enum Action {
         pane: PaneId,
         timeout: Option<Duration>,
     },
-    /// What a pane's agent wrote since orb's prompt, else its last reply.
-    Reply { pane: PaneId },
+    /// What a pane's agent wrote since orb's prompt, else its last reply;
+    /// cut to its end unless `full`.
+    Reply { pane: PaneId, full: bool },
     /// An agent's full row, its status read through a just-sent prompt.
     Get { pane: PaneId, detail: AgentDetail },
     /// A plate add, update or close the sessions actor answers.
@@ -315,14 +322,18 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             }));
         }
         Ok(Action::PaneWait(ask)) => {
-            return pane_ops::wait_for(&deps.panes, &ask, gone, PaneTiming::REAL);
+            let typed = deps.typed.recent(ask.pane);
+            return pane_ops::wait_for(&deps.panes, &ask, &typed, gone, PaneTiming::REAL);
         }
         Ok(Action::Get { pane, detail }) => return agent_ops::get(deps.turns(), pane, detail),
         Ok(Action::Wait { pane, timeout }) => {
             let poke = || agent_ops::poke(deps);
             return agent_ops::wait(deps.turns(), pane, timeout, &poke, gone, Timing::REAL);
         }
-        Ok(Action::Reply { pane }) => return Reply::from_result(deps.turns().reply(pane)),
+        Ok(Action::Reply { pane, full }) => {
+            let reply = deps.turns().reply(pane);
+            return Reply::from_result(reply.map(|reply| turns::capped(reply, full)));
+        }
         Ok(Action::Add { add, name, run }) => pane_ops::add_pane(deps, add, name, run),
         Ok(Action::Start(start)) => start_session(deps, start),
         Ok(Action::Change(change)) => pane_ops::typed(deps, PaneRequest::Change(change)),
@@ -330,8 +341,18 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             Ok(_) => ended.reply(),
             Err(error) => Reply::err(error),
         },
-        Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
-        Ok(Action::Run(ask)) => pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL),
+        Ok(Action::Pane(request)) => {
+            remember_typed(deps, &request);
+            pane_ops::typed(deps, request)
+        }
+        Ok(Action::TypeRead(ask)) => {
+            remember_typed(deps, &ask.request);
+            pane_ops::type_read(&deps.panes, ask, gone, PaneTiming::REAL)
+        }
+        Ok(Action::Run(ask)) => {
+            deps.typed.remember(ask.pane, &ask.command);
+            pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL)
+        }
         Ok(Action::StartAgent {
             at,
             kind,
@@ -347,6 +368,19 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     };
     deps.log.line("api", &log_text(request, &reply));
     reply
+}
+
+/// Remembers the line `request` types with Enter, so `pane wait` can tell
+/// its echo from output.
+fn remember_typed(deps: &ControlDeps, request: &PaneRequest) {
+    if let PaneRequest::Type {
+        pane,
+        text,
+        enter: true,
+    } = request
+    {
+        deps.typed.remember(*pane, text);
+    }
 }
 
 /// `<op> caller=<id> item=<id> pane=<id> session=<id> project=<id> ->
@@ -460,14 +494,7 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::AgentWait { .. }
         | Op::AgentGet { .. }
         | Op::AgentReply { .. } => agent_ops::agent_io(app, &request.op, caller),
-        Op::PlateList => {
-            let now = SystemTime::now();
-            Ok(Action::Answered(plate::list(
-                app,
-                now,
-                app.zone.midnight(now),
-            )))
-        }
+        Op::PlateList { all } => Ok(Action::Answered(plate::list(app, SystemTime::now(), *all))),
         Op::PlateAdd { .. } | Op::PlateUpdate { .. } | Op::PlateDone { .. } => {
             plate::plan(app, &request.op, caller).map(Action::Plate)
         }
@@ -674,10 +701,10 @@ mod tests {
     use crate::feat::control::client;
     use crate::feat::control::lists::route;
     use crate::feat::control::pane_control::PaneRequest;
-    use crate::feat::control::pane_ops::follow_ups;
+    use crate::feat::control::pane_ops::{TypeRead, follow_ups};
     use crate::feat::control::protocol::{
         AgentKind, ApiError, ClosedResult, Direction, Done, EndedRow, ErrorCode, ItemResult, Op,
-        Reply, Request, SettledResult,
+        ReadBack, Reply, Request, SettledResult,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::layout::tree::Split;
@@ -789,8 +816,8 @@ mod tests {
     #[case::session_settle(Op::SessionSettle { session: None })]
     #[case::session_focus(Op::SessionFocus { session: SessionId(1) })]
     #[case::pane_send(Op::PaneSend { pane: PaneId(1), text: "x".into() })]
-    #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
-    #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into() })]
+    #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()], read: None })]
+    #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into(), enter: false, read: None })]
     #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: false, timeout: None, force: false, tail: None })]
     #[case::pane_run_wait(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: Some(5), force: false, tail: None })]
     #[case::pane_read(Op::PaneRead {
@@ -803,7 +830,7 @@ mod tests {
     #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false })]
     #[case::agent_start_split(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: Some(Direction::Right), tab: false, force: false })]
     #[case::agent_start_tab(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: true, force: false })]
-    #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None })]
+    #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false })]
     #[case::agent_wait(Op::AgentWait { pane: PaneId(1), timeout: None })]
     fn request_on_a_settled_session_is_refused(#[case] op: Op) {
         // Given session 1, settled, with pane 1.
@@ -948,7 +975,7 @@ mod tests {
             &app,
             &Request {
                 caller: None,
-                op: Op::PlateList,
+                op: Op::PlateList { all: false },
             },
         );
 
@@ -1004,6 +1031,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: vec!["enter".into(), "nope".into()],
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1087,6 +1115,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: ["esc", ":", "w", "q", "enter"].map(Into::into).to_vec(),
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1125,6 +1154,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: vec!["nope".into()],
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1149,6 +1179,8 @@ mod tests {
             op: Op::PaneType {
                 pane: PaneId(1),
                 text: ":wq".into(),
+                enter: false,
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1157,10 +1189,43 @@ mod tests {
         assert!(
             matches!(
                 &planned,
-                Ok(Action::Pane(PaneRequest::Type { pane, text }))
+                Ok(Action::Pane(PaneRequest::Type { pane, text, enter: false }))
                     if *pane == PaneId(1) && text == ":wq"
             ),
             "pane type plans raw typing, got {planned:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_type_with_read_is_planned_as_a_type_then_a_read() {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `print(1)` typed into pane 1 with Enter and --read.
+        let request = Request {
+            caller: None,
+            op: Op::PaneType {
+                pane: PaneId(1),
+                text: "print(1)".into(),
+                enter: true,
+                read: Some(ReadBack::default()),
+            },
+        };
+        let planned = plan(&app, &request);
+
+        // Then the line and Enter are typed, then the last 20 lines read
+        // back within the usual cap.
+        assert!(
+            matches!(
+                &planned,
+                Ok(Action::TypeRead(TypeRead {
+                    request: PaneRequest::Type { enter: true, .. },
+                    pane: PaneId(1),
+                    tail: 20,
+                    cap: None,
+                }))
+            ),
+            "pane type --read plans the typing and the read, got {planned:?}"
         );
     }
 
@@ -1352,6 +1417,7 @@ mod tests {
                 text: "secret".into(),
                 wait: true,
                 timeout: Some(9),
+                full: false,
             },
         };
 
@@ -1716,19 +1782,19 @@ mod tests {
     #[case::no_agent(
         state_with(vec![stopped(1)], 1),
         None,
-        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false },
         ErrorCode::NoAgent,
     )]
     #[case::agent_blocked(
         state_with(vec![agent(1, AgentStatus::NeedsInput)], 1),
         None,
-        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false },
         ErrorCode::AgentBlocked,
     )]
     #[case::no_reply(
         state_with(vec![agent(1, AgentStatus::Idle)], 1),
         None,
-        Op::AgentReply { pane: PaneId(1) },
+        Op::AgentReply { pane: PaneId(1), full: false },
         ErrorCode::NoReply,
     )]
     fn refusals_carry_a_hint_naming_a_command(

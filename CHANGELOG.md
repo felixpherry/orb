@@ -43,6 +43,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `orb pane wait --text|--regex` returns once the text shows on the pane, or times out.
 - `orb agent prompt --wait` prints the agent's answer.
 - `orb pane read --head N` and `--tail N` read the first or last lines of the screen.
+- `orb pane type --enter` presses Enter after the text.
+- `--read` on `orb pane type` and `orb pane keys` waits until the screen changes and then stays the same for 300 ms (at most 3 s, or `--timeout`) and prints its last 20 lines (`--tail`), so one call types a line into python and shows the answer.
+- `orb plate list --all` lists done items too.
+- Every API command takes `--json`; on a command that already prints JSON it changes nothing.
+- `orb agent reply --full` and `orb agent prompt --wait --full` print an answer of any length.
 
 ### Changed
 
@@ -68,6 +73,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The settle refusal names the panes and agents still working.
 - Unknown first words, such as `orb sessions`, and `orb --help` print help or a usage error instead of starting orb.
 - The orb skill is a short set of rules and recipes that points to `orb help`, instead of a copy of every command.
+- `orb plate list` lists only items that aren't done, and says how many done items it hid.
+- `orb agent reply` and `orb agent prompt --wait` print at most an answer's last 12,000 characters, after a line saying how many were cut.
+- The `busy` refusal's hint offers typing a line into the program (`orb pane type <pane> <text> --enter`) first, then quitting it, then `--force`. `orb pane run --help` warns that a program that never ends makes `--wait` run to its timeout.
+- The orb skill teaches the REPL and vim recipes with `--enter --read`, what `not_run` means, `plate list --all`, `--json` everywhere and `--full`.
+- The babysit and check-blast-radius skills name the unslop skill, if you have it, for the prose they write.
 
 ### Fixed
 
@@ -84,6 +94,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `orb agent prompt` reaches a Claude agent whose last turn failed, instead of saying there is no agent.
 - `orb agent start --pane` refuses with `busy` while a program such as vim runs in the pane, unless `--force`.
 - orb's log no longer writes agent names from a refused settle.
+- `orb pane wait --text` no longer matches the command line orb typed, only what the pane printed. In fish the prompt marks show which lines are command lines. Everywhere, a line that is one of the pane's last five typed lines, alone or after a prompt, is skipped too, so a line typed into python doesn't match. The shell's current prompt still matches, so `--text '~>'` waits for fish to be back.
+- `orb pane run --wait` on a line fish took but didn't run, a rejected line it kept or an unfinished one it waits on, fails with `not_run` naming why, and presses ctrl+c to clear it, so the next run starts clean. Only a prompt still being drawn, or a shell never seen marking a command start, keeps "it may still run"; orb checks once more just before the ctrl+c and waits on the command instead if it started.
+- `orb agent wait` after a turn that failed on a model call fails with `turn_failed` and the error text, instead of `idle`.
 
 ## [0.1.0] - 2026-10-16
 

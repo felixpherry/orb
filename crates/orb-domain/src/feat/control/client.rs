@@ -15,13 +15,14 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use serde::Deserialize;
+use unicode_segmentation::UnicodeSegmentation;
 use wherror::Error;
 
 use crate::feat::control::agent::Timing;
 use crate::feat::control::help::{self, CommandHelp};
 use crate::feat::control::pane_ops::last_line;
 use crate::feat::control::protocol::{
-    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, RunResult,
+    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, ReadBack, Reply, Request, RunResult,
 };
 use crate::feat::sessions::state::AgentStatus;
 use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
@@ -112,7 +113,13 @@ where
 /// line a wait matched; `None` for any other reply, or one not of its shape.
 fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
     match op {
-        Op::PaneRead { .. } | Op::AgentReply { .. } | Op::AgentPrompt { wait: true, .. } => result
+        Op::AgentReply { pane, .. }
+        | Op::AgentPrompt {
+            pane, wait: true, ..
+        } => answer_text(*pane, result),
+        Op::PaneRead { .. }
+        | Op::PaneType { read: Some(_), .. }
+        | Op::PaneKeys { read: Some(_), .. } => result
             .get("text")?
             .as_str()
             .map(|text| text.trim_end_matches('\n').to_owned()),
@@ -124,6 +131,29 @@ fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
             .map(|run| run_text(*pane, &run)),
         _ => None,
     }
+}
+
+/// An agent's answer in `result` from pane `pane` as plain text: its text,
+/// after a line naming how many earlier graphemes were cut and how to read
+/// them all when it was cut.
+fn answer_text(pane: PaneId, result: &serde_json::Value) -> Option<String> {
+    let text = result.get("text")?.as_str()?.trim_end_matches('\n');
+    let cut = result
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let chars = result.get("chars").and_then(serde_json::Value::as_u64);
+    Some(match chars {
+        Some(chars) if cut => {
+            let kept = u64::try_from(text.graphemes(true).count()).unwrap_or(chars);
+            format!(
+                "[… {} earlier characters; orb agent reply {} --full]\n{text}",
+                chars.saturating_sub(kept),
+                pane.0
+            )
+        }
+        _ => text.to_owned(),
+    })
 }
 
 /// A waited-on command's output in pane `pane` as lines: a note when its
@@ -160,7 +190,7 @@ fn asked_json(words: &[&str]) -> bool {
 }
 
 /// The words before the first `--`, or all of them without one.
-fn before_dash<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
+fn before_dash<'w, 'a>(words: &'w [&'a str]) -> &'w [&'a str] {
     words.split(|word| *word == "--").next().unwrap_or_default()
 }
 
@@ -486,11 +516,28 @@ pub(super) fn parse(args: &[OsString]) -> Result<Op, UsageError> {
         });
     };
     let command = named_command(noun, verb)?;
-    build(command, rest).map_err(|problem| UsageError {
+    let rest = without_json(command, rest);
+    build(command, &rest).map_err(|problem| UsageError {
         noun: Some(noun),
         verb: Some(command.verb),
         problem,
     })
+}
+
+/// `rest`, the words after `command`'s verb, without `--json` before `--`:
+/// every command takes it, and how the reply prints is settled apart from
+/// the request. The text `pane send` and `pane type` take as typed stays,
+/// even when it is `--json`.
+fn without_json<'a>(command: &CommandHelp, rest: &[&'a str]) -> Vec<&'a str> {
+    let as_typed = command.noun == "pane" && matches!(command.verb, "send" | "type");
+    let flags = before_dash(rest);
+    let kept = flags
+        .iter()
+        .enumerate()
+        .filter(|&(at, &word)| word != "--json" || (as_typed && at == 1))
+        .map(|(_, &word)| word);
+    let after = rest.get(flags.len()..).unwrap_or_default();
+    kept.chain(after.iter().copied()).collect()
 }
 
 /// The request `command` makes from the words after its verb.
@@ -646,8 +693,11 @@ fn plate_words(
             item: PlateItemId(words()?.one("<item>")?),
         },
         "list" => {
-            words()?.no_positional()?;
-            Op::PlateList
+            let words = words()?;
+            words.no_positional()?;
+            Op::PlateList {
+                all: words.switch("--all"),
+            }
         }
         _ => return Err(unknown_verb(verb)),
     })
@@ -699,7 +749,7 @@ fn agent_words(
             let words = words()?;
             let wait = words.switch("--wait");
             let timeout = words.number("--timeout")?;
-            words.needs("--wait", &["--timeout"])?;
+            words.needs("--wait", &["--timeout", "--full"])?;
             let given = words.with_after();
             let [pane, text] = exact(&given, ["<pane>", "<text>"])?;
             Op::AgentPrompt {
@@ -707,6 +757,7 @@ fn agent_words(
                 text: text.to_owned(),
                 wait,
                 timeout,
+                full: words.switch("--full"),
             }
         }
         "wait" => {
@@ -719,17 +770,22 @@ fn agent_words(
         "get" => Op::AgentGet {
             pane: PaneId(words()?.one("<pane>")?),
         },
-        "reply" => Op::AgentReply {
-            pane: PaneId(words()?.one("<pane>")?),
-        },
+        "reply" => {
+            let words = words()?;
+            Op::AgentReply {
+                pane: PaneId(words.one("<pane>")?),
+                full: words.switch("--full"),
+            }
+        }
         _ => return Err(unknown_verb(verb)),
     })
 }
 
-/// The pane input or output `verb` and its words ask for. `send`, `type` and
-/// `keys` take their words as typed, so text starting with `--` is kept; `run`,
-/// `wait` and `read` read their flags, and `run` takes a command starting with
-/// `--` after `--`.
+/// The pane input or output `verb` and its words ask for. `send` takes its
+/// words as typed, and `type` its text, so text starting with `--` is kept;
+/// `type` reads flags after its text, `keys` after its keys, `run`, `wait` and
+/// `read` read their flags, and `run` takes a command starting with `--` after
+/// `--`.
 fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<Op, UsageProblem> {
     Ok(match verb {
         "send" => {
@@ -739,13 +795,20 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
                 text: text.to_owned(),
             }
         }
-        "type" => {
-            let [pane, text] = exact(rest, ["<pane>", "<text>"])?;
-            Op::PaneType {
-                pane: PaneId(number("<pane>", pane)?),
-                text: text.to_owned(),
+        "type" => match rest {
+            [] => return Err(UsageProblem::MissingWord { what: "<pane>" }),
+            [_] => return Err(UsageProblem::MissingWord { what: "<text>" }),
+            [pane, text, flags @ ..] => {
+                let words = Words::split(flags, command)?;
+                words.no_positional()?;
+                Op::PaneType {
+                    pane: PaneId(number("<pane>", pane)?),
+                    text: (*text).to_owned(),
+                    enter: words.switch("--enter"),
+                    read: read_back(&words)?,
+                }
             }
-        }
+        },
         "run" => {
             let words = Words::split(rest, command)?;
             let wait = words.switch("--wait");
@@ -763,14 +826,18 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
                 tail,
             }
         }
-        "keys" => match rest {
-            [] => return Err(UsageProblem::MissingWord { what: "<pane>" }),
-            [_] => return Err(UsageProblem::MissingWord { what: "<key>" }),
-            [pane, keys @ ..] => Op::PaneKeys {
-                pane: PaneId(number("<pane>", pane)?),
-                keys: owned(keys),
-            },
-        },
+        "keys" => {
+            let words = Words::split(rest, command)?;
+            match words.positional.as_slice() {
+                [] => return Err(UsageProblem::MissingWord { what: "<pane>" }),
+                [_] => return Err(UsageProblem::MissingWord { what: "<key>" }),
+                [pane, keys @ ..] => Op::PaneKeys {
+                    pane: PaneId(number("<pane>", pane)?),
+                    keys: owned(keys),
+                    read: read_back(&words)?,
+                },
+            }
+        }
         "wait" => {
             let words = Words::split(rest, command)?;
             let pane = PaneId(words.one("<pane>")?);
@@ -805,6 +872,19 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
         }
         _ => return Err(unknown_verb(verb)),
     })
+}
+
+/// The read back `--read` asks for, with its `--tail` and `--timeout`; `None`
+/// without `--read`, and `Needs` for either of those without it.
+fn read_back(words: &Words<'_>) -> Result<Option<ReadBack>, UsageProblem> {
+    words.needs("--read", &["--tail", "--timeout"])?;
+    if !words.switch("--read") {
+        return Ok(None);
+    }
+    Ok(Some(ReadBack {
+        tail: words.number("--tail")?,
+        timeout: words.number("--timeout")?,
+    }))
 }
 
 /// The add request of `noun verb` its words ask for, with `--name`, `--run`
@@ -1105,6 +1185,14 @@ fn reply_limit(op: &Op) -> Option<Duration> {
         | Op::AgentWait { timeout, .. } => {
             timeout.map(|limit| Duration::from_millis(limit) + SLACK)
         }
+        Op::PaneType {
+            read: Some(ReadBack { timeout, .. }),
+            ..
+        }
+        | Op::PaneKeys {
+            read: Some(ReadBack { timeout, .. }),
+            ..
+        } => Some(timeout.map_or(OTHER_LIMIT, |limit| Duration::from_millis(limit) + SLACK)),
         _ => Some(OTHER_LIMIT),
     }
 }
@@ -1151,7 +1239,7 @@ fn timeout_hint(op: &Op) -> String {
         Op::AgentPrompt { pane, .. }
         | Op::AgentWait { pane, .. }
         | Op::AgentGet { pane }
-        | Op::AgentReply { pane }
+        | Op::AgentReply { pane, .. }
         | Op::AgentStart {
             pane: Some(pane), ..
         } => format!("orb agent get {} shows where it got to", pane.0),
@@ -1200,7 +1288,7 @@ mod tests {
 
     use super::{Entry, UsageProblem, entry, home, parse, reply_limit, run, timeout_hint};
     use crate::Log;
-    use crate::feat::control::protocol::{AgentKind, Direction, Op};
+    use crate::feat::control::protocol::{AgentKind, Direction, Op, ReadBack};
     use crate::feat::control::server;
     use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
@@ -1353,11 +1441,32 @@ mod tests {
     )]
     #[case::keys(
         &["pane", "keys", "3", "esc", "enter"],
-        Op::PaneKeys { pane: PaneId(3), keys: vec!["esc".into(), "enter".into()] },
+        Op::PaneKeys { pane: PaneId(3), keys: vec!["esc".into(), "enter".into()], read: None },
+    )]
+    #[case::keys_read(
+        &["pane", "keys", "3", "esc", "--read", "--tail", "5"],
+        Op::PaneKeys {
+            pane: PaneId(3),
+            keys: vec!["esc".into()],
+            read: Some(ReadBack { tail: Some(5), timeout: None }),
+        },
     )]
     #[case::type_text(
         &["pane", "type", "12", ":wq"],
-        Op::PaneType { pane: PaneId(12), text: ":wq".into() },
+        Op::PaneType { pane: PaneId(12), text: ":wq".into(), enter: false, read: None },
+    )]
+    #[case::type_enter_read(
+        &["pane", "type", "12", "print(1)", "--enter", "--read", "--timeout", "500"],
+        Op::PaneType {
+            pane: PaneId(12),
+            text: "print(1)".into(),
+            enter: true,
+            read: Some(ReadBack { tail: None, timeout: Some(500) }),
+        },
+    )]
+    #[case::type_text_like_a_flag(
+        &["pane", "type", "12", "--enter"],
+        Op::PaneType { pane: PaneId(12), text: "--enter".into(), enter: false, read: None },
     )]
     #[case::read_own(&["pane", "read", "--lines", "5"], Op::PaneRead {
         pane: None,
@@ -1589,19 +1698,24 @@ mod tests {
     )]
     #[case::prompt_wait(
         &["agent", "prompt", "3", "hi", "--wait", "--timeout", "500"],
-        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: Some(500) },
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: Some(500), full: false },
     )]
     #[case::prompt_wait_json(
         &["agent", "prompt", "3", "hi", "--wait", "--json"],
-        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None },
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None, full: false },
     )]
     #[case::prompt_dashed(
         &["agent", "prompt", "3", "--", "--hi"],
-        Op::AgentPrompt { pane: PaneId(3), text: "--hi".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(3), text: "--hi".into(), wait: false, timeout: None, full: false },
     )]
     #[case::wait(&["agent", "wait", "3"], Op::AgentWait { pane: PaneId(3), timeout: None })]
     #[case::get(&["agent", "get", "3"], Op::AgentGet { pane: PaneId(3) })]
-    #[case::reply(&["agent", "reply", "3"], Op::AgentReply { pane: PaneId(3) })]
+    #[case::reply(&["agent", "reply", "3"], Op::AgentReply { pane: PaneId(3), full: false })]
+    #[case::reply_full(&["agent", "reply", "3", "--full"], Op::AgentReply { pane: PaneId(3), full: true })]
+    #[case::prompt_wait_full(
+        &["agent", "prompt", "3", "hi", "--wait", "--full"],
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None, full: true },
+    )]
     fn agent_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -1799,7 +1913,8 @@ mod tests {
         },
     )]
     #[case::done(&["plate", "done", "3"], Op::PlateDone { item: PlateItemId(3) })]
-    #[case::list(&["plate", "list"], Op::PlateList)]
+    #[case::list(&["plate", "list"], Op::PlateList { all: false })]
+    #[case::list_all(&["plate", "list", "--all"], Op::PlateList { all: true })]
     fn plate_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -2015,6 +2130,22 @@ mod tests {
                 other: "--not-urgent",
             }),
             "--urgent and --not-urgent rule each other out"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_tail_without_read_is_a_usage_error() {
+        // Given / When parsing a pane type with --tail but no --read.
+        let problem = problem(&["pane", "type", "3", "x", "--tail", "5"]);
+
+        // Then --tail is named as needing --read.
+        assert_eq!(
+            problem,
+            Some(UsageProblem::Needs {
+                flag: "--tail",
+                needs: "--read",
+            }),
+            "--tail only means something with --read"
         );
     }
 
@@ -2238,7 +2369,7 @@ mod tests {
         &["pane", "read", "3", "--json"],
         Op::PaneRead { pane: Some(PaneId(3)), lines: 0, head: None, tail: None },
     )]
-    #[case::agent_reply_json(&["agent", "reply", "3", "--json"], Op::AgentReply { pane: PaneId(3) })]
+    #[case::agent_reply_json(&["agent", "reply", "3", "--json"], Op::AgentReply { pane: PaneId(3), full: false })]
     fn list_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -2264,15 +2395,51 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn json_flag_is_refused_where_nothing_prints_text() {
-        // Given / When parsing `session list --json`.
-        let problem = problem(&["session", "list", "--json"]);
+    #[case::session_list(&["session", "list"])]
+    #[case::pane_list(&["pane", "list"])]
+    #[case::pane_close(&["pane", "close", "3"])]
+    #[case::pane_rename(&["pane", "rename", "3", "web"])]
+    #[case::plate_done(&["plate", "done", "7"])]
+    fn json_flag_is_taken_by_every_command(#[case] words: &[&str]) {
+        // Given the words with --json added.
+        let with_json = [words, &["--json"]].concat();
 
-        // Then --json is an unknown flag there.
-        assert!(
-            matches!(&problem, Some(UsageProblem::UnknownFlag { flag, .. }) if flag == "--json"),
-            "session list always prints JSON, so it takes no --json, got {problem:?}"
+        // When parsing both.
+        let (plain, json) = (parse(&args(words)), parse(&args(&with_json)));
+
+        // Then --json makes the same request.
+        assert_eq!(json, plain, "{words:?} takes --json and asks the same");
+    }
+
+    #[rstest::rstest]
+    fn json_as_typed_text_is_kept() {
+        // Given / When parsing `pane send 3 --json`.
+        let op = parse(&args(&["pane", "send", "3", "--json"]));
+
+        // Then --json is the text sent.
+        assert_eq!(
+            op,
+            Ok(Op::PaneSend {
+                pane: PaneId(3),
+                text: "--json".into()
+            }),
+            "send takes its text as typed"
         );
+    }
+
+    /// An orb answer to `pane list`.
+    const PANES: &str = r#"{"ok":true,"result":{"panes":[]}}"#;
+
+    #[rstest::rstest]
+    fn list_with_json_prints_the_same_json() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb that answers `pane list` with no panes.
+        // When running `pane list` with and without --json.
+        let plain = answered(&["pane", "list"], PANES)?;
+        let json = answered(&["pane", "list", "--json"], PANES)?;
+
+        // Then both print the same JSON and succeed.
+        assert_eq!(json, plain, "--json on a JSON command changes nothing");
+        Ok(())
     }
 
     /// The exit code and stdout of running `words` against an orb that
@@ -2295,6 +2462,30 @@ mod tests {
 
     /// An orb answer to `agent reply`.
     const ANSWER: &str = r#"{"ok":true,"result":{"text":"done","at":5}}"#;
+
+    /// An orb answer to `agent reply` cut to its last 3 of 12,345
+    /// graphemes.
+    const CUT_ANSWER: &str =
+        r#"{"ok":true,"result":{"text":"end","at":5,"truncated":true,"chars":12345}}"#;
+
+    #[rstest::rstest]
+    fn cut_reply_prints_a_line_naming_the_cut_first() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose reply was cut.
+        // When running `agent reply 1`.
+        let (code, out) = answered(&["agent", "reply", "1"], CUT_ANSWER)?;
+
+        // Then a line names how much was cut and the --full command, then the
+        // kept end.
+        assert_eq!(
+            (code, out.as_str()),
+            (
+                0,
+                "[… 12342 earlier characters; orb agent reply 1 --full]\nend\n"
+            ),
+            "a cut reply says so before its end"
+        );
+        Ok(())
+    }
 
     #[rstest::rstest]
     fn read_prints_plain_text_by_default() -> Result<(), Box<dyn Error + Send + Sync>> {

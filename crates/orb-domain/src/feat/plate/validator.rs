@@ -8,6 +8,15 @@ use crate::feat::plate::state::{ITEM_DONE, no_item};
 use crate::feat::plate::{PlateItem, RowKey, Verb};
 use crate::ids::{PaneId, PlateItemId, SessionId};
 
+/// The hint for an item ID orb doesn't know: done items are left out of a
+/// plain list.
+pub(crate) const UNKNOWN_ITEM_HINT: &str =
+    "orb plate list shows the open items; orb plate list --all shows the done ones too";
+
+/// The hint for a change to an item that is done.
+pub(crate) const DONE_ITEM_HINT: &str =
+    "the item is done; orb plate list --all shows it, orb plate list the open items";
+
 /// What a colonist is told when it tries to add a plate item.
 pub(crate) const COLONIST_REFUSED: &str = "colonists report to their chief";
 
@@ -54,20 +63,16 @@ pub(crate) fn open_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, A
         Err(ApiError::new(
             ErrorCode::BadRequest,
             ITEM_DONE,
-            "orb plate list shows the open items",
+            DONE_ITEM_HINT,
         ))
     }
 }
 
 /// Item `id`, open or done; `not_found` when there's none.
 pub(crate) fn known_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, ApiError> {
-    app.plate.item(id).ok_or_else(|| {
-        ApiError::new(
-            ErrorCode::NotFound,
-            no_item(id),
-            "orb plate list shows the items",
-        )
-    })
+    app.plate
+        .item(id)
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, no_item(id), UNKNOWN_ITEM_HINT))
 }
 
 /// `links`, each free of control characters (C0, DEL and C1);

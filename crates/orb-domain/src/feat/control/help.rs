@@ -114,6 +114,47 @@ const fn optional(name: &'static str, default: &'static str, meaning: &'static s
     }
 }
 
+/// `--full` on an agent's answer.
+const FULL_FLAG: Param = word(
+    "--full",
+    "print the whole answer; without it, an answer over 12,000 characters keeps its last \
+     12,000 after a line saying how many were cut",
+);
+
+/// `--read` on `pane type` and `pane keys`.
+const READ_FLAG: Param = word(
+    "--read",
+    "then print the screen's last lines once it has changed and stays the same for 300 ms; \
+     a screen that keeps changing (top, a spinner) or shows nothing new is printed at the \
+     timeout",
+);
+
+/// `--tail <n>` with `--read`.
+const READ_TAIL_FLAG: Param = flag(
+    "--tail",
+    "<n>",
+    Some("20; only with --read"),
+    "keep the screen's last n lines",
+);
+
+/// `--timeout <ms>` with `--read`.
+const READ_TIMEOUT_FLAG: Param = flag(
+    "--timeout",
+    "<ms>",
+    Some("3000; only with --read"),
+    "milliseconds to wait for the screen to settle",
+);
+
+/// `--json` with `--read`.
+const READ_JSON_FLAG: Param = word(
+    "--json",
+    "with --read, print {\"text\"} as JSON instead of plain text",
+);
+
+/// What `pane type` and `pane keys` reply.
+const READ_BACK: &str = "{}; with --read the screen's last lines as plain text, or with --json \
+                         {\"text\": \"…\"}";
+
 /// What leaving out a session means.
 const CALLERS_SESSION: &str = "the caller's session";
 
@@ -454,8 +495,10 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "pane",
         verb: "keys",
-        usage: "orb pane keys <pane> <key>...",
-        summary: "Press named keys in a pane, in order; an unknown name sends nothing.",
+        usage: "orb pane keys <pane> <key>... [--read [--tail <n>] [--timeout <ms>]] [--json]",
+        summary: "Press named keys in a pane, in order; an unknown name sends nothing. With \
+                  --read, print the screen's last lines once it has changed and stayed the same \
+                  for 300 ms.",
         params: &[
             PANE,
             Param {
@@ -467,27 +510,45 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                           alt+<char>; or one character, sent as its key (uppercase as shifted)",
                 repeats: true,
             },
+            READ_FLAG,
+            READ_TAIL_FLAG,
+            READ_TIMEOUT_FLAG,
+            READ_JSON_FLAG,
         ],
         examples: &[
             "orb pane keys 12 ctrl+c",
             "orb pane keys 12 down down enter",
             "orb pane keys 12 esc",
-            "orb pane keys 12 q",
+            "orb pane keys 12 q --read",
         ],
-        reply: DONE,
+        reply: READ_BACK,
     },
     CommandHelp {
         noun: "pane",
         verb: "type",
-        usage: "orb pane type <pane> <text>",
-        summary: "Type text into a pane key by key: no paste, no Enter; control characters \
-                  are left out.",
+        usage: "orb pane type <pane> <text> [--enter] [--read [--tail <n>] [--timeout <ms>]] [--json]",
+        summary: "Type text into a pane key by key: no paste, and no Enter unless --enter; \
+                  control characters are left out. With --read, print the screen's last lines \
+                  once it has changed and stayed the same for 300 ms, so one call types a line \
+                  into a REPL and shows its answer.",
         params: &[
             PANE,
-            word("<text>", "the text, one quoted word, taken as is"),
+            word(
+                "<text>",
+                "the text, one quoted word, taken as is even when it starts with --",
+            ),
+            word("--enter", "press Enter after the text"),
+            READ_FLAG,
+            READ_TAIL_FLAG,
+            READ_TIMEOUT_FLAG,
+            READ_JSON_FLAG,
         ],
-        examples: &["orb pane type 12 \":wq\"", "orb pane type 12 \"hello\""],
-        reply: DONE,
+        examples: &[
+            "orb pane type 12 \":wq\" --enter --read",
+            "orb pane type 12 \"print(6*7)\" --enter --read",
+            "orb pane type 12 \"hello\"",
+        ],
+        reply: READ_BACK,
     },
     CommandHelp {
         noun: "pane",
@@ -497,7 +558,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                   once it is. In a shell that sends prompt marks (fish does), it's refused while \
                   a program runs there unless --force, and text left on the command line is \
                   cleared first. With --wait, print the command's output and exit code once it \
-                  ends.",
+                  ends. A program that never ends, like a REPL, a server or an editor, makes \
+                  --wait run to its timeout: start it with plain run (or --run on a new pane), \
+                  then use orb pane wait, or orb pane type --enter --read to talk to it.",
         params: &[
             PANE,
             word(
@@ -581,7 +644,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         usage: "orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]",
         summary: "Wait until a line of a pane's screen or recent history holds the text or matches \
                   the pattern, and print that line. Text already on screen counts, so wait for \
-                  text only the new output prints.",
+                  text only the new output prints. A command line the shell echoed, or a line orb \
+                  typed into a REPL, doesn't match; the shell's current prompt does, so --text \
+                  '~>' waits for fish to be back at its prompt.",
         params: &[
             PANE,
             flag("--text", "<text>", None, "text a line must hold"),
@@ -661,7 +726,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "prompt",
-        usage: "orb agent prompt <pane> <text> [--wait [--timeout <ms>]] [--json]",
+        usage: "orb agent prompt <pane> <text> [--wait [--timeout <ms>] [--full]] [--json]",
         summary: "Paste a prompt into an agent and press Enter.",
         params: &[
             AGENT_PANE,
@@ -679,9 +744,11 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 Some("no limit while work goes on"),
                 "milliseconds the whole call may take; only with --wait",
             ),
+            FULL_FLAG,
             word(
                 "--json",
-                "print {\"status\", \"text\", \"at\"} as JSON instead of plain text",
+                "print {\"status\", \"text\", \"at\"} as JSON instead of plain text, plus \
+                 \"truncated\" and \"chars\" when the answer was cut",
             ),
             word("--", "the prompt follows, even when it starts with -"),
         ],
@@ -722,16 +789,22 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "reply",
-        usage: "orb agent reply <pane> [--json]",
+        usage: "orb agent reply <pane> [--full] [--json]",
         summary: "Print everything a pane's agent wrote since orb's last prompt to it, else its last reply, as plain text.",
         params: &[
             AGENT_PANE,
+            FULL_FLAG,
             word(
                 "--json",
-                "print {\"text\", \"at\"} as JSON instead of plain text",
+                "print {\"text\", \"at\"} as JSON instead of plain text, plus \"truncated\" \
+                 and \"chars\" when the reply was cut",
             ),
         ],
-        examples: &["orb agent reply 12", "orb agent reply 12 --json"],
+        examples: &[
+            "orb agent reply 12",
+            "orb agent reply 12 --json",
+            "orb agent reply 12 --full",
+        ],
         reply: "the reply as plain text; with --json {\"text\": \"…\", \"at\": unix milliseconds|null}; turn_failed when the turn ended in a failed model call",
     },
     CommandHelp {
@@ -814,11 +887,11 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "plate",
         verb: "list",
-        usage: "orb plate list",
-        summary: "List open items and those done today.",
-        params: &[],
-        examples: &["orb plate list"],
-        reply: "{\"items\": [{\"id\", \"verb\", \"state\", \"title\", \"what\", \"links\", \"urgent\", \"session\", \"pane\", \"age_s\"}]}",
+        usage: "orb plate list [--all]",
+        summary: "List the items that aren't done: your move, waiting on others and parked.",
+        params: &[word("--all", "list done items too")],
+        examples: &["orb plate list", "orb plate list --all"],
+        reply: "{\"items\": [{\"id\", \"verb\", \"state\", \"title\", \"what\", \"links\", \"urgent\", \"session\", \"pane\", \"age_s\"}], \"hidden\": N, \"hint\"?: \"…\"}",
     },
 ];
 
@@ -902,11 +975,12 @@ pub(crate) fn overview() -> String {
         "Bare orb in an orb pane says which pane, tab and session you're in.".to_owned(),
         String::new(),
         "replies:".to_owned(),
-        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait, agent prompt --wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
+        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait, pane type --read, pane keys --read, agent prompt --wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
         "  exit 1  refused, or orb isn't running; {\"code\", \"message\", \"hint\"} on stderr"
             .to_owned(),
         "  exit 2  typed wrong; what was wrong, the usage line and the help command on stderr"
             .to_owned(),
+        format!("  {GLOBAL_JSON}"),
         String::new(),
         "help: orb <noun> --help · orb <noun> <verb> --help".to_owned(),
     ]);
@@ -966,8 +1040,13 @@ fn param_meaning(param: &Param) -> String {
     format!("{}{default}{repeats}", param.meaning)
 }
 
+/// What `--json` does on every command, as help says it.
+const GLOBAL_JSON: &str = "--json  every command takes it: print the reply as JSON; where the \
+                           reply is JSON already, it changes nothing";
+
 /// `orb <noun> <verb> --help`: summary, usage line, each param with its
-/// default, the examples, the reply shape.
+/// default, `--json` as the flag every command takes, the examples, the
+/// reply shape.
 pub(crate) fn command_help(command: &CommandHelp) -> String {
     let mut lines = vec![
         format!("orb {} {}: {}", command.noun, command.verb, command.summary),
@@ -984,6 +1063,10 @@ pub(crate) fn command_help(command: &CommandHelp) -> String {
                 .zip(command.params)
                 .map(|(label, param)| format!("  {label:<width$}  {}", param_meaning(param))),
         );
+    }
+    if !command.params.iter().any(|param| param.name == "--json") {
+        lines.push(String::new());
+        lines.push(format!("  {GLOBAL_JSON}"));
     }
     lines.push(String::new());
     lines.push("examples:".to_owned());

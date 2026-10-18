@@ -216,12 +216,29 @@ pub enum Op {
     /// Pastes text into a pane.
     #[serde(rename = "pane.send")]
     PaneSend { pane: PaneId, text: String },
-    /// Presses named keys in a pane, in order.
+    /// Presses named keys in a pane, in order, then maybe reads its screen
+    /// back once it settles.
     #[serde(rename = "pane.keys")]
-    PaneKeys { pane: PaneId, keys: Vec<String> },
-    /// Types text into a pane: no paste, no Enter.
+    PaneKeys {
+        pane: PaneId,
+        keys: Vec<String>,
+        /// Read the screen back once it settles.
+        #[serde(default)]
+        read: Option<ReadBack>,
+    },
+    /// Types text into a pane: no paste, Enter only with `enter`; then maybe
+    /// reads its screen back once it settles.
     #[serde(rename = "pane.type")]
-    PaneType { pane: PaneId, text: String },
+    PaneType {
+        pane: PaneId,
+        text: String,
+        /// Press Enter after the text.
+        #[serde(default)]
+        enter: bool,
+        /// Read the screen back once it settles.
+        #[serde(default)]
+        read: Option<ReadBack>,
+    },
     /// Types a command and Enter into a pane's shell.
     #[serde(rename = "pane.run")]
     PaneRun {
@@ -310,6 +327,9 @@ pub enum Op {
         /// goes on.
         #[serde(default)]
         timeout: Option<u64>,
+        /// With `wait`, give the whole answer, however long.
+        #[serde(default)]
+        full: bool,
     },
     /// Waits until a pane's agent is idle or waits on the user.
     #[serde(rename = "agent.wait")]
@@ -324,7 +344,12 @@ pub enum Op {
     AgentGet { pane: PaneId },
     /// The last reply in a pane's agent's transcript.
     #[serde(rename = "agent.reply")]
-    AgentReply { pane: PaneId },
+    AgentReply {
+        pane: PaneId,
+        /// Give the whole reply, however long.
+        #[serde(default)]
+        full: bool,
+    },
     /// A new item on the user's plate.
     #[serde(rename = "plate.add")]
     PlateAdd {
@@ -370,9 +395,25 @@ pub enum Op {
     /// Closes an item.
     #[serde(rename = "plate.done")]
     PlateDone { item: PlateItemId },
-    /// Open items and those done today.
+    /// Items that aren't done, or every item with `all`.
     #[serde(rename = "plate.list")]
-    PlateList,
+    PlateList {
+        #[serde(default)]
+        all: bool,
+    },
+}
+
+/// How `pane type` and `pane keys` read the screen back: once it stays the
+/// same for a moment, or at the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReadBack {
+    /// Keep the screen's last `tail` lines (20 when left out).
+    #[serde(default)]
+    pub tail: Option<usize>,
+    /// Give up waiting for the screen to settle after this many
+    /// milliseconds (3,000 when left out).
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// The program `agent start` types.
@@ -806,20 +847,26 @@ pub struct WaitResult {
 }
 
 /// `agent prompt --wait`'s result: the turn ended, with everything the
-/// agent wrote since the prompt and when, in unix milliseconds.
+/// agent wrote since the prompt as `agent reply` gives it, its fields beside
+/// the status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnswerResult {
     pub status: WaitEnd,
-    pub text: String,
-    pub at: Option<i64>,
+    #[serde(flatten)]
+    pub reply: ReplyResult,
 }
 
 /// `agent reply`'s result: the last reply's text and when it was written,
-/// in unix milliseconds.
+/// in unix milliseconds. A long reply is cut to its end, `truncated`, with
+/// `chars` its whole length in graphemes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplyResult {
     pub text: String,
     pub at: Option<i64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chars: Option<usize>,
 }
 
 /// `agent list`'s result.
@@ -878,4 +925,9 @@ pub struct PlateItemRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlateResult {
     pub items: Vec<PlateItemRow>,
+    /// Done items the open-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }

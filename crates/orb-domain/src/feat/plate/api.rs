@@ -14,7 +14,7 @@ use crate::feat::control::protocol::{
 };
 use crate::feat::control::server::ControlDeps;
 use crate::feat::control::target::{self, Target};
-use crate::feat::plate::validator;
+use crate::feat::plate::validator::{self, DONE_ITEM_HINT, UNKNOWN_ITEM_HINT};
 use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, Verb};
 use crate::feat::sessions::sessions_actor::{
     ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError,
@@ -172,8 +172,8 @@ fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
         return ApiError::failed(error.to_string());
     };
     let (code, hint) = match report.current_context() {
-        PlateApiError::NotFound => (ErrorCode::NotFound, "orb plate list shows the items"),
-        PlateApiError::Done => (ErrorCode::BadRequest, "orb plate list shows the open items"),
+        PlateApiError::NotFound => (ErrorCode::NotFound, UNKNOWN_ITEM_HINT),
+        PlateApiError::Done => (ErrorCode::BadRequest, DONE_ITEM_HINT),
         PlateApiError::Unsaved => (ErrorCode::Failed, SEE_LOG),
     };
     let reason = report
@@ -183,17 +183,24 @@ fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
     ApiError::new(code, reason, hint)
 }
 
-/// `plate list`'s reply: open items and those done since `today`, with each
-/// one's age at `now`.
-pub(crate) fn list(app: &AppState, now: SystemTime, today: SystemTime) -> Reply {
-    let items = app
-        .plate
-        .items()
+/// `plate list`'s reply: the items that aren't done, or every item with
+/// `all`, with each one's age at `now`. `hidden` counts the done items the
+/// default left out, and the hint says how to see them.
+pub(crate) fn list(app: &AppState, now: SystemTime, all: bool) -> Reply {
+    let every = app.plate.items();
+    let items: Vec<PlateItemRow> = every
         .iter()
-        .filter(|item| item.state.is_open() || item.done_at.is_some_and(|at| at >= today))
+        .filter(|item| all || item.state.is_open())
         .map(|item| row(item, now))
         .collect();
-    Reply::ok(&PlateResult { items })
+    let hidden = every.len() - items.len();
+    let plural = if hidden == 1 { "" } else { "s" };
+    Reply::ok(&PlateResult {
+        items,
+        hidden,
+        hint: (hidden > 0)
+            .then(|| format!("orb plate list --all shows {hidden} done item{plural}")),
+    })
 }
 
 /// `item`'s row in `plate list`, aged at `now`.
