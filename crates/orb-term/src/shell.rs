@@ -32,10 +32,12 @@ pub enum ShellPhase {
     },
 }
 
-/// The last command that ended: its exit status, its output's lines
-/// (`end_line` not included), and the seq of the mark that started it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The last command that ended: its program (its first word), its exit
+/// status, its output's lines (`end_line` not included), and the seq of the
+/// mark that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
+    pub program: Option<String>,
     pub exit: Option<i32>,
     pub start_line: i64,
     pub end_line: i64,
@@ -95,16 +97,17 @@ impl ShellTracker {
             },
             Mark::CommandEnd { exit } => {
                 if let ShellPhase::Running {
+                    program,
                     start_line,
                     started,
-                    ..
-                } = self.phase
+                } = &self.phase
                 {
                     self.last = Some(Finished {
+                        program: program.clone(),
                         exit: *exit,
-                        start_line,
-                        end_line: line_from(cursor).max(start_line),
-                        started,
+                        start_line: *start_line,
+                        end_line: line_from(cursor).max(*start_line),
+                        started: *started,
                     });
                 }
                 ShellPhase::AtPrompt { input_at: None }
@@ -122,7 +125,7 @@ impl ShellTracker {
         ShellState {
             marks_seen: self.marks_seen(),
             phase: self.phase.clone(),
-            last: self.last,
+            last: self.last.clone(),
             seq: self.seq,
             cursor,
         }
@@ -240,6 +243,7 @@ mod tests {
             (state.last, state.phase),
             (
                 Some(Finished {
+                    program: Some("ls".to_owned()),
                     exit: Some(1),
                     start_line: 4,
                     end_line: 7,

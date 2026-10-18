@@ -53,9 +53,11 @@ impl App {
             PaneRequest::Read { pane, lines } => self
                 .live_pane(pane)
                 .map(|live| PaneAnswer::Text(live.text(lines))),
-            PaneRequest::Shell { pane } => self
-                .live_pane(pane)
-                .map(|live| PaneAnswer::Shell(shell_view(live.shell()))),
+            PaneRequest::Shell { pane } => {
+                let held = self.typing.contains_key(&pane);
+                self.live_pane(pane)
+                    .map(|live| PaneAnswer::Shell(shell_view(live.shell(), held)))
+            }
             PaneRequest::Between { pane, start, end } => self.live_pane(pane).map(|live| {
                 let orb_term::Lines { text, truncated } = live.text_between(start, end);
                 PaneAnswer::Lines(PaneLines { text, truncated })
@@ -118,10 +120,11 @@ impl App {
     }
 }
 
-/// `shell` as the control server sees it: the command line holds leftover
-/// text when the cursor moved since the prompt ended. A running command's
-/// start line stays behind.
-fn shell_view(shell: orb_term::ShellState) -> ShellView {
+/// `shell` as the control server sees it, `held` when a typed line waits
+/// for the pane's first output: the command line holds leftover text when
+/// the cursor moved since the prompt ended. A running command's start line
+/// stays behind.
+fn shell_view(shell: orb_term::ShellState, held: bool) -> ShellView {
     let phase = match shell.phase {
         orb_term::ShellPhase::Unknown => ShellPhase::Unknown,
         orb_term::ShellPhase::AtPrompt { input_at } => ShellPhase::AtPrompt {
@@ -135,11 +138,13 @@ fn shell_view(shell: orb_term::ShellState) -> ShellView {
         marks_seen: shell.marks_seen,
         phase,
         last: shell.last.map(|last| Finished {
+            program: last.program,
             exit: last.exit,
             start_line: last.start_line,
             end_line: last.end_line,
             started: last.started,
         }),
         seq: shell.seq,
+        held,
     }
 }

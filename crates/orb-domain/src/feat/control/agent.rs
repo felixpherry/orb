@@ -50,12 +50,10 @@ impl Timing {
     };
 }
 
-/// Whether an agent with `status` may still be running.
+/// Whether an agent with `status` may still be running. A failed agent
+/// still runs: only its last turn failed, and it takes the next prompt.
 pub(crate) fn live(status: AgentStatus) -> bool {
-    !matches!(
-        status,
-        AgentStatus::Stopped | AgentStatus::Gone | AgentStatus::Failed
-    )
+    !matches!(status, AgentStatus::Stopped | AgentStatus::Gone)
 }
 
 /// The agent bound to `pane`: a live one before a dead one.
@@ -199,14 +197,22 @@ fn ran_out(pane: PaneId) -> ApiError {
 }
 
 /// `pane`'s live agent, once the pane is checked still open; `turn_failed`
-/// when its agent failed, `no_agent` when none is live.
+/// when its last turn failed, `no_agent` when none is live.
 fn live_agent(app: &AppState, pane: PaneId) -> Result<&Agent, ApiError> {
-    pane_open(app, pane)?;
-    match pane_agent(app, pane) {
-        Some(agent) if agent.status == AgentStatus::Failed => Err(turn_failed(pane, None)),
-        Some(agent) if live(agent.status) => Ok(agent),
-        _ => Err(no_agent(pane)),
+    let agent = running_agent(app, pane)?;
+    if agent.status == AgentStatus::Failed {
+        return Err(turn_failed(pane, None));
     }
+    Ok(agent)
+}
+
+/// `pane`'s live agent, failed last turn or not, once the pane is checked
+/// still open; `no_agent` when none is live.
+fn running_agent(app: &AppState, pane: PaneId) -> Result<&Agent, ApiError> {
+    pane_open(app, pane)?;
+    pane_agent(app, pane)
+        .filter(|agent| live(agent.status))
+        .ok_or_else(|| no_agent(pane))
 }
 
 /// Whether `pane`'s agent wrote its transcript after `pasted`: a turn that
@@ -260,7 +266,8 @@ pub(crate) struct Sent {
 }
 
 /// After the prompt `sent`: waits what is left of the stall gate to see a
-/// turn underway, then [`wait_done`]. Seeing none is `prompt_stalled`,
+/// turn underway, then [`wait_done`]; an agent whose last turn failed is
+/// waited on like an idle one until then. Seeing none is `prompt_stalled`,
 /// unless the agent wrote its transcript since the paste (a turn too short
 /// to see). `deadline` covers both halves; when it comes before the gate,
 /// running out is `timeout`, as is `gone` saying the caller hung up.
@@ -281,7 +288,7 @@ pub(crate) fn wait_prompted(
         gone,
         timing,
         Some(first),
-        |app| match live_agent(app, pane) {
+        |app| match running_agent(app, pane) {
             Ok(agent) => agent.status.in_progress().then_some(Ok(())),
             Err(error) => Some(Err(error)),
         },
@@ -650,6 +657,39 @@ mod tests {
                 status: WaitEnd::Idle
             }),
             "working then idle should end the wait idle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_wait_on_an_agent_whose_last_turn_failed_waits_for_the_new_turn() {
+        // Given agent 1 in pane 1 whose last turn failed, which the first
+        // poll sees working on the new prompt and the third sees idle.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Failed)], 1));
+        let polls = AtomicUsize::new(0);
+        let poke = || match polls.fetch_add(1, Ordering::SeqCst) + 1 {
+            1 => set_status(&state, 1, AgentStatus::Working),
+            3 => set_status(&state, 1, AgentStatus::Idle),
+            _ => {}
+        };
+
+        // When waiting on a prompt with no deadline.
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &poke,
+            &|| false,
+            FAST,
+            None,
+            sent(SystemTime::now()),
+        );
+
+        // Then the old failure doesn't end the wait; the new turn ends idle.
+        assert_eq!(
+            waited.map_err(|error| error.code),
+            Ok(WaitResult {
+                status: WaitEnd::Idle
+            }),
+            "a failed last turn should not end the wait on the next prompt"
         );
     }
 

@@ -293,6 +293,10 @@ pub enum Op {
         /// Start in a new tab of the caller's session.
         #[serde(default)]
         tab: bool,
+        /// Type the program into an existing pane even while another program
+        /// runs there.
+        #[serde(default)]
+        force: bool,
     },
     /// Pastes a prompt into an agent and presses Enter.
     #[serde(rename = "agent.prompt")]
@@ -457,6 +461,10 @@ pub struct ApiError {
     /// The command or step that fixes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The message as orb's log writes it, for a message that names panes,
+    /// agents or sessions by title; never sent to the client.
+    #[serde(skip)]
+    pub logged: Option<String>,
 }
 
 impl ApiError {
@@ -470,6 +478,7 @@ impl ApiError {
             code,
             message: message.into(),
             hint: Some(hint.into()),
+            logged: None,
         }
     }
 
@@ -492,6 +501,24 @@ impl ApiError {
             message,
             "orb help lists the commands",
         )
+    }
+
+    /// The same refusal, written to orb's log as `logged` in place of its
+    /// message.
+    #[must_use]
+    pub fn logged_as<L>(self, logged: L) -> Self
+    where
+        L: Into<String>,
+    {
+        Self {
+            logged: Some(logged.into()),
+            ..self
+        }
+    }
+
+    /// The message as orb's log writes it.
+    pub fn log_message(&self) -> &str {
+        self.logged.as_deref().unwrap_or(&self.message)
     }
 
     /// The same refusal with `hint` in place of its own.

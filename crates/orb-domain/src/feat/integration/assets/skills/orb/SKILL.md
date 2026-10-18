@@ -42,8 +42,8 @@ orb pane run 12 "just test" --wait              # its output, then [exit 0]
 ```
 
 - **`--wait` prints the output's last 200 lines, then `[exit n]`.** `--tail <n>` keeps a different number. `--timeout <ms>` caps the call.
-- **`busy`: a program already runs in the pane,** named in the message. **`not_run`: the shell didn't run the line,** for example a syntax error; fix it.
-- **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen is quiet for 1 s and prints `[exit ?]`, and `busy` is never checked.
+- **`busy`: a program already runs in the pane,** named in the message. **`not_run`: the shell didn't run the line,** for example a syntax error; fix it. **A `timeout` saying it may still run** means the shell was slow: read the pane, don't run the line again.
+- **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen stays quiet for 1 s, no sooner than 2 s after the line is typed, and prints `[exit ?]`, and `busy` is never checked.
 - **Without `--wait`, `run` types the line and Enter and replies `{}`.** A pane not drawn yet gets it once it draws, so no sleep is needed after `split`.
 - **The command is one quoted word,** with `--` before it if it starts with `--`.
 
@@ -67,7 +67,7 @@ orb agent prompt 15 "Review the diff on this branch and list bugs." --wait   # t
 orb agent start --kind pi --split down -- --model sonnet      # words after -- go to pi
 ```
 
-- **`--split right|down` or `--tab` makes its pane.** `--pane <id>` uses a shell pane you already have. Leave all three out and it means your own pane, where you already run.
+- **`--split right|down` or `--tab` makes its pane.** `--pane <id>` uses a shell pane you already have. Leave all three out and it means your own pane, where you already run, so from a shell prompt it's refused with `busy` naming orb: use `--split right` or `--tab`. `--force` goes only with an existing pane.
 - **`prompt --wait` prints what the agent wrote since your prompt.** `--timeout <ms>` caps the call. `agent_blocked`: it stopped to ask the user; tell them. `turn_failed`: its model call failed and the message is the error; tell the user.
 - **Prompt an agent that is idle.** Sent mid-turn, your prompt may be folded into the turn already running, so `--wait` ends with that turn. `orb agent reply` still gives everything written since your prompt. If the answer doesn't cover your prompt, `orb agent wait` and read the reply again.
 - **The prompt is one quoted word.** If it starts with `-`, put the flags first and `--` before it: `orb agent prompt 15 --wait -- "--force is broken"`.

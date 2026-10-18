@@ -300,9 +300,12 @@ pub(super) struct RunAsk {
 /// `wait`, the command's exit status and output once it ends. In a shell that
 /// sends prompt marks, a running program refuses it as `busy` unless `force`,
 /// and text left on the command line is cleared first; there the wait follows
-/// the marks. Without marks, or forced into a running program, the wait ends
-/// once the screen stays the same for a while. A wait stops once `gone` says
-/// the caller hung up.
+/// the marks. A shell that had sent no marks yet (just started, or from
+/// before orb started) is watched for marks of its own for the start gate
+/// after the line is typed, then followed by them (see [`first_marks`]).
+/// Without marks, or forced into a running program, the wait ends once the
+/// screen stays the same for a while. A wait stops once `gone` says the
+/// caller hung up.
 pub(super) fn run(
     panes: &PaneControl,
     ask: &RunAsk,
@@ -314,13 +317,7 @@ pub(super) fn run(
         if !ask.wait {
             return Ok(None);
         }
-        let marked = before.marks_seen && !matches!(before.phase, ShellPhase::Running { .. });
-        if marked {
-            marked_wait(panes, ask, before.seq, deadline, gone, timing)
-        } else {
-            quiet_wait(panes, ask, deadline, gone, timing)
-        }
-        .map(Some)
+        wait_run(panes, ask, &before, deadline, gone, timing).map(Some)
     });
     match outcome {
         Ok(None) => Reply::ok(&Done {}),
@@ -329,27 +326,73 @@ pub(super) fn run(
     }
 }
 
+/// Waits on the command typed into a shell that was `before` (see [`run`]).
+fn wait_run(
+    panes: &PaneControl,
+    ask: &RunAsk,
+    before: &ShellView,
+    deadline: Option<Instant>,
+    gone: &dyn Fn() -> bool,
+    timing: PaneTiming,
+) -> Result<RunResult, ApiError> {
+    let since = Since {
+        typed: before.seq,
+        prompt: before.seq,
+        gate_from: Instant::now(),
+    };
+    let watch = match before.phase {
+        ShellPhase::Running { .. } => false,
+        _ if before.marks_seen => return marked_wait(panes, ask, since, deadline, gone, timing),
+        _ => true,
+    };
+    match screen_wait(panes, ask, deadline, gone, timing, watch)? {
+        Watched::Quiet(result) => Ok(result),
+        Watched::Marked { prompt } => {
+            let since = Since {
+                prompt,
+                gate_from: Instant::now(),
+                ..since
+            };
+            marked_wait(panes, ask, since, deadline, gone, timing)
+        }
+    }
+}
+
 /// Checks the pane's shell, clears text left on its command line, and types
 /// the command line, giving back the shell as it was before; `busy` while a
 /// program runs there, unless `force`.
 fn type_command(panes: &PaneControl, ask: &RunAsk) -> Result<ShellView, ApiError> {
-    let before = panes.shell(ask.pane)?;
+    let before = ready_shell(panes, ask.pane, ask.force, None)?;
+    panes.ask(PaneRequest::Run {
+        pane: ask.pane,
+        line: ask.command.clone(),
+    })?;
+    Ok(before)
+}
+
+/// Readies `pane`'s shell for a typed line: `busy` while a program runs
+/// there (its hint offering `elsewhere` too, when given), unless `force`;
+/// text left on the command line is cleared. Gives back the shell as it was
+/// before. A shell that sends no prompt marks is left as it is.
+pub(super) fn ready_shell(
+    panes: &PaneControl,
+    pane: PaneId,
+    force: bool,
+    elsewhere: Option<&str>,
+) -> Result<ShellView, ApiError> {
+    let before = panes.shell(pane)?;
     match &before.phase {
-        ShellPhase::Running { program, .. } if !ask.force => {
-            return Err(busy(ask.pane, program.as_deref()));
+        ShellPhase::Running { program, .. } if !force => {
+            return Err(busy(pane, program.as_deref(), elsewhere));
         }
         ShellPhase::AtPrompt { leftover: true } => {
             panes.ask(PaneRequest::Keys {
-                pane: ask.pane,
+                pane,
                 keys: clear_line(),
             })?;
         }
         _ => {}
     }
-    panes.ask(PaneRequest::Run {
-        pane: ask.pane,
-        line: ask.command.clone(),
-    })?;
     Ok(before)
 }
 
@@ -362,24 +405,38 @@ fn clear_line() -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Waits on the prompt marks for the command typed after mark `seq`: its
-/// start within the start gate, then its end by `deadline`, and replies with
-/// its exit status and output. `not_run` when it didn't start, `timeout` when
-/// `deadline` came first.
+/// Where a wait on prompt marks starts from.
+#[derive(Debug, Clone, Copy)]
+struct Since {
+    /// The last mark before the command was typed.
+    typed: u64,
+    /// The last mark of the prompt the command went to: a newer, empty
+    /// prompt with no start between means the shell refused the command.
+    prompt: u64,
+    /// When the start gate starts to run.
+    gate_from: Instant,
+}
+
+/// Waits on the prompt marks for the command typed after mark `since.typed`:
+/// its start within the start gate, then its end by `deadline`, and replies
+/// with its exit status and output. `not_run` when the shell showed a new
+/// empty prompt instead; `timeout` when `deadline` came first, or when the
+/// shell hadn't answered at all by the end of the gate (it may still run the
+/// command).
 fn marked_wait(
     panes: &PaneControl,
     ask: &RunAsk,
-    seq: u64,
+    since: Since,
     deadline: Option<Instant>,
     gone: &dyn Fn() -> bool,
     timing: PaneTiming,
 ) -> Result<RunResult, ApiError> {
     let pane = ask.pane;
-    let gate = Instant::now() + timing.start_gate;
+    let gate = since.gate_from + timing.start_gate;
     let start_by = deadline.map_or(gate, |deadline| deadline.min(gate));
     let started = poll(timing.tick, Some(start_by), gone, || {
         match panes.shell(pane) {
-            Ok(view) => ours_started(&view, seq).then_some(Ok(())),
+            Ok(view) => ours_started(&view, since.typed).then_some(Ok(())),
             Err(error) => Some(Err(error)),
         }
     });
@@ -395,10 +452,16 @@ fn marked_wait(
                 format!("orb pane read {} shows the pane", pane.0),
             ));
         }
-        None => return Err(not_run(pane, &panes.text(pane, 0)?)),
+        None if refused(&panes.shell(pane)?, since.prompt) => {
+            return Err(not_run(pane, &panes.text(pane, 0)?));
+        }
+        None => return Err(not_started(pane, timing.start_gate)),
     }
     let finished = poll(timing.tick, deadline, gone, || match panes.shell(pane) {
-        Ok(view) => view.last.filter(|finished| finished.started > seq).map(Ok),
+        Ok(view) => view
+            .last
+            .filter(|finished| finished.started > since.typed)
+            .map(Ok),
         Err(error) => Some(Err(error)),
     })
     .ok_or_else(|| {
@@ -428,29 +491,75 @@ fn marked_wait(
 /// it already ended.
 fn ours_started(view: &ShellView, seq: u64) -> bool {
     let running = matches!(view.phase, ShellPhase::Running { started, .. } if started > seq);
-    running || view.last.is_some_and(|finished| finished.started > seq)
+    running
+        || view
+            .last
+            .as_ref()
+            .is_some_and(|finished| finished.started > seq)
+}
+
+/// Whether the shell `view` shows a newer prompt than mark `prompt`, empty
+/// and with no command started: it answered the typed line with a prompt
+/// (a syntax error) instead of running it.
+fn refused(view: &ShellView, prompt: u64) -> bool {
+    view.seq > prompt && view.phase == ShellPhase::AtPrompt { leftover: false }
+}
+
+/// How a wait on the screen ended.
+#[derive(Debug)]
+enum Watched {
+    /// The screen stayed the same for a while, or the deadline came.
+    Quiet(RunResult),
+    /// The shell sent marks of its own; the newest has seq `prompt`.
+    Marked { prompt: u64 },
 }
 
 /// Reads the pane's screen and `tail` lines of history every tick until it
 /// stays the same for `timing.quiet`, and replies with it, exit unknown. At
-/// `deadline` it replies with the screen as it is then.
-fn quiet_wait(
+/// `deadline` it replies with the screen as it is then. With `watch`, the
+/// shell had sent no prompt marks yet: the start gate runs from when the
+/// line is typed (a line held for the pane's first output waits for it),
+/// marks of the shell's own (see [`first_marks`]) inside it end the wait,
+/// and a quiet screen counts only once it is over. Marks after it are left
+/// alone.
+fn screen_wait(
     panes: &PaneControl,
     ask: &RunAsk,
     deadline: Option<Instant>,
     gone: &dyn Fn() -> bool,
     timing: PaneTiming,
-) -> Result<RunResult, ApiError> {
+    watch: bool,
+) -> Result<Watched, ApiError> {
     let mut seen: Option<(String, Instant)> = None;
-    let quiet = poll(timing.tick, deadline, gone, || {
+    let mut gate_ends = (!watch).then(Instant::now);
+    let mut held = false;
+    let waited = poll(timing.tick, deadline, gone, || {
+        let now = Instant::now();
+        if watch && gate_ends.is_none_or(|ends| now < ends) {
+            let view = match panes.shell(ask.pane) {
+                Ok(view) => view,
+                Err(error) => return Some(Err(error)),
+            };
+            if view.held {
+                held = true;
+                seen = None;
+                return None;
+            }
+            gate_ends.get_or_insert(now + timing.start_gate);
+            if let Some(prompt) = first_marks(&view, &ask.command, held) {
+                return Some(Ok(Watched::Marked { prompt }));
+            }
+        }
         let text = match panes.text(ask.pane, ask.tail) {
             Ok(text) => text,
             Err(error) => return Some(Err(error)),
         };
-        let now = Instant::now();
         match &seen {
             Some((last, since)) if *last == text => {
-                (now.duration_since(*since) >= timing.quiet).then_some(Ok(text))
+                let quiet = now.duration_since(*since) >= timing.quiet;
+                let gated = gate_ends.is_some_and(|ends| now >= ends);
+                (quiet && gated)
+                    .then(|| Ok(Watched::Quiet(run_result(None, &text, ask.tail, false))))
             }
             _ => {
                 seen = Some((text, now));
@@ -458,11 +567,37 @@ fn quiet_wait(
             }
         }
     });
-    let text = match quiet {
-        Some(outcome) => outcome?,
-        None => seen.map(|(text, _)| text).unwrap_or_default(),
+    match waited {
+        Some(outcome) => outcome,
+        None => {
+            let text = seen.map(|(text, _)| text).unwrap_or_default();
+            Ok(Watched::Quiet(run_result(None, &text, ask.tail, false)))
+        }
+    }
+}
+
+/// The seq of shell `view`'s newest mark when the marks it sent since the
+/// line `command` was typed (it had sent none before) are the shell's own:
+/// a command start naming `command`'s program, or, for a line `held` until
+/// the pane first printed, a fresh shell's first prompt with nothing run
+/// yet. `None` for any other mark: the prompt of a shell the command
+/// started (`fish`, `ssh`), or marks in a program's output.
+fn first_marks(view: &ShellView, command: &str, held: bool) -> Option<u64> {
+    let ours = |program: Option<&str>| {
+        command
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| program == Some(word))
     };
-    Ok(run_result(None, &text, ask.tail, false))
+    let started = match &view.phase {
+        ShellPhase::Running { program, .. } => ours(program.as_deref()),
+        _ => view
+            .last
+            .as_ref()
+            .is_some_and(|last| ours(last.program.as_deref())),
+    };
+    let prompt = held && matches!(view.phase, ShellPhase::AtPrompt { .. }) && view.last.is_none();
+    (started || prompt).then_some(view.seq)
 }
 
 /// `run --wait`'s result from the output's `text`: trimmed, `lines` counted,
@@ -630,15 +765,17 @@ fn no_match(ask: &WaitAsk, text: &str) -> ApiError {
 }
 
 /// Why a command line can't go to `pane`: `program` (its first word) runs
-/// there.
-fn busy(pane: PaneId, program: Option<&str>) -> ApiError {
+/// there. The hint quits it, runs the line `elsewhere` when given, or forces
+/// it.
+fn busy(pane: PaneId, program: Option<&str>, elsewhere: Option<&str>) -> ApiError {
     let name = program.map_or_else(|| "a program".to_owned(), short_name);
+    let elsewhere = elsewhere.map_or_else(String::new, |command| format!(", use {command}"));
     ApiError::new(
         ErrorCode::Busy,
         format!("{name} is running in pane {}", pane.0),
         format!(
-            "quit it with orb pane keys {} <keys> (ctrl+c stops most programs), or add --force \
-             to type anyway",
+            "quit it with orb pane keys {} <keys> (ctrl+c stops most programs){elsewhere}, or \
+             add --force to type anyway",
             pane.0
         ),
     )
@@ -655,6 +792,25 @@ fn not_run(pane: PaneId, screen: &str) -> ApiError {
             pane.0
         ),
         format!("fix the command; orb pane read {} shows the screen", pane.0),
+    )
+}
+
+/// Why a wait gave up on `pane` without knowing: its shell, which shows
+/// prompt marks, hadn't answered the typed line within `gate`, so it may
+/// still run it later.
+fn not_started(pane: PaneId, gate: Duration) -> ApiError {
+    ApiError::new(
+        ErrorCode::Timeout,
+        format!(
+            "the shell in pane {} hadn't started the command after {} s; it may still run it",
+            pane.0,
+            gate.as_secs_f64()
+        ),
+        format!(
+            "don't run it again: orb pane read {0} shows whether it ran, and orb pane wait {0} \
+             --text <text> waits for its output",
+            pane.0
+        ),
     )
 }
 
@@ -754,6 +910,7 @@ mod tests {
             phase: ShellPhase::AtPrompt { leftover },
             last: None,
             seq,
+            held: false,
         }
     }
 
@@ -767,14 +924,16 @@ mod tests {
             },
             last: None,
             seq,
+            held: false,
         }
     }
 
-    /// A shell back at its prompt after mark `seq`, its last command
+    /// A shell back at its prompt after mark `seq`, its last command, `just`,
     /// started by mark `started` and ended with `exit`.
     fn ended(seq: u64, started: u64, exit: i32) -> ShellView {
         ShellView {
             last: Some(Finished {
+                program: Some("just".to_owned()),
                 exit: Some(exit),
                 start_line: 10,
                 end_line: 12,
@@ -972,11 +1131,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn run_wait_without_a_start_mark_is_not_run() {
-        // Given pane 12's shell that stays at its prompt, its screen 12
-        // numbered lines.
+    fn run_wait_answered_by_a_new_prompt_is_not_run() {
+        // Given pane 12's shell at its prompt, then at a new empty prompt
+        // with no start between, its screen 12 numbered lines.
         let screen = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12";
-        let (panes, _) = screen_loop(vec![at_prompt(2, false)], vec![screen], "");
+        let (panes, _) = screen_loop(
+            vec![at_prompt(2, false), at_prompt(4, false)],
+            vec![screen],
+            "",
+        );
 
         // When running a command there with --wait.
         let reply = ran(&panes, &ask(true, false));
@@ -999,6 +1162,160 @@ mod tests {
             (ErrorCode::NotRun, true, true),
             "a command the shell never started is not_run, got {}",
             error.message
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_a_shell_that_hasnt_answered_says_it_may_still_run() {
+        // Given pane 12's shell that sends no mark at all after the typing.
+        let (panes, _) = screen_loop(vec![at_prompt(2, false)], vec!["$ just test"], "");
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then it is a timeout saying the command may still run, and the
+        // hint says not to run it again.
+        let error = reply
+            .error
+            .unwrap_or_else(|| ApiError::new(ErrorCode::Failed, "", ""));
+        assert_eq!(
+            (
+                error.code,
+                error.message.ends_with("it may still run it"),
+                error
+                    .hint
+                    .is_some_and(|hint| hint.starts_with("don't run it again")),
+            ),
+            (ErrorCode::Timeout, true, true),
+            "a shell that hasn't answered may still run the line, got {}",
+            error.message
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_in_a_shell_without_marks_yet_follows_its_first_marks() {
+        // Given pane 12's shell that had sent no prompt marks (from before
+        // orb started), its screen quiet, then sending marks: `just` runs
+        // and exits 0 after printing "a" and "b".
+        let mut shells = vec![ShellView::default(); 20];
+        shells.extend([running(Some("just"), 3), ended(4, 3, 0)]);
+        let (panes, _) = screen_loop(shells, vec!["$"], "a\nb");
+        let gated = PaneTiming {
+            start_gate: Duration::from_secs(10),
+            ..QUICK
+        };
+
+        // When running a command there with --wait.
+        let reply = run(&panes, &ask(true, false), &|| false, gated);
+
+        // Then the quiet screen doesn't end the wait; the reply holds the
+        // exit code and output the marks bound.
+        assert_eq!(
+            result(&reply),
+            Some(RunResult {
+                exit: Some(0),
+                output: "a\nb".into(),
+                lines: 2,
+                truncated: false,
+            }),
+            "a shell's first marks decide the wait, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_on_a_held_line_gives_the_shell_its_gate_once_typed() {
+        // Given pane 12 that hasn't printed, holding the typed line for
+        // longer than the start gate, then its fresh shell's first prompt,
+        // where `just` runs and exits 0 after printing "a" and "b".
+        let held = ShellView {
+            held: true,
+            ..ShellView::default()
+        };
+        let mut shells = vec![ShellView::default()];
+        shells.extend(vec![held; 100]);
+        shells.extend([
+            at_prompt(2, false),
+            running(Some("just"), 3),
+            ended(4, 3, 0),
+        ]);
+        let (panes, _) = screen_loop(shells, vec!["$"], "a\nb");
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then the gate runs from the typing, so the shell's marks decide
+        // the wait.
+        assert_eq!(
+            result(&reply).map(|result| (result.exit, result.output)),
+            Some((Some(0), "a\nb".to_owned())),
+            "a held line's gate starts once it is typed, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_leaves_a_started_shells_prompt_to_the_quiet_screen() {
+        // Given pane 12's shell sending no prompt marks, then the prompt
+        // marks of a shell the command started.
+        let shells = vec![ShellView::default(), at_prompt(2, false)];
+        let (panes, _) = screen_loop(shells, vec!["$ fish\n>"], "");
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then the reply is the quiet screen, exit unknown.
+        assert_eq!(
+            result(&reply).map(|result| (result.exit, result.output)),
+            Some((None, "$ fish\n>".to_owned())),
+            "a nested shell's prompt doesn't take over the wait, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_ignores_marks_naming_another_program() {
+        // Given pane 12's shell sending no prompt marks, then marks in the
+        // command's output: printf starting and ending with 0.
+        let printed = ShellView {
+            last: Some(Finished {
+                program: Some("printf".to_owned()),
+                exit: Some(0),
+                start_line: 1,
+                end_line: 2,
+                started: 1,
+            }),
+            ..at_prompt(2, false)
+        };
+        let shells = vec![ShellView::default(), running(Some("printf"), 1), printed];
+        let (panes, _) = screen_loop(shells, vec!["$ cat log"], "forged");
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then the reply is the quiet screen, exit unknown.
+        assert_eq!(
+            result(&reply).map(|result| (result.exit, result.output)),
+            Some((None, "$ cat log".to_owned())),
+            "marks that aren't the command's don't forge an exit, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_wait_ignores_marks_after_the_start_gate() {
+        // Given pane 12's shell sending no prompt marks while its screen
+        // keeps changing past the start gate, then `just` ending with 0.
+        let mut shells = vec![ShellView::default(); 100];
+        shells.push(ended(4, 3, 0));
+        let mut screens: Vec<&'static str> = ["a", "b"].repeat(100);
+        screens.push("done");
+        let (panes, _) = screen_loop(shells, screens, "marked");
+
+        // When running a command there with --wait.
+        let reply = ran(&panes, &ask(true, false));
+
+        // Then the reply is the quiet screen, exit unknown.
+        assert_eq!(
+            result(&reply).map(|result| (result.exit, result.output)),
+            Some((None, "done".to_owned())),
+            "marks after the gate don't take over the wait, got {reply:?}"
         );
     }
 

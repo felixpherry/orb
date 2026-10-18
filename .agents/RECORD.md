@@ -408,6 +408,11 @@ Entries are added or amended **only with human approval**.
 - (api) `orb pane run --wait` returns the command's exit code and output once the shell's prompt is back, and in a shell that sends no prompt marks it returns the output once the screen goes quiet, with no exit code.
 - (api) `orb pane run` is refused with the running program's name while a pane's shell is running it, unless `--force` is given.
 - (api) In a pane whose shell sends no prompt marks, `orb pane run` types without checking what runs there.
+- (api) `orb pane run --wait` in a shell that has sent no prompt marks yet gives it 2 s from the moment the line is typed to send marks of its own (a command start naming the command's program, or a fresh shell's first prompt for a line held until the pane first printed), and then follows the marks; other marks, and marks after those 2 s, leave it on the quiet screen.
+- (api) `orb agent start` from a shell prompt with no place flag is refused with `busy` naming orb, the hint offering only `--split right` or `--tab`; `--force` with `--split` or `--tab` is a usage error.
+- (api) `orb pane run --wait` fails with `not_run` only when the shell shows a new empty prompt without starting the command, and with a `timeout` saying the command may still run when the shell hasn't answered within 2 s.
+- (api) `orb agent start` into an existing pane is refused with `busy` and the running program's name while the pane's shell runs a program, unless `--force` is given.
+- (api) `orb agent prompt` is accepted by an agent whose last turn failed, and `orb agent start` into its pane is refused with `pane_busy`.
 - (api) `orb pane wait` returns once a pane's screen or recent history shows the given text or pattern, or fails with `timeout`.
 - (api) `orb agent prompt --wait` prints the agent's answer to that prompt.
 - (api) `orb agent wait` and `orb agent get` treat a prompt orb just sent as work underway until the agent's turn starts or 5 s pass.
@@ -417,6 +422,7 @@ Entries are added or amended **only with human approval**.
 - (integration) orb's skills are the `orb` skill, which teaches agents the API's rules and recipes and the plate and sends them to `orb help` for the commands (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits, and that colonists report to their chief instead of adding plate items), and 17 workflow skills that take an approved plan to an open pull request, of which plan-with-me and ship-plan add a plate item when they finish.
 - (integration) `orb integration install` removes the `orb` skill copy that older orb versions wrote to `~/.pi/agent/skills`, unless pi's skills folder resolves to a folder the install writes.
 - (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
+- (log) A refused settle is logged with the working panes' IDs only, never the agents' names.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
 - (sessions) A session that finishes starting while a picker, the rename box, search or the plate has the keys waits until they close.
 - (pane) While orb runs in kitty, orb forwards a pane's kitty graphics commands to the outer kitty with the image data untouched, rewriting only image ids, placement positions, and when they are sent; a pane holding an agent drops them.

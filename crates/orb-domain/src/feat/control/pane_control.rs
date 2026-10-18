@@ -76,6 +76,8 @@ pub struct ShellView {
     pub last: Option<Finished>,
     /// Goes up by one on every mark.
     pub seq: u64,
+    /// A typed line waits for the pane's first output.
+    pub held: bool,
 }
 
 /// Where a pane's shell is, between marks.
@@ -95,10 +97,12 @@ pub enum ShellPhase {
     },
 }
 
-/// A command that ended: its exit status, its output's absolute lines
-/// (`end_line` not included), and the seq of the mark that started it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A command that ended: its program (its first word), its exit status,
+/// its output's absolute lines (`end_line` not included), and the seq of
+/// the mark that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
+    pub program: Option<String>,
     pub exit: Option<i32>,
     pub start_line: i64,
     pub end_line: i64,

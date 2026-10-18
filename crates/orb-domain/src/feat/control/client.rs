@@ -680,6 +680,8 @@ fn agent_words(
                 }
             };
             words.exclusive(&["--pane", "--split", "--tab"])?;
+            words.exclusive(&["--split", "--force"])?;
+            words.exclusive(&["--tab", "--force"])?;
             Op::AgentStart {
                 pane: words.number("--pane")?.map(PaneId),
                 kind,
@@ -690,6 +692,7 @@ fn agent_words(
                     .map(|word| direction("--split", word))
                     .transpose()?,
                 tab: words.switch("--tab"),
+                force: words.switch("--force"),
             }
         }
         "prompt" => {
@@ -1573,11 +1576,16 @@ mod tests {
             args: vec!["--model".into(), "a b".into()],
             split: None,
             tab: false,
+            force: false,
         },
     )]
     #[case::start_bare(
         &["agent", "start", "--kind", "claude"],
-        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false },
+        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false },
+    )]
+    #[case::start_forced(
+        &["agent", "start", "--kind", "claude", "--pane", "3", "--force"],
+        Op::AgentStart { pane: Some(PaneId(3)), kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: true },
     )]
     #[case::prompt_wait(
         &["agent", "prompt", "3", "hi", "--wait", "--timeout", "500"],
@@ -1612,6 +1620,7 @@ mod tests {
             args: vec![],
             split: Some(Direction::Down),
             tab: false,
+            force: false,
         },
     )]
     #[case::tab(
@@ -1623,6 +1632,7 @@ mod tests {
             args: vec!["--model".into(), "sonnet".into()],
             split: None,
             tab: true,
+            force: false,
         },
     )]
     fn agent_start_takes_split_or_tab(#[case] words: &[&str], #[case] expected: Op) {
@@ -1637,6 +1647,8 @@ mod tests {
     #[case::pane_and_split(&["--pane", "3", "--split", "right"], "--pane", "--split")]
     #[case::pane_and_tab(&["--tab", "--pane", "3"], "--pane", "--tab")]
     #[case::split_and_tab(&["--split", "right", "--tab"], "--split", "--tab")]
+    #[case::split_and_force(&["--split", "right", "--force"], "--split", "--force")]
+    #[case::tab_and_force(&["--force", "--tab"], "--tab", "--force")]
     fn agent_start_places_exclude_each_other(
         #[case] places: &[&str],
         #[case] one: &'static str,
@@ -1803,7 +1815,7 @@ mod tests {
     )]
     #[case::wait_without_timeout(Op::AgentWait { pane: PaneId(1), timeout: None }, None)]
     #[case::start(
-        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false },
+        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false },
         Some(Duration::from_secs(45)),
     )]
     #[case::session_create(
@@ -2183,6 +2195,7 @@ mod tests {
             args: vec![],
             split: Some(Direction::Right),
             tab: false,
+            force: false,
         },
         "orb agent list shows where it got to",
     )]

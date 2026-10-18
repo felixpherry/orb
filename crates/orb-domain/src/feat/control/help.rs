@@ -534,7 +534,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         ],
         reply: "{} ; with --wait the output's last lines as plain text, then [exit n] ([exit ?] \
                 in a shell that sends no prompt marks, where it returns once the screen is quiet \
-                for 1 s); with --json {\"exit\": n|null, \"output\": \"…\", \"lines\": N, \
+                for 1 s, no sooner than 2 s after typing); with --json {\"exit\": n|null, \"output\": \"…\", \"lines\": N, \
                 \"truncated\": bool}",
     },
     CommandHelp {
@@ -617,8 +617,10 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "start",
-        usage: "orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]",
-        summary: "Type claude or pi into a shell pane, or a new one, and wait until orb sees it running (up to 30 s).",
+        usage: "orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [--force] [-- <args>...]",
+        summary: "Type claude or pi into a shell pane, or a new one, and wait until orb sees it \
+                  running (up to 30 s). In a shell that sends prompt marks (fish does), it's \
+                  refused while a program runs in the pane unless --force.",
         params: &[
             flag("--kind", "claude|pi", None, "which agent to start"),
             flag(
@@ -639,6 +641,10 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 "<text>",
                 Some("the usual name"),
                 "a name for the pane",
+            ),
+            word(
+                "--force",
+                "type the program even while another runs in the pane; not with --split or --tab",
             ),
             word(
                 "--",

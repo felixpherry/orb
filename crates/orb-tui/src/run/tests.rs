@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use orb_domain::feat::control::change::Change;
-use orb_domain::feat::control::pane_control::{PaneAnswer, PaneLines, PaneRequest, ShellPhase};
+use orb_domain::feat::control::pane_control::{
+    PaneAnswer, PaneLines, PaneRequest, ShellPhase, ShellView,
+};
 use orb_domain::feat::control::protocol::ErrorCode;
 use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
 use orb_domain::feat::layout::tree::Split;
@@ -2648,6 +2650,34 @@ fn agent_run_into_a_silent_pane_waits_for_its_output() -> io::Result<()> {
     assert_eq!(
         typed, "early\nlate\n",
         "a run into a silent pane waits for its first output"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_shell_request_says_a_line_is_held_for_the_first_output() -> io::Result<()> {
+    // Given attached pane 1 whose client hasn't printed anything, and an
+    // agent's run of `late` waiting for its first output.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let (tx, _rx) = mpsc::channel();
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "late".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(run, tx), &mut io::sink())?;
+
+    // When an agent asks what pane 1's shell is doing.
+    let answer = test.ask_until(&PaneRequest::Shell { pane: PaneId(1) }, |_| true)?;
+
+    // Then the answer says the line is held.
+    assert!(
+        matches!(
+            answer,
+            Some(PaneAnswer::Shell(ShellView { held: true, .. }))
+        ),
+        "a line waiting for the pane's first output is held, got {answer:?}"
     );
     Ok(())
 }

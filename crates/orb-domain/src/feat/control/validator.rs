@@ -35,7 +35,8 @@ pub(crate) fn pane_free(app: &AppState, pane: PaneId, kind: AgentKind) -> Result
 }
 
 /// `pane`'s agent, ready for a prompt: `no_agent` when none is live,
-/// `agent_blocked` while it waits for approval or input.
+/// `agent_blocked` while it waits for approval or input. One whose last turn
+/// failed still runs and takes the prompt.
 pub(crate) fn agent_ready(app: &AppState, pane: PaneId) -> Result<&Agent, ApiError> {
     let found = agent::pane_agent(app, pane)
         .filter(|found| agent::live(found.status))
@@ -90,6 +91,38 @@ mod tests {
             checked.map_err(|error| error.code),
             Err(ErrorCode::AgentBlocked),
             "an agent waiting on the user can't take a prompt"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_to_an_agent_whose_last_turn_failed_is_accepted() {
+        // Given agent 1 in pane 1, still running after its last turn failed.
+        let app = state_with(vec![agent(1, AgentStatus::Failed)], 1);
+
+        // When checking a prompt to pane 1.
+        let checked = agent_ready(&app, PaneId(1)).map(|found| found.id.0);
+
+        // Then agent 1 takes it.
+        assert_eq!(
+            checked.map_err(|error| error.code),
+            Ok(1),
+            "a failed turn leaves the agent running and ready for a prompt"
+        );
+    }
+
+    #[rstest::rstest]
+    fn start_in_a_pane_whose_agent_failed_a_turn_is_pane_busy() {
+        // Given agent 1 in pane 1, still running after its last turn failed.
+        let app = state_with(vec![agent(1, AgentStatus::Failed)], 1);
+
+        // When checking a start in pane 1.
+        let checked = pane_free(&app, PaneId(1), AgentKind::Claude);
+
+        // Then the pane is busy, so no second agent is typed into it.
+        assert_eq!(
+            checked.map_err(|error| error.code),
+            Err(ErrorCode::PaneBusy),
+            "an agent whose turn failed still holds its pane"
         );
     }
 

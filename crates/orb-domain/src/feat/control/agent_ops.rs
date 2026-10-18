@@ -12,6 +12,7 @@ use crate::feat::control::agent::{self, Sent, Timing};
 use crate::feat::control::change::Change;
 use crate::feat::control::lists::agent_detail;
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
+use crate::feat::control::pane_ops;
 use crate::feat::control::protocol::{
     AgentDetail, AgentKind, AnswerResult, ApiError, Direction, ErrorCode, Op, PromptResult, Reply,
     ReplyResult, WaitEnd, WaitResult,
@@ -41,8 +42,10 @@ pub(super) fn agent_io(
             args,
             split,
             tab,
+            force,
         } => Ok(Action::StartAgent {
-            at: agent_start(app, *pane, *split, *tab, *kind, caller)?,
+            at: agent_start(app, *pane, *split, *tab, *kind, caller, *force)?,
+            kind: *kind,
             line: agent::shell_line(*kind, args),
             name: name.clone(),
         }),
@@ -91,9 +94,10 @@ pub(super) fn agent_io(
 }
 
 /// Where `agent start` runs a `kind` agent: pane `pane` (else the caller's,
-/// `pane_busy` while an agent is live there), a new pane split off the
-/// caller's toward `split`, or a new tab of the caller's session with `tab`.
-/// Naming more than one place is a `bad_request`, as is splitting a float.
+/// `pane_busy` while an agent is live there; `force` types into a program
+/// running there), a new pane split off the caller's toward `split`, or a
+/// new tab of the caller's session with `tab`. Naming more than one place is
+/// a `bad_request`, as are `force` with a new pane and splitting a float.
 fn agent_start(
     app: &AppState,
     pane: Option<PaneId>,
@@ -101,6 +105,7 @@ fn agent_start(
     tab: bool,
     kind: AgentKind,
     caller: Option<PaneId>,
+    force: bool,
 ) -> Result<StartIn, ApiError> {
     match (pane, split, tab) {
         (Some(_), Some(_), _) | (Some(_), _, true) | (None, Some(_), true) => Err(ApiError::new(
@@ -108,6 +113,14 @@ fn agent_start(
             "--pane, --split and --tab exclude each other",
             format!(
                 "name one: orb agent start --kind {} --split right",
+                kind.program()
+            ),
+        )),
+        (None, Some(_), false) | (None, None, true) if force => Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "--force goes with --pane or your own pane; a new pane runs nothing yet",
+            format!(
+                "leave --force out: orb agent start --kind {} --split right",
                 kind.program()
             ),
         )),
@@ -139,7 +152,11 @@ fn agent_start(
                 ));
             };
             validator::pane_free(app, pane, kind)?;
-            Ok(StartIn::Pane(pane))
+            Ok(StartIn::Pane {
+                pane,
+                force,
+                own: caller == Some(pane),
+            })
         }
     }
 }
@@ -325,16 +342,51 @@ fn start_agent(deps: &ControlDeps, pane: PaneId, line: String, name: Option<Stri
     ))
 }
 
-/// Adds the pane `at` asks for, if any, then starts the agent there (see
-/// [`start_agent`]).
+/// Readies `pane`'s shell for a `kind` agent's line, as `pane run` does:
+/// `busy` while a program runs there, unless `force`, with a hint that
+/// also starts the agent in a new pane; text left on the command line is
+/// cleared. In the caller's `own` pane the program is the caller itself, so
+/// the hint offers only a new pane.
+fn shell_free(
+    panes: &PaneControl,
+    pane: PaneId,
+    kind: AgentKind,
+    force: bool,
+    own: bool,
+) -> Result<(), ApiError> {
+    let program = kind.program();
+    let elsewhere = format!("orb agent start --kind {program} --split right");
+    match pane_ops::ready_shell(panes, pane, force, Some(&elsewhere)) {
+        Ok(_) => Ok(()),
+        Err(error) if own && error.code == ErrorCode::Busy => Err(ApiError::new(
+            ErrorCode::Busy,
+            format!("{}, your own pane", error.message),
+            format!(
+                "the agent can't start there while this call runs; start it in a new pane: \
+                 {elsewhere}, or orb agent start --kind {program} --tab"
+            ),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// Adds the pane `at` asks for, if any, then starts the `kind` agent there
+/// (see [`start_agent`]), an existing pane's shell readied first (see
+/// [`shell_free`]).
 pub(super) fn start_in(
     deps: &ControlDeps,
     at: StartIn,
+    kind: AgentKind,
     line: String,
     name: Option<String>,
 ) -> Reply {
     let pane = match at {
-        StartIn::Pane(pane) => pane,
+        StartIn::Pane { pane, force, own } => {
+            match shell_free(&deps.panes, pane, kind, force, own) {
+                Ok(()) => pane,
+                Err(error) => return Reply::err(error),
+            }
+        }
         StartIn::New(add) => match added(deps, add) {
             Ok(pane) => pane,
             Err(error) => return Reply::err(error),
@@ -358,11 +410,13 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{PromptAsk, agent_io, get, prompt_agent, wait};
+    use super::{PromptAsk, agent_io, get, prompt_agent, shell_free, wait};
     use crate::State;
     use crate::feat::control::agent::Timing;
-    use crate::feat::control::pane_control::{PaneAnswer, PaneControl};
-    use crate::feat::control::protocol::{ErrorCode, Op, Reply};
+    use crate::feat::control::pane_control::{
+        PaneAnswer, PaneControl, PaneRequest, ShellPhase, ShellView,
+    };
+    use crate::feat::control::protocol::{AgentKind, ErrorCode, Op, Reply};
     use crate::feat::control::server::Action;
     use crate::feat::control::turns::{Prompts, Turns};
     use crate::feat::harness::Harnesses;
@@ -442,6 +496,106 @@ mod tests {
         PaneControl::new(|_, reply| {
             let _ = reply.send(Ok(PaneAnswer::Done));
         })
+    }
+
+    /// A screen loop whose pane's shell runs `program`, counting the
+    /// requests that would type into the pane.
+    fn running(program: &'static str, typed: Arc<AtomicUsize>) -> PaneControl {
+        PaneControl::new(move |request, reply| {
+            let answer = match request {
+                PaneRequest::Shell { .. } => PaneAnswer::Shell(ShellView {
+                    marks_seen: true,
+                    phase: ShellPhase::Running {
+                        program: Some(program.to_owned()),
+                        started: 3,
+                    },
+                    last: None,
+                    seq: 3,
+                    held: false,
+                }),
+                _ => {
+                    typed.fetch_add(1, Ordering::SeqCst);
+                    PaneAnswer::Done
+                }
+            };
+            let _ = reply.send(Ok(answer));
+        })
+    }
+
+    #[rstest::rstest]
+    fn start_in_a_pane_running_a_program_is_refused_as_busy() {
+        // Given pane 1's shell running vim.
+        let typed = Arc::new(AtomicUsize::new(0));
+        let panes = running("vim", Arc::clone(&typed));
+
+        // When readying pane 1 for a claude start.
+        let checked = shell_free(&panes, PaneId(1), AgentKind::Claude, false, false);
+
+        // Then it is refused as busy, naming vim and a new pane, and
+        // nothing is typed.
+        let error = checked.err();
+        assert_eq!(
+            (
+                error
+                    .as_ref()
+                    .map(|error| (error.code, error.message.as_str())),
+                error
+                    .as_ref()
+                    .and_then(|error| error.hint.as_deref())
+                    .is_some_and(
+                        |hint| hint.contains("orb agent start --kind claude --split right")
+                    ),
+                typed.load(Ordering::SeqCst),
+            ),
+            (Some((ErrorCode::Busy, "vim is running in pane 1")), true, 0),
+            "a running program refuses the agent's line, got {error:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn start_in_your_own_busy_pane_points_only_at_a_new_pane() {
+        // Given pane 1, the caller's own, where fish runs orb itself.
+        let typed = Arc::new(AtomicUsize::new(0));
+        let panes = running("orb", Arc::clone(&typed));
+
+        // When readying pane 1 for a claude start from pane 1.
+        let checked = shell_free(&panes, PaneId(1), AgentKind::Claude, false, true);
+
+        // Then it is refused as busy, the hint naming a new pane or tab and
+        // neither stopping the program nor forcing.
+        let error = checked.err();
+        let hint = error
+            .as_ref()
+            .and_then(|error| error.hint.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            (
+                error.as_ref().map(|error| error.code),
+                hint.contains("orb agent start --kind claude --split right")
+                    && hint.contains("--tab"),
+                hint.contains("--force") || hint.contains("ctrl+c"),
+                typed.load(Ordering::SeqCst),
+            ),
+            (Some(ErrorCode::Busy), true, false, 0),
+            "the caller can't quit itself, got {error:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn forced_start_in_a_pane_running_a_program_goes_ahead() {
+        // Given pane 1's shell running a nested shell.
+        let typed = Arc::new(AtomicUsize::new(0));
+        let panes = running("bash", typed);
+
+        // When readying pane 1 for a claude start with --force.
+        let checked = shell_free(&panes, PaneId(1), AgentKind::Claude, true, false);
+
+        // Then the start may go ahead.
+        assert_eq!(
+            checked.map_err(|error| error.code),
+            Ok(()),
+            "--force types into the running program"
+        );
     }
 
     /// An assistant message saying `text` at byte `offset`.

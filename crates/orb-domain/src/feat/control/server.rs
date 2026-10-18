@@ -24,8 +24,8 @@ use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
 use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
 use crate::feat::control::protocol::{
-    AgentDetail, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SettledResult,
-    StartResult,
+    AgentDetail, AgentKind, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request,
+    SettledResult, StartResult,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
@@ -244,6 +244,7 @@ pub(super) enum Action {
     /// added first), then waits for.
     StartAgent {
         at: StartIn,
+        kind: AgentKind,
         line: String,
         name: Option<String>,
     },
@@ -265,8 +266,13 @@ pub(super) enum Action {
 /// Where `agent start` runs its agent.
 #[derive(Debug)]
 pub(super) enum StartIn {
-    /// A shell pane that's already there.
-    Pane(PaneId),
+    /// A shell pane that's already there; `force` types the program even
+    /// while another runs there; `own` when it is the caller's pane.
+    Pane {
+        pane: PaneId,
+        force: bool,
+        own: bool,
+    },
     /// A new shell the sessions actor adds first.
     New(ApiAdd),
 }
@@ -326,7 +332,12 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
         },
         Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
         Ok(Action::Run(ask)) => pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL),
-        Ok(Action::StartAgent { at, line, name }) => agent_ops::start_in(deps, at, line, name),
+        Ok(Action::StartAgent {
+            at,
+            kind,
+            line,
+            name,
+        }) => agent_ops::start_in(deps, at, kind, line, name),
         Ok(Action::Prompt(ask)) => {
             let poke = || agent_ops::poke(deps);
             agent_ops::prompt_agent(&deps.panes, deps.turns(), ask, &poke, gone, Timing::REAL)
@@ -341,8 +352,8 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
 /// `<op> caller=<id> item=<id> pane=<id> session=<id> project=<id> ->
 /// ok|<code>`, with only the IDs `request` carries, and the new item's an add
 /// replies with: never a name, a title, a prompt or pasted text. A `failed`
-/// reply adds its reason, which may quote git but never a prompt or pasted
-/// text.
+/// reply adds its reason in its logged form, which may quote git but never a
+/// name, a title, a prompt or pasted text.
 fn log_text(request: &Request, reply: &Reply) -> String {
     let mut fields = serde_json::to_value(request).unwrap_or_default();
     let added = reply.result.as_ref().and_then(|result| result.get("item"));
@@ -356,7 +367,9 @@ fn log_text(request: &Request, reply: &Reply) -> String {
     };
     let result = match &reply.error {
         None => "ok".to_owned(),
-        Some(error) if error.code == ErrorCode::Failed => format!("failed: {}", error.message),
+        Some(error) if error.code == ErrorCode::Failed => {
+            format!("failed: {}", error.log_message())
+        }
         Some(error) => serde_json::to_value(error.code)
             .ok()
             .and_then(|code| code.as_str().map(str::to_owned))
@@ -787,9 +800,9 @@ mod tests {
         tail: None,
     })]
     #[case::pane_wait(Op::PaneWait { pane: PaneId(1), text: Some("x".into()), regex: None, timeout: None, lines: None })]
-    #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false })]
-    #[case::agent_start_split(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: Some(Direction::Right), tab: false })]
-    #[case::agent_start_tab(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: true })]
+    #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false })]
+    #[case::agent_start_split(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: Some(Direction::Right), tab: false, force: false })]
+    #[case::agent_start_tab(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: true, force: false })]
     #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None })]
     #[case::agent_wait(Op::AgentWait { pane: PaneId(1), timeout: None })]
     fn request_on_a_settled_session_is_refused(#[case] op: Op) {
@@ -836,6 +849,37 @@ mod tests {
         assert_eq!(
             text, "session.rename caller=4 session=2 -> settled",
             "the log line carries IDs only"
+        );
+    }
+
+    #[rstest::rstest]
+    fn failed_log_line_writes_the_logged_form_of_the_reason() {
+        // Given pane 4 settling session 2, refused with a reason naming an
+        // agent by its title, logged without it.
+        let request = Request {
+            caller: Some(PaneId(4)),
+            op: Op::SessionSettle {
+                session: Some(SessionId(2)),
+            },
+        };
+        let reply = Reply::err(
+            ApiError::new(
+                ErrorCode::Failed,
+                "can't settle session 2 while pane 3 (fix the secret bug) has a turn underway",
+                "orb agent wait 3, then settle again",
+            )
+            .logged_as("can't settle session 2 while pane 3 has a turn underway"),
+        );
+
+        // When writing its log line.
+        let text = log_text(&request, &reply);
+
+        // Then the reason is the logged form, with no title.
+        assert_eq!(
+            text,
+            "session.settle caller=4 session=2 -> failed: can't settle session 2 while pane 3 \
+             has a turn underway",
+            "a failed reason is logged without names"
         );
     }
 
@@ -1666,7 +1710,7 @@ mod tests {
     #[case::pane_busy(
         state_with(vec![agent(1, AgentStatus::Idle)], 1),
         None,
-        Op::AgentStart { pane: Some(PaneId(1)), kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false },
+        Op::AgentStart { pane: Some(PaneId(1)), kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false },
         ErrorCode::PaneBusy,
     )]
     #[case::no_agent(
@@ -1725,6 +1769,7 @@ mod tests {
                 args: vec![],
                 split,
                 tab,
+                force: false,
             },
         }
     }
@@ -1812,6 +1857,56 @@ mod tests {
                 "name one: orb agent start --kind claude --split right".to_owned()
             )),
             "an agent starts in one place"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::split(Some(Direction::Right), false)]
+    #[case::tab(None, true)]
+    fn agent_start_forced_into_a_new_pane_is_a_bad_request(
+        #[case] split: Option<Direction>,
+        #[case] tab: bool,
+    ) {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![stopped(1)], 1);
+
+        // When pane 1 plans an agent start in a new pane with --force.
+        let mut request = agent_start(Some(PaneId(1)), None, split, tab);
+        if let Op::AgentStart { force, .. } = &mut request.op {
+            *force = true;
+        }
+        let planned = plan(&app, &request);
+
+        // Then it is refused with bad_request.
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "--force has nothing to type over in a new pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_start_with_no_place_marks_the_callers_own_pane() {
+        // Given live session 1 with pane 1, no agent live there.
+        let app = state_with(vec![stopped(1)], 1);
+
+        // When pane 1 plans `agent start --kind claude` with no place.
+        let planned = plan(&app, &agent_start(Some(PaneId(1)), None, None, false));
+
+        // Then the agent starts in pane 1, marked as the caller's own.
+        assert!(
+            matches!(
+                &planned,
+                Ok(Action::StartAgent {
+                    at: StartIn::Pane {
+                        pane: PaneId(1),
+                        force: false,
+                        own: true,
+                    },
+                    ..
+                })
+            ),
+            "no place means the caller's own pane, got {planned:?}"
         );
     }
 

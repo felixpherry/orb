@@ -138,7 +138,8 @@ fn settle(state: &mut AppState, session: SessionId) -> Result<Vec<Command>, ApiE
 }
 
 /// Why session `session` can't settle: each agent with a turn underway, by
-/// pane and name (cut to 60 graphemes), and the wait that clears it.
+/// pane and name (cut to 60 graphemes), and the wait that clears it. orb's
+/// log gets the panes alone, since a name is often an agent's title.
 fn working(state: &AppState, session: SessionId) -> ApiError {
     let busy: Vec<(PaneId, String)> = state
         .sessions
@@ -161,31 +162,34 @@ fn working(state: &AppState, session: SessionId) -> ApiError {
         .iter()
         .map(|(pane, _)| format!("orb agent wait {}", pane.0))
         .collect();
-    let (message, hint) = match named.as_slice() {
-        [] => (
-            format!(
-                "can't settle session {} while an agent has a turn underway",
-                session.0
-            ),
-            "orb agent list shows who is working; settle again once they finish".to_owned(),
-        ),
-        [one] => (
-            format!(
-                "can't settle session {} while pane {one} has a turn underway",
-                session.0
-            ),
-            format!("{}, then settle again", joined(&waits)),
-        ),
-        many => (
-            format!(
-                "can't settle session {} while panes {} have turns underway",
-                session.0,
-                joined(many)
-            ),
-            format!("{}, then settle again", joined(&waits)),
-        ),
+    let panes: Vec<String> = busy.iter().map(|(pane, _)| pane.0.to_string()).collect();
+    let hint = if busy.is_empty() {
+        "orb agent list shows who is working; settle again once they finish".to_owned()
+    } else {
+        format!("{}, then settle again", joined(&waits))
     };
-    ApiError::new(ErrorCode::Failed, message, hint)
+    ApiError::new(ErrorCode::Failed, unsettled(session, &named), hint)
+        .logged_as(unsettled(session, &panes))
+}
+
+/// Why session `session` can't settle, naming each pane in `panes` with a
+/// turn underway as given.
+fn unsettled(session: SessionId, panes: &[String]) -> String {
+    match panes {
+        [] => format!(
+            "can't settle session {} while an agent has a turn underway",
+            session.0
+        ),
+        [one] => format!(
+            "can't settle session {} while pane {one} has a turn underway",
+            session.0
+        ),
+        many => format!(
+            "can't settle session {} while panes {} have turns underway",
+            session.0,
+            joined(many)
+        ),
+    }
 }
 
 /// `items` as a list in words: `a`, `a and b`, `a, b and c`.
@@ -279,6 +283,31 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("pane 1 ")),
             "the refusal says who is working, got {message:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_refusal_logs_the_pane_without_the_agents_name() {
+        // Given session 1's agent working in pane 1.
+        let mut state = state_with(
+            vec![agent(1, AgentStatus::Working), agent(2, AgentStatus::Idle)],
+            2,
+        );
+
+        // When an agent asks to settle session 1.
+        let result = apply(&mut state, &Change::SettleSession(SessionId(1)));
+
+        // Then orb's log gets the pane alone, while the reply names the agent.
+        let error = result.err();
+        assert_eq!(
+            error
+                .as_ref()
+                .map(|error| (error.log_message(), error.message.contains("pane 1 ("))),
+            Some((
+                "can't settle session 1 while pane 1 has a turn underway",
+                true
+            )),
+            "the log line leaves out the agent's name, often its prompt, got {error:?}"
         );
     }
 

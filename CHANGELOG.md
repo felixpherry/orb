@@ -79,6 +79,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `orb agent wait` on a failed agent ends with `turn_failed` instead of `no_agent`.
 - Global search no longer indexes model-call error lines.
 - `orb agent prompt --wait` catches an answer Claude writes just after its status goes idle.
+- `orb pane run --wait` in a fresh fish pane, or one from before orb started, waits for the shell's first prompt marks instead of returning part of the output with `[exit ?]`.
+- `orb pane run --wait` no longer says `not_run` when the shell was only slow to start the command; it says the command may still run.
+- `orb agent prompt` reaches a Claude agent whose last turn failed, instead of saying there is no agent.
+- `orb agent start --pane` refuses with `busy` while a program such as vim runs in the pane, unless `--force`.
+- orb's log no longer writes agent names from a refused settle.
 
 ## [0.1.0] - 2026-10-16
 

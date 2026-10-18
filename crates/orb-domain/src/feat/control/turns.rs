@@ -129,12 +129,15 @@ impl Turns<'_> {
     }
 
     /// How long orb's prompt to `pane`'s agent still counts as work underway
-    /// at `now`: pasted under `gate` ago, the agent `Idle` or `Unknown` (its
-    /// status not yet polled since), and no answer in its transcript since
-    /// the prompt. `None` otherwise.
+    /// at `now`: pasted under `gate` ago, the agent `Idle`, `Unknown` (its
+    /// status not yet polled since) or still `Failed` from its last turn, and
+    /// no answer in its transcript since the prompt. `None` otherwise.
     pub(crate) fn just_sent(&self, pane: PaneId, gate: Duration, now: SystemTime) -> Option<Sent> {
         let view = self.agent(pane)?;
-        if !matches!(view.status, AgentStatus::Idle | AgentStatus::Unknown) {
+        if !matches!(
+            view.status,
+            AgentStatus::Idle | AgentStatus::Unknown | AgentStatus::Failed
+        ) {
             return None;
         }
         let prompted = self.prompts.for_agent(pane, view.id)?;
