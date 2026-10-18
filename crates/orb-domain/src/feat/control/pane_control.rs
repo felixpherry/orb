@@ -26,11 +26,12 @@ pub enum PaneRequest {
         pane: PaneId,
         keys: Vec<KeyEvent>,
     },
-    /// Type `text` into the pane as raw input: no bracketed paste, no Enter,
-    /// control characters left out.
+    /// Type `text` into the pane as raw input: no bracketed paste, control
+    /// characters left out; then press Enter when `enter`.
     Type {
         pane: PaneId,
         text: String,
+        enter: bool,
     },
     /// Type `line` and Enter into the pane as raw input, so a shell runs it.
     Run {

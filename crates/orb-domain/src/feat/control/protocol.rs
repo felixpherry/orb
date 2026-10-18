@@ -216,12 +216,29 @@ pub enum Op {
     /// Pastes text into a pane.
     #[serde(rename = "pane.send")]
     PaneSend { pane: PaneId, text: String },
-    /// Presses named keys in a pane, in order.
+    /// Presses named keys in a pane, in order, then maybe reads its screen
+    /// back once it settles.
     #[serde(rename = "pane.keys")]
-    PaneKeys { pane: PaneId, keys: Vec<String> },
-    /// Types text into a pane: no paste, no Enter.
+    PaneKeys {
+        pane: PaneId,
+        keys: Vec<String>,
+        /// Read the screen back once it settles.
+        #[serde(default)]
+        read: Option<ReadBack>,
+    },
+    /// Types text into a pane: no paste, Enter only with `enter`; then maybe
+    /// reads its screen back once it settles.
     #[serde(rename = "pane.type")]
-    PaneType { pane: PaneId, text: String },
+    PaneType {
+        pane: PaneId,
+        text: String,
+        /// Press Enter after the text.
+        #[serde(default)]
+        enter: bool,
+        /// Read the screen back once it settles.
+        #[serde(default)]
+        read: Option<ReadBack>,
+    },
     /// Types a command and Enter into a pane's shell.
     #[serde(rename = "pane.run")]
     PaneRun {
@@ -373,6 +390,19 @@ pub enum Op {
     /// Open items and those done today.
     #[serde(rename = "plate.list")]
     PlateList,
+}
+
+/// How `pane type` and `pane keys` read the screen back: once it stays the
+/// same for a moment, or at the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReadBack {
+    /// Keep the screen's last `tail` lines (20 when left out).
+    #[serde(default)]
+    pub tail: Option<usize>,
+    /// Give up waiting for the screen to settle after this many
+    /// milliseconds (3,000 when left out).
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// The program `agent start` types.

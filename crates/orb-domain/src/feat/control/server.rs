@@ -22,7 +22,7 @@ use crate::feat::control::agent_ops::PromptAsk;
 use crate::feat::control::change::Change;
 use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
-use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
+use crate::feat::control::pane_ops::{PaneTiming, RunAsk, TypeRead, WaitAsk};
 use crate::feat::control::protocol::{
     AgentDetail, AgentKind, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request,
     SettledResult, StartResult,
@@ -232,6 +232,8 @@ pub(super) enum Action {
     Ending { change: Change, ended: Ended },
     /// Typing the screen loop does into a pane: a send, keys or a type.
     Pane(PaneRequest),
+    /// Keys or a type, then the pane's screen read back once it settles.
+    TypeRead(TypeRead),
     /// A command line typed into a shell pane, then maybe waited on.
     Run(RunAsk),
     /// A wait until a pane shows a matching line.
@@ -335,7 +337,14 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             Ok(_) => ended.reply(),
             Err(error) => Reply::err(error),
         },
-        Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
+        Ok(Action::Pane(request)) => {
+            remember_typed(deps, &request);
+            pane_ops::typed(deps, request)
+        }
+        Ok(Action::TypeRead(ask)) => {
+            remember_typed(deps, &ask.request);
+            pane_ops::type_read(&deps.panes, ask, gone, PaneTiming::REAL)
+        }
         Ok(Action::Run(ask)) => {
             deps.typed.remember(ask.pane, &ask.command);
             pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL)
@@ -355,6 +364,19 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     };
     deps.log.line("api", &log_text(request, &reply));
     reply
+}
+
+/// Remembers the line `request` types with Enter, so `pane wait` can tell
+/// its echo from output.
+fn remember_typed(deps: &ControlDeps, request: &PaneRequest) {
+    if let PaneRequest::Type {
+        pane,
+        text,
+        enter: true,
+    } = request
+    {
+        deps.typed.remember(*pane, text);
+    }
 }
 
 /// `<op> caller=<id> item=<id> pane=<id> session=<id> project=<id> ->
@@ -682,10 +704,10 @@ mod tests {
     use crate::feat::control::client;
     use crate::feat::control::lists::route;
     use crate::feat::control::pane_control::PaneRequest;
-    use crate::feat::control::pane_ops::follow_ups;
+    use crate::feat::control::pane_ops::{TypeRead, follow_ups};
     use crate::feat::control::protocol::{
         AgentKind, ApiError, ClosedResult, Direction, Done, EndedRow, ErrorCode, ItemResult, Op,
-        Reply, Request, SettledResult,
+        ReadBack, Reply, Request, SettledResult,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::layout::tree::Split;
@@ -797,8 +819,8 @@ mod tests {
     #[case::session_settle(Op::SessionSettle { session: None })]
     #[case::session_focus(Op::SessionFocus { session: SessionId(1) })]
     #[case::pane_send(Op::PaneSend { pane: PaneId(1), text: "x".into() })]
-    #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
-    #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into() })]
+    #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()], read: None })]
+    #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into(), enter: false, read: None })]
     #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: false, timeout: None, force: false, tail: None })]
     #[case::pane_run_wait(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: Some(5), force: false, tail: None })]
     #[case::pane_read(Op::PaneRead {
@@ -1012,6 +1034,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: vec!["enter".into(), "nope".into()],
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1095,6 +1118,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: ["esc", ":", "w", "q", "enter"].map(Into::into).to_vec(),
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1133,6 +1157,7 @@ mod tests {
             op: Op::PaneKeys {
                 pane: PaneId(1),
                 keys: vec!["nope".into()],
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1157,6 +1182,8 @@ mod tests {
             op: Op::PaneType {
                 pane: PaneId(1),
                 text: ":wq".into(),
+                enter: false,
+                read: None,
             },
         };
         let planned = plan(&app, &request);
@@ -1165,10 +1192,43 @@ mod tests {
         assert!(
             matches!(
                 &planned,
-                Ok(Action::Pane(PaneRequest::Type { pane, text }))
+                Ok(Action::Pane(PaneRequest::Type { pane, text, enter: false }))
                     if *pane == PaneId(1) && text == ":wq"
             ),
             "pane type plans raw typing, got {planned:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_type_with_read_is_planned_as_a_type_then_a_read() {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `print(1)` typed into pane 1 with Enter and --read.
+        let request = Request {
+            caller: None,
+            op: Op::PaneType {
+                pane: PaneId(1),
+                text: "print(1)".into(),
+                enter: true,
+                read: Some(ReadBack::default()),
+            },
+        };
+        let planned = plan(&app, &request);
+
+        // Then the line and Enter are typed, then the last 20 lines read
+        // back within the usual cap.
+        assert!(
+            matches!(
+                &planned,
+                Ok(Action::TypeRead(TypeRead {
+                    request: PaneRequest::Type { enter: true, .. },
+                    pane: PaneId(1),
+                    tail: 20,
+                    cap: None,
+                }))
+            ),
+            "pane type --read plans the typing and the read, got {planned:?}"
         );
     }
 

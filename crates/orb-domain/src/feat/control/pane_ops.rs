@@ -16,7 +16,8 @@ use crate::feat::control::pane_control::{
     PaneControl, PaneRequest, ShellPhase, ShellView, key_event,
 };
 use crate::feat::control::protocol::{
-    ApiError, Done, ErrorCode, MatchResult, Op, PaneResult, Reply, RunResult, short_name,
+    ApiError, Done, ErrorCode, MatchResult, Op, PaneResult, ReadBack, ReadResult, Reply, RunResult,
+    short_name,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::server::{
@@ -119,7 +120,7 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
                 text: text.clone(),
             }))
         }
-        Op::PaneKeys { pane, keys } => {
+        Op::PaneKeys { pane, keys, read } => {
             changing(app, Some(Target::Pane(*pane)), caller)?;
             let keys = keys
                 .iter()
@@ -133,14 +134,25 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
                     })
                 })
                 .collect::<Result<_, _>>()?;
-            Ok(Action::Pane(PaneRequest::Keys { pane: *pane, keys }))
+            Ok(typing(
+                PaneRequest::Keys { pane: *pane, keys },
+                *pane,
+                *read,
+            ))
         }
-        Op::PaneType { pane, text } => {
+        Op::PaneType {
+            pane,
+            text,
+            enter,
+            read,
+        } => {
             changing(app, Some(Target::Pane(*pane)), caller)?;
-            Ok(Action::Pane(PaneRequest::Type {
+            let request = PaneRequest::Type {
                 pane: *pane,
                 text: text.clone(),
-            }))
+                enter: *enter,
+            };
+            Ok(typing(request, *pane, *read))
         }
         Op::PaneRun {
             pane,
@@ -196,6 +208,20 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
             }))
         }
         _ => Err(ApiError::wrong_kind("not pane input or output")),
+    }
+}
+
+/// Typing `request` into `pane`, then reading its screen back as `read`
+/// asks, if it does.
+fn typing(request: PaneRequest, pane: PaneId, read: Option<ReadBack>) -> Action {
+    match read {
+        None => Action::Pane(request),
+        Some(read) => Action::TypeRead(TypeRead {
+            request,
+            pane,
+            tail: read.tail.unwrap_or(READ_TAIL),
+            cap: read.timeout.map(Duration::from_millis),
+        }),
     }
 }
 
@@ -264,6 +290,10 @@ pub(crate) struct PaneTiming {
     pub start_gate: Duration,
     /// How long a screen must stay unchanged to count as quiet.
     pub quiet: Duration,
+    /// How long a screen must stay unchanged after typing to be read back.
+    pub settle: Duration,
+    /// How long a read back waits for the screen to settle at most.
+    pub settle_cap: Duration,
 }
 
 impl PaneTiming {
@@ -272,7 +302,67 @@ impl PaneTiming {
         tick: Duration::from_millis(100),
         start_gate: Duration::from_secs(2),
         quiet: Duration::from_secs(1),
+        settle: Duration::from_millis(300),
+        settle_cap: Duration::from_secs(3),
     };
+}
+
+/// The default number of the screen's last lines a read back keeps.
+const READ_TAIL: usize = 20;
+
+/// Typing into a pane, then reading its screen back once it settles.
+#[derive(Debug)]
+pub(super) struct TypeRead {
+    /// The keys or text to type.
+    pub request: PaneRequest,
+    pub pane: PaneId,
+    /// How many of the screen's last lines to keep.
+    pub tail: usize,
+    /// How long to wait for the screen to settle; the timing's cap when
+    /// `None`.
+    pub cap: Option<Duration>,
+}
+
+/// Types `ask`'s keys or text, then reads the pane's screen every tick until
+/// it stays the same for `timing.settle`, and replies with its trimmed last
+/// lines. At the cap it replies with the screen as it is then, so a program
+/// that redraws all the time still answers. The wait stops once `gone` says
+/// the caller hung up.
+pub(super) fn type_read(
+    panes: &PaneControl,
+    ask: TypeRead,
+    gone: &dyn Fn() -> bool,
+    timing: PaneTiming,
+) -> Reply {
+    if let Err(error) = panes.ask(ask.request) {
+        return Reply::err(error);
+    }
+    let cap = Instant::now() + ask.cap.unwrap_or(timing.settle_cap);
+    let mut seen: Option<(String, Instant)> = None;
+    let settled = poll(timing.tick, Some(cap), gone, || {
+        let text = match panes.text(ask.pane, 0) {
+            Ok(text) => text,
+            Err(error) => return Some(Err(error)),
+        };
+        let now = Instant::now();
+        match &seen {
+            Some((last, since)) if *last == text => {
+                (now.duration_since(*since) >= timing.settle).then_some(Ok(text))
+            }
+            _ => {
+                seen = Some((text, now));
+                None
+            }
+        }
+    });
+    let text = match settled {
+        Some(Ok(text)) => text,
+        Some(Err(error)) => return Reply::err(error),
+        None => seen.map(|(text, _)| text).unwrap_or_default(),
+    };
+    Reply::ok(&ReadResult {
+        text: screen_text::cut(&screen_text::trim(&text), None, Some(ask.tail)),
+    })
 }
 
 /// The default number of lines `run --wait` keeps, and `pane wait` searches
@@ -822,17 +912,19 @@ fn no_match(ask: &WaitAsk, text: &str) -> ApiError {
 }
 
 /// Why a command line can't go to `pane`: `program` (its first word) runs
-/// there. The hint quits it, runs the line `elsewhere` when given, or forces
-/// it.
+/// there. The hint types the line into the program first, then quits it,
+/// runs the line `elsewhere` when given, or forces it.
 fn busy(pane: PaneId, program: Option<&str>, elsewhere: Option<&str>) -> ApiError {
     let name = program.map_or_else(|| "a program".to_owned(), short_name);
-    let elsewhere = elsewhere.map_or_else(String::new, |command| format!(", use {command}"));
+    let elsewhere = elsewhere.map_or_else(String::new, |command| {
+        format!("; to run it elsewhere: {command}")
+    });
     ApiError::new(
         ErrorCode::Busy,
         format!("{name} is running in pane {}", pane.0),
         format!(
-            "quit it with orb pane keys {} <keys> (ctrl+c stops most programs){elsewhere}, or \
-             add --force to type anyway",
+            "to type a line into it: orb pane type {0} <text> --enter; to quit it: orb pane \
+             keys {0} <keys>{elsewhere}; --force types anyway",
             pane.0
         ),
     )
@@ -892,25 +984,27 @@ mod tests {
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{Matcher, PaneTiming, RunAsk, WaitAsk, run, wait_for};
+    use super::{Matcher, PaneTiming, RunAsk, TypeRead, WaitAsk, run, type_read, wait_for};
     use crate::feat::control::pane_control::{
         Finished, PaneAnswer, PaneControl, PaneLines, PaneOutput, PaneRequest, ShellPhase,
         ShellView,
     };
     use crate::feat::control::protocol::{
-        ApiError, Done, ErrorCode, MatchResult, Reply, RunResult,
+        ApiError, Done, ErrorCode, MatchResult, ReadResult, Reply, RunResult,
     };
     use crate::ids::PaneId;
 
     /// Every request a fake screen loop was asked, in order.
     type Asked = Arc<Mutex<Vec<PaneRequest>>>;
 
-    /// Waits paced for tests: a 1 ms tick, a 50 ms start gate and a 5 ms
-    /// quiet spell.
+    /// Waits paced for tests: a 1 ms tick, a 50 ms start gate, a 5 ms quiet
+    /// spell and settle, and a 50 ms settle cap.
     const QUICK: PaneTiming = PaneTiming {
         tick: Duration::from_millis(1),
         start_gate: Duration::from_millis(50),
         quiet: Duration::from_millis(5),
+        settle: Duration::from_millis(5),
+        settle_cap: Duration::from_millis(50),
     };
 
     /// `items[n]`, or the last item once past the end.
@@ -1091,6 +1185,28 @@ mod tests {
             ),
             (ErrorCode::Busy, "vim is running in pane 12", true, vec![]),
             "a running program refuses the line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn busy_hint_offers_typing_into_the_program_first() {
+        // Given pane 12's shell running python3.
+        let (panes, _) = screen_loop(vec![running(Some("python3"), 3)], vec![], "");
+
+        // When running a command there.
+        let error = refusal(ran(&panes, &ask(false, false)));
+
+        // Then the hint names typing a line in, then quitting, then --force.
+        let hint = error.hint.unwrap_or_default();
+        let at = |what: &str| hint.find(what).unwrap_or(usize::MAX);
+        let (typing, quitting, forcing) = (
+            at("orb pane type 12 <text> --enter"),
+            at("orb pane keys 12"),
+            at("--force"),
+        );
+        assert!(
+            typing < quitting && quitting < forcing && forcing != usize::MAX,
+            "type, quit, then force, in that order: {hint}"
         );
     }
 
@@ -1657,6 +1773,93 @@ mod tests {
             result(&reply).map(|result| result.output),
             Some("building".to_owned()),
             "the quiet wait replies with the screen at its timeout, got {reply:?}"
+        );
+    }
+
+    /// `pane type 12 "print(1)" --enter --read`, keeping `tail` lines.
+    fn type_ask(tail: usize) -> TypeRead {
+        TypeRead {
+            request: PaneRequest::Type {
+                pane: PaneId(12),
+                text: "print(1)".into(),
+                enter: true,
+            },
+            pane: PaneId(12),
+            tail,
+            cap: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn type_read_replies_once_the_screen_settles() {
+        // Given pane 12's screen changing twice, then staying the same.
+        let screens = vec![">>> ", ">>> print(1)", ">>> print(1)\n1\n>>>   "];
+        let (panes, _) = screen_loop(vec![], screens, "");
+
+        // When typing a line there and reading it back.
+        let reply = type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the reply is the settled screen, trimmed.
+        assert_eq!(
+            reply,
+            Reply::ok(&ReadResult {
+                text: ">>> print(1)\n1\n>>>".into()
+            }),
+            "the read waits for the screen to settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_keeps_the_last_tail_lines() {
+        // Given pane 12's screen of four lines.
+        let (panes, _) = screen_loop(vec![], vec!["a\nb\nc\nd"], "");
+
+        // When typing there and reading back the last 2 lines.
+        let reply = type_read(&panes, type_ask(2), &|| false, QUICK);
+
+        // Then the reply is the screen's last 2 lines.
+        assert_eq!(
+            reply,
+            Reply::ok(&ReadResult {
+                text: "c\nd".into()
+            }),
+            "--tail keeps the screen's last lines"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_of_a_screen_that_never_settles_replies_at_the_cap() {
+        // Given pane 12's screen that changes on every read.
+        let screens: Vec<&'static str> = ["a", "b"].repeat(1000);
+        let (panes, _) = screen_loop(vec![], screens, "");
+
+        // When typing there and reading back.
+        let reply = type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the reply is the screen as it was at the cap.
+        assert!(
+            reply.error.is_none() && reply.result.is_some(),
+            "a busy screen is still read back at the cap, got {reply:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn type_read_types_before_it_reads() {
+        // Given pane 12's quiet screen.
+        let (panes, asked) = screen_loop(vec![], vec![">>>"], "");
+
+        // When typing a line there and reading it back.
+        type_read(&panes, type_ask(20), &|| false, QUICK);
+
+        // Then the line with its Enter was typed.
+        assert_eq!(
+            typing(&asked),
+            vec![PaneRequest::Type {
+                pane: PaneId(12),
+                text: "print(1)".into(),
+                enter: true,
+            }],
+            "the text and Enter are typed once"
         );
     }
 

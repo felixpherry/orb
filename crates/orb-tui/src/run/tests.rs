@@ -2606,6 +2606,7 @@ fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
     let typed_text = PaneRequest::Type {
         pane: PaneId(1),
         text: ":wq".into(),
+        enter: false,
     };
     let enter = PaneRequest::Keys {
         pane: PaneId(1),
@@ -2619,6 +2620,29 @@ fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
     // Then the program gets the text and only the key's one Enter.
     let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
     assert_eq!(typed, ":wq\n", "the text is typed with no Enter of its own");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_type_with_enter_presses_enter_after_the_text() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent types `:wq` into pane 1 with Enter.
+    let typed_line = PaneRequest::Type {
+        pane: PaneId(1),
+        text: ":wq".into(),
+        enter: true,
+    };
+    test.app
+        .handle(LoopEvent::Control(typed_line, tx), &mut io::sink())?;
+
+    // Then the program gets the text, then one Enter.
+    let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
+    assert_eq!(typed, ":wq\n", "Enter follows the typed text");
     Ok(())
 }
 

@@ -39,8 +39,11 @@ impl App {
                 }
                 PaneAnswer::Done
             }),
-            PaneRequest::Type { pane, text } => self.live_pane(pane).map(|live| {
+            PaneRequest::Type { pane, text, enter } => self.live_pane(pane).map(|live| {
                 live.type_text(&text);
+                if enter {
+                    live.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
                 PaneAnswer::Done
             }),
             PaneRequest::Run { pane, line } => self.run_line(pane, line),

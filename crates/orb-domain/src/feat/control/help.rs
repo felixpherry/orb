@@ -114,6 +114,39 @@ const fn optional(name: &'static str, default: &'static str, meaning: &'static s
     }
 }
 
+/// `--read` on `pane type` and `pane keys`.
+const READ_FLAG: Param = word(
+    "--read",
+    "then print the screen's last lines once it stays the same for 300 ms; a screen that \
+     keeps changing (top, a spinner) is printed at the timeout",
+);
+
+/// `--tail <n>` with `--read`.
+const READ_TAIL_FLAG: Param = flag(
+    "--tail",
+    "<n>",
+    Some("20; only with --read"),
+    "keep the screen's last n lines",
+);
+
+/// `--timeout <ms>` with `--read`.
+const READ_TIMEOUT_FLAG: Param = flag(
+    "--timeout",
+    "<ms>",
+    Some("3000; only with --read"),
+    "milliseconds to wait for the screen to settle",
+);
+
+/// `--json` with `--read`.
+const READ_JSON_FLAG: Param = word(
+    "--json",
+    "with --read, print {\"text\"} as JSON instead of plain text",
+);
+
+/// What `pane type` and `pane keys` reply.
+const READ_BACK: &str = "{}; with --read the screen's last lines as plain text, or with --json \
+                         {\"text\": \"…\"}";
+
 /// What leaving out a session means.
 const CALLERS_SESSION: &str = "the caller's session";
 
@@ -454,8 +487,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "pane",
         verb: "keys",
-        usage: "orb pane keys <pane> <key>...",
-        summary: "Press named keys in a pane, in order; an unknown name sends nothing.",
+        usage: "orb pane keys <pane> <key>... [--read [--tail <n>] [--timeout <ms>]] [--json]",
+        summary: "Press named keys in a pane, in order; an unknown name sends nothing. With \
+                  --read, print the screen's last lines once it has stayed the same for 300 ms.",
         params: &[
             PANE,
             Param {
@@ -467,27 +501,45 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                           alt+<char>; or one character, sent as its key (uppercase as shifted)",
                 repeats: true,
             },
+            READ_FLAG,
+            READ_TAIL_FLAG,
+            READ_TIMEOUT_FLAG,
+            READ_JSON_FLAG,
         ],
         examples: &[
             "orb pane keys 12 ctrl+c",
             "orb pane keys 12 down down enter",
             "orb pane keys 12 esc",
-            "orb pane keys 12 q",
+            "orb pane keys 12 q --read",
         ],
-        reply: DONE,
+        reply: READ_BACK,
     },
     CommandHelp {
         noun: "pane",
         verb: "type",
-        usage: "orb pane type <pane> <text>",
-        summary: "Type text into a pane key by key: no paste, no Enter; control characters \
-                  are left out.",
+        usage: "orb pane type <pane> <text> [--enter] [--read [--tail <n>] [--timeout <ms>]] [--json]",
+        summary: "Type text into a pane key by key: no paste, and no Enter unless --enter; \
+                  control characters are left out. With --read, print the screen's last lines \
+                  once it has stayed the same for 300 ms, so one call types a line into a REPL \
+                  and shows its answer.",
         params: &[
             PANE,
-            word("<text>", "the text, one quoted word, taken as is"),
+            word(
+                "<text>",
+                "the text, one quoted word, taken as is even when it starts with --",
+            ),
+            word("--enter", "press Enter after the text"),
+            READ_FLAG,
+            READ_TAIL_FLAG,
+            READ_TIMEOUT_FLAG,
+            READ_JSON_FLAG,
         ],
-        examples: &["orb pane type 12 \":wq\"", "orb pane type 12 \"hello\""],
-        reply: DONE,
+        examples: &[
+            "orb pane type 12 \":wq\" --enter --read",
+            "orb pane type 12 \"print(6*7)\" --enter --read",
+            "orb pane type 12 \"hello\"",
+        ],
+        reply: READ_BACK,
     },
     CommandHelp {
         noun: "pane",
@@ -497,7 +549,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                   once it is. In a shell that sends prompt marks (fish does), it's refused while \
                   a program runs there unless --force, and text left on the command line is \
                   cleared first. With --wait, print the command's output and exit code once it \
-                  ends.",
+                  ends. A program that never ends, like a REPL, a server or an editor, makes \
+                  --wait run to its timeout: start it with plain run (or --run on a new pane), \
+                  then use orb pane wait, or orb pane type --enter --read to talk to it.",
         params: &[
             PANE,
             word(
@@ -902,7 +956,7 @@ pub(crate) fn overview() -> String {
         "Bare orb in an orb pane says which pane, tab and session you're in.".to_owned(),
         String::new(),
         "replies:".to_owned(),
-        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait, agent prompt --wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
+        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait, pane type --read, pane keys --read, agent prompt --wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
         "  exit 1  refused, or orb isn't running; {\"code\", \"message\", \"hint\"} on stderr"
             .to_owned(),
         "  exit 2  typed wrong; what was wrong, the usage line and the help command on stderr"
