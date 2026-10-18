@@ -48,8 +48,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `orb plate list --all` lists done items too.
 - Every API command takes `--json`; on a command that already prints JSON it changes nothing.
 - `orb agent reply --full` and `orb agent prompt --wait --full` print an answer of any length.
+- The falsify skill argues against review findings before anyone fixes them. It tries to reproduce each one, weighs who hits it and how badly, and picks the cheapest answer: cut the feature, narrow it, fix it, leave it open in the PR, or dismiss it. It rejects defensive checks nothing shows are needed, and calls for reverting a fix that caused a new bug.
 
 ### Changed
+
+- ship-plan runs falsify between review and fixes, and fixes only what it rules on. Its second round runs simplify and deslop on the first round's changes too.
 
 - `⏎` in the search picker (`<C-g> /`) opens the found agent's own pane instead of its session, and resumes its chat in a new tab if it ended.
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
