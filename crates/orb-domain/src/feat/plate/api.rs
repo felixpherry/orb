@@ -63,11 +63,7 @@ pub(crate) fn plan(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Pl
             validator::known_item(app, *item)?;
             Ok(PlateAsk::Done(ApiPlateDone { item: *item }))
         }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not a plate request",
-            "orb help lists the commands",
-        )),
+        _ => Err(ApiError::wrong_kind("not a plate request")),
     }
 }
 
@@ -86,11 +82,7 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
         pane,
     } = op
     else {
-        return Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not a plate add",
-            "orb help lists the commands",
-        ));
+        return Err(ApiError::wrong_kind("not a plate add"));
     };
     let from = validator::adding_session(app, caller)?;
     let verb = validator::verb(verb)?;
@@ -177,7 +169,7 @@ fn changed<M>(answer: Result<(), SendError<M, Report<PlateApiError>>>) -> Reply 
 /// it failed, and the report's latest reason as the message.
 fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
     let SendError::HandlerError(report) = error else {
-        return ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG);
+        return ApiError::failed(error.to_string());
     };
     let (code, hint) = match report.current_context() {
         PlateApiError::NotFound => (ErrorCode::NotFound, "orb plate list shows the items"),

@@ -24,8 +24,8 @@ use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
 use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
 use crate::feat::control::protocol::{
-    AgentDetail, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SEE_LOG,
-    SettledResult, StartResult,
+    AgentDetail, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SettledResult,
+    StartResult,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
@@ -304,12 +304,9 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             head,
             tail,
         }) => {
-            return match deps.panes.text(pane, lines) {
-                Ok(text) => Reply::ok(&ReadResult {
-                    text: screen_text::cut(&screen_text::trim(&text), head, tail),
-                }),
-                Err(error) => Reply::err(error),
-            };
+            return Reply::from_result(deps.panes.text(pane, lines).map(|text| ReadResult {
+                text: screen_text::cut(&screen_text::trim(&text), head, tail),
+            }));
         }
         Ok(Action::PaneWait(ask)) => {
             return pane_ops::wait_for(&deps.panes, &ask, gone, PaneTiming::REAL);
@@ -319,12 +316,7 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             let poke = || agent_ops::poke(deps);
             return agent_ops::wait(deps.turns(), pane, timeout, &poke, gone, Timing::REAL);
         }
-        Ok(Action::Reply { pane }) => {
-            return match deps.turns().reply(pane) {
-                Ok(reply) => Reply::ok(&reply),
-                Err(error) => Reply::err(error),
-            };
-        }
+        Ok(Action::Reply { pane }) => return Reply::from_result(deps.turns().reply(pane)),
         Ok(Action::Add { add, name, run }) => pane_ops::add_pane(deps, add, name, run),
         Ok(Action::Start(start)) => start_session(deps, start),
         Ok(Action::Change(change)) => pane_ops::typed(deps, PaneRequest::Change(change)),
@@ -613,7 +605,7 @@ pub(super) const SPLIT_FLOAT: &str = "floats can't be split or stacked";
 pub(super) fn added(deps: &ControlDeps, add: ApiAdd) -> Result<PaneId, ApiError> {
     deps.runtime
         .block_on(async { deps.sessions.ask(add).await })
-        .map_err(|error| ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG))
+        .map_err(|error| ApiError::failed(error.to_string()))
 }
 
 /// Asks the sessions actor to start `start` and replies with the new session
@@ -638,7 +630,7 @@ fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
             ApiStartError::Starting.to_string(),
             "try again in a few seconds",
         )),
-        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)),
+        Err(error) => Reply::err(ApiError::failed(error.to_string())),
     }
 }
 
@@ -672,7 +664,7 @@ mod tests {
     use crate::feat::control::pane_ops::follow_ups;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, ClosedResult, Direction, Done, EndedRow, ErrorCode, ItemResult, Op,
-        Reply, Request, SEE_LOG, SettledResult,
+        Reply, Request, SettledResult,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::layout::tree::Split;
@@ -930,11 +922,7 @@ mod tests {
             caller: None,
             op: Op::PaneClose { pane: PaneId(3) },
         };
-        let reply = Reply::err(ApiError::new(
-            ErrorCode::Failed,
-            "orb's screen didn't answer",
-            SEE_LOG,
-        ));
+        let reply = Reply::err(ApiError::failed("orb's screen didn't answer"));
 
         // When writing its log line.
         let text = log_text(&request, &reply);

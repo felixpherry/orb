@@ -17,7 +17,7 @@ use crate::feat::control::protocol::{
 };
 use crate::feat::control::target::{self, Target};
 use crate::feat::control::validator;
-use crate::feat::harness::{HarnessId, Harnesses};
+use crate::feat::harness::Harness;
 use crate::feat::sessions::state::{Agent, AgentStatus};
 use crate::feat::sessions::transcript::{Message, Role};
 use crate::ids::PaneId;
@@ -405,7 +405,7 @@ pub(crate) fn since_prompt(
     }
     let answers: Vec<&Message> = messages
         .iter()
-        .filter(|message| matches!(message.role, Role::Assistant))
+        .filter(|message| message.role == Role::Assistant)
         .collect();
     let Some(last) = answers.last() else {
         let time = Timestamp::try_from(prompted).map_or_else(
@@ -427,19 +427,15 @@ pub(crate) fn since_prompt(
     })
 }
 
-/// The reply of the last exchange that has one, in `transcript` as `harness`
+/// The reply of the last exchange that has one, in `transcript` as `reader`
 /// reads it, for the agent in `pane`; `turn_failed` when that exchange ended
-/// in a failed model call, `no_reply` when there is none or orb doesn't know
-/// the harness, `failed` when the file can't be read.
+/// in a failed model call, `no_reply` when there is none, `failed` when the
+/// file can't be read.
 pub(crate) fn last_reply(
-    harnesses: &Harnesses,
-    harness: &HarnessId,
+    reader: &dyn Harness,
     transcript: &Path,
     pane: PaneId,
 ) -> Result<ReplyResult, ApiError> {
-    let reader = harnesses
-        .get(harness)
-        .ok_or_else(|| no_reply(pane, &format!("orb can't read {harness} transcripts")))?;
     let (_, exchanges) = reader
         .exchanges(transcript)
         .map_err(|error| unreadable(transcript, &error, pane))?;
@@ -468,7 +464,7 @@ pub(crate) fn last_reply(
 )]
 mod tests {
     use std::path::Path;
-    use std::sync::Arc;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -478,7 +474,7 @@ mod tests {
     use crate::State;
     use crate::feat::control::protocol::{AgentKind, ErrorCode, WaitEnd, WaitResult};
     use crate::feat::harness::fake::FakeHarness;
-    use crate::feat::harness::{HarnessId, Harnesses};
+
     use crate::feat::sessions::state::{Agent, AgentStatus};
     use crate::feat::sessions::transcript::Exchange;
     use crate::ids::{AgentId, PaneId};
@@ -535,17 +531,10 @@ mod tests {
 
     /// `last_reply` from a claude transcript holding `exchanges`.
     fn reply_from(exchanges: Vec<Exchange>) -> Result<String, ErrorCode> {
-        let harnesses = Harnesses::new(vec![Arc::new(
-            FakeHarness::new("claude", Vec::new()).with_exchanges(exchanges),
-        )]);
-        last_reply(
-            &harnesses,
-            &HarnessId::new("claude"),
-            Path::new("/t"),
-            PaneId(1),
-        )
-        .map(|reply| reply.text)
-        .map_err(|error| error.code)
+        let reader = FakeHarness::new("claude", Vec::new()).with_exchanges(exchanges);
+        last_reply(&reader, Path::new("/t"), PaneId(1))
+            .map(|reply| reply.text)
+            .map_err(|error| error.code)
     }
 
     #[rstest::rstest]

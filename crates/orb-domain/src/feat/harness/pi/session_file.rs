@@ -171,10 +171,7 @@ fn next_exchange(mut exchanges: Vec<Exchange>, entry: &Value) -> Vec<Exchange> {
                     _ => {}
                 }
             }
-            let failed = failure(entry);
-            if failed.is_some() || has_text {
-                exchange.failure = failed;
-            }
+            exchange.end_entry(failure(entry), has_text);
         }
         _ => {}
     }

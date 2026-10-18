@@ -107,7 +107,6 @@ impl Turns<'_> {
         let view = self.agent(pane).ok_or_else(|| agent::no_agent(pane))?;
         let path = view
             .transcript
-            .clone()
             .ok_or_else(|| agent::no_reply(pane, "no transcript yet"))?;
         let reader = self.harnesses.get(&view.harness).ok_or_else(|| {
             agent::no_reply(
@@ -126,7 +125,7 @@ impl Turns<'_> {
                 return agent::since_prompt(&read.messages, prompted.at, &zone, pane);
             }
         }
-        agent::last_reply(self.harnesses, &view.harness, &path, pane)
+        agent::last_reply(reader.as_ref(), &path, pane)
     }
 
     /// How long orb's prompt to `pane`'s agent still counts as work underway

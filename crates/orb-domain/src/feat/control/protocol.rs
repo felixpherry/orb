@@ -20,7 +20,7 @@ pub fn socket_path(orb_root: &Path) -> PathBuf {
 }
 
 /// How many graphemes of a name go on the wire.
-pub(crate) const NAME_LIMIT: usize = 60;
+const NAME_LIMIT: usize = 60;
 
 /// `name` cut to [`NAME_LIMIT`] graphemes, ending in `…` when cut.
 pub(crate) fn short_name(name: &str) -> String {
@@ -33,12 +33,12 @@ pub(crate) fn cut(text: &str, limit: usize) -> String {
     if graphemes.len() <= limit {
         return text.to_owned();
     }
-    let mut cut: String = graphemes
+    let mut kept: String = graphemes
         .into_iter()
         .take(limit.saturating_sub(1))
         .collect();
-    cut.push('…');
-    cut
+    kept.push('…');
+    kept
 }
 
 /// One request: who asks (the pane the command runs in, if any) and what for.
@@ -473,6 +473,27 @@ impl ApiError {
         }
     }
 
+    /// A `failed` refusal for a failure inside orb, pointing at its log.
+    pub fn failed<M>(message: M) -> Self
+    where
+        M: Into<String>,
+    {
+        Self::new(ErrorCode::Failed, message, SEE_LOG)
+    }
+
+    /// A `bad_request` refusal for a request handed to code that serves
+    /// other kinds; `message` says which kind it expected.
+    pub fn wrong_kind<M>(message: M) -> Self
+    where
+        M: Into<String>,
+    {
+        Self::new(
+            ErrorCode::BadRequest,
+            message,
+            "orb help lists the commands",
+        )
+    }
+
     /// The same refusal with `hint` in place of its own.
     #[must_use]
     pub fn with_hint<H>(self, hint: H) -> Self
@@ -515,7 +536,7 @@ impl Reply {
                 result: Some(value),
                 error: None,
             },
-            Err(error) => Self::err(ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)),
+            Err(error) => Self::err(ApiError::failed(error.to_string())),
         }
     }
 
@@ -526,6 +547,30 @@ impl Reply {
             result: None,
             error: Some(error),
         }
+    }
+
+    /// The reply's result (`null` when it carries none), or its refusal
+    /// (`failed` when a refused reply names no error).
+    ///
+    /// # Errors
+    ///
+    /// Returns the reply's error when it isn't `ok`.
+    pub fn into_result(self) -> Result<serde_json::Value, ApiError> {
+        if self.ok {
+            Ok(self.result.unwrap_or_default())
+        } else {
+            Err(self
+                .error
+                .unwrap_or_else(|| ApiError::failed("no error given")))
+        }
+    }
+
+    /// `result` as a reply: its value, or its refusal.
+    pub fn from_result<T>(result: Result<T, ApiError>) -> Self
+    where
+        T: Serialize,
+    {
+        result.map_or_else(Self::err, |ok| Self::ok(&ok))
     }
 }
 

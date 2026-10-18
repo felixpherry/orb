@@ -264,10 +264,7 @@ fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
                     _ => {}
                 }
             }
-            let failed = api_error(line);
-            if failed.is_some() || has_text {
-                exchange.failure = failed;
-            }
+            exchange.end_entry(api_error(line), has_text);
         }
         _ => {}
     }
@@ -280,18 +277,22 @@ fn api_error(line: &Value) -> Option<String> {
     if line.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    let text = line
-        .pointer("/message/content")
+    let text = text_blocks(line).collect::<Vec<_>>().join("\n");
+    if text.is_empty() {
+        text_field(line, "error")
+    } else {
+        Some(text)
+    }
+}
+
+/// The text of each text block in a message line's content.
+fn text_blocks(line: &Value) -> impl Iterator<Item = String> + '_ {
+    line.pointer("/message/content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|block| text_field(block, "text"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(text)
-        .filter(|text| !text.is_empty())
-        .or_else(|| text_field(line, "error"))
 }
 
 /// Reads the prompts, Claude's text blocks and its API errors (as failures)
@@ -352,15 +353,7 @@ pub fn read_messages(path: &Path, offset: u64, prompt_offset: u64) -> io::Result
                     messages.push(message(Role::Failure, error));
                     continue;
                 }
-                let blocks = value.pointer("/message/content").and_then(Value::as_array);
-                messages.extend(
-                    blocks
-                        .into_iter()
-                        .flatten()
-                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                        .filter_map(|block| text_field(block, "text"))
-                        .map(|text| message(Role::Assistant, text)),
-                );
+                messages.extend(text_blocks(&value).map(|text| message(Role::Assistant, text)));
             }
             _ => {}
         }

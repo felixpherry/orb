@@ -222,12 +222,16 @@ impl Splitter {
         // A prompt mark ended by an escape that isn't its `ESC \` stops
         // before that escape, which may sit in the carried bytes; it starts
         // the next sequence.
-        let unused = self.carry.get(used..carried).map(<[u8]>::to_vec);
+        let unused = self
+            .carry
+            .get(used..carried)
+            .filter(|unused| !unused.is_empty())
+            .map(<[u8]>::to_vec);
         self.carry.truncate(text);
         push_text(pieces, Cow::Owned(mem::take(&mut self.carry)));
         pieces.extend(marker);
         self.open = open;
-        if let Some(unused) = unused.filter(|unused| !unused.is_empty()) {
+        if let Some(unused) = unused {
             self.carry = unused;
             self.open = Open::Escape;
             return bytes;

@@ -67,7 +67,6 @@ pub struct Lines {
 /// shell started inside another takes over.
 #[derive(Debug, Default)]
 pub(crate) struct ShellTracker {
-    marks_seen: bool,
     phase: ShellPhase,
     last: Option<Finished>,
     seq: u64,
@@ -79,7 +78,6 @@ impl ShellTracker {
     /// else on the next one; it ends after the cursor's line when the cursor
     /// is past the line's start, which keeps a last line with no newline.
     pub(crate) fn mark(&mut self, mark: &Mark, cursor: Spot) {
-        self.marks_seen = true;
         self.seq += 1;
         let line_from = |spot: Spot| match spot.column {
             0 => spot.line,
@@ -116,13 +114,13 @@ impl ShellTracker {
 
     /// Whether any mark arrived.
     pub(crate) fn marks_seen(&self) -> bool {
-        self.marks_seen
+        self.seq > 0
     }
 
     /// The snapshot, with the cursor now at `cursor`.
     pub(crate) fn snapshot(&self, cursor: Spot) -> ShellState {
         ShellState {
-            marks_seen: self.marks_seen,
+            marks_seen: self.marks_seen(),
             phase: self.phase.clone(),
             last: self.last,
             seq: self.seq,

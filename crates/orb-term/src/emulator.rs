@@ -711,9 +711,15 @@ impl Emulator {
     pub(crate) fn text(&self, history: usize) -> String {
         let above = i32::try_from(history.min(self.term.history_size())).unwrap_or(0);
         let bottom = i32::try_from(self.term.screen_lines()).unwrap_or(1) - 1;
+        self.rows_text(-above, bottom)
+    }
+
+    /// Grid rows `first..=last` as plain text: soft-wrapped rows joined into
+    /// one line, trailing blanks dropped from each line and from the end.
+    fn rows_text(&self, first: i32, last: i32) -> String {
         let text = self.term.bounds_to_string(
-            Point::new(Line(-above), Column(0)),
-            Point::new(Line(bottom), self.term.last_column()),
+            Point::new(Line(first), Column(0)),
+            Point::new(Line(last), self.term.last_column()),
         );
         text.lines()
             .map(str::trim_end)
@@ -751,18 +757,7 @@ impl Emulator {
             .ok()
             .zip(i32::try_from(to - top - 1).ok());
         let text = match rows {
-            Some((first, last)) if to > from => {
-                let text = self.term.bounds_to_string(
-                    Point::new(Line(first), Column(0)),
-                    Point::new(Line(last), self.term.last_column()),
-                );
-                text.lines()
-                    .map(str::trim_end)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .trim_end()
-                    .to_owned()
-            }
+            Some((first, last)) if to > from => self.rows_text(first, last),
             _ => String::new(),
         };
         Lines { text, truncated }
@@ -868,6 +863,7 @@ fn printable(text: &str) -> String {
         .filter(|character| !character.is_control())
         .collect()
 }
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};

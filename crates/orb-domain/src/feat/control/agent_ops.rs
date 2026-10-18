@@ -86,11 +86,7 @@ pub(super) fn agent_io(
             }
             Ok(Action::Reply { pane: *pane })
         }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not an agent request",
-            "orb help lists the commands",
-        )),
+        _ => Err(ApiError::wrong_kind("not an agent request")),
     }
 }
 
@@ -183,7 +179,7 @@ pub(super) struct PromptAsk {
 /// with `wait`, waits for the turn to end, with the timeout over the whole
 /// call, until `gone` says the caller hung up, and replies with everything
 /// the agent wrote since the paste, reading the transcript again for up to
-/// 2 s when the turn ended with nothing written yet. An agent that stops to
+/// `timing.reply_grace` when the turn ended with nothing written yet. An agent that stops to
 /// ask the user is `agent_blocked`; a turn that ends in a failed model call
 /// is `turn_failed`, with the transcript's error text when it holds one.
 pub(super) fn prompt_agent(
@@ -321,10 +317,12 @@ fn start_agent(deps: &ControlDeps, pane: PaneId, line: String, name: Option<Stri
             &format!("couldn't name pane {}: {}", pane.0, error.message),
         );
     }
-    match agent::wait_started(&deps.state, pane, &|| poke(deps), Timing::REAL) {
-        Ok(started) => Reply::ok(&started),
-        Err(error) => Reply::err(error),
-    }
+    Reply::from_result(agent::wait_started(
+        &deps.state,
+        pane,
+        &|| poke(deps),
+        Timing::REAL,
+    ))
 }
 
 /// Adds the pane `at` asks for, if any, then starts the agent there (see

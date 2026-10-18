@@ -9,7 +9,7 @@ use std::time::Duration;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::feat::control::change::Change;
-use crate::feat::control::protocol::{ApiError, ErrorCode, SEE_LOG};
+use crate::feat::control::protocol::ApiError;
 use crate::ids::PaneId;
 
 /// What an agent asks the screen loop to do.
@@ -197,9 +197,9 @@ fn modified(name: &str) -> Option<KeyEvent> {
     let (prefix, rest) = name.split_once('+')?;
     if prefix.eq_ignore_ascii_case("ctrl") {
         let letter = rest
-            .to_ascii_lowercase()
             .parse::<char>()
             .ok()
+            .map(|letter| letter.to_ascii_lowercase())
             .filter(char::is_ascii_lowercase)?;
         Some(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::CONTROL))
     } else if prefix.eq_ignore_ascii_case("alt") {
@@ -240,17 +240,10 @@ impl PaneControl {
     pub fn ask(&self, request: PaneRequest) -> PaneReply {
         let (tx, rx) = mpsc::channel();
         (self.send)(request, tx);
-        rx.recv_timeout(LOOP_WAIT).unwrap_or_else(|_| {
-            Err(ApiError::new(
-                ErrorCode::Failed,
-                "orb's screen didn't answer",
-                SEE_LOG,
-            ))
-        })
+        rx.recv_timeout(LOOP_WAIT)
+            .unwrap_or_else(|_| Err(ApiError::failed("orb's screen didn't answer")))
     }
-}
 
-impl PaneControl {
     /// Pane `pane`'s screen after up to `lines` lines of history, as text.
     ///
     /// # Errors
@@ -293,11 +286,7 @@ impl PaneControl {
 
 /// The refusal for an answer of the wrong kind.
 fn wrong_kind() -> ApiError {
-    ApiError::new(
-        ErrorCode::Failed,
-        "orb's screen answered with the wrong kind of reply",
-        SEE_LOG,
-    )
+    ApiError::failed("orb's screen answered with the wrong kind of reply")
 }
 
 impl std::fmt::Debug for PaneControl {

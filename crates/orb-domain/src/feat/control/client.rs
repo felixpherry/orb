@@ -1,10 +1,10 @@
-//! The `orb session|tab|pane|agent|plate|project …` commands: turn the words typed into one
-//! request, send it to the running orb, print its reply (JSON for data, plain
-//! text for a pane's screen, a command's output, a line waited for and an agent's answer) and
-//! pick the exit code
+//! The `orb session|tab|pane|agent|plate|project …` commands: turn the
+//! words typed into one request, send it to the running orb, print its
+//! reply (JSON for data, plain text for a pane's screen, a command's
+//! output, a line waited for and an agent's answer) and pick the exit code
 //! (0 done, 1 refused or orb not running, 2 typed wrong). `orb help` and
-//! `--help` print help instead, with no orb needed. Bare `orb` in an orb pane
-//! says which pane, tab and session it is.
+//! `--help` print help instead, with no orb needed. Bare `orb` in an orb
+//! pane says which pane, tab and session it is.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use serde::Deserialize;
 use wherror::Error;
 
 use crate::feat::control::agent::Timing;
 use crate::feat::control::help::{self, CommandHelp};
 use crate::feat::control::pane_ops::last_line;
 use crate::feat::control::protocol::{
-    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, RunResult, SEE_LOG,
+    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, RunResult,
 };
 use crate::feat::sessions::state::AgentStatus;
 use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
@@ -89,28 +90,15 @@ where
         }
     };
     let limit = reply_limit(&op);
-    let as_text = prints_text(&op) && !words.as_deref().is_some_and(asked_json);
+    let as_text = !words.as_deref().is_some_and(asked_json);
     let request = Request { caller, op };
-    match ask(socket, &request, limit) {
-        Ok(Reply {
-            ok: true, result, ..
-        }) => {
-            let result = result.unwrap_or(serde_json::Value::Null);
-            match text_of(&request.op, &result).filter(|_| as_text) {
-                Some(text) => {
-                    let _ = writeln!(out, "{text}");
-                }
-                None => {
-                    let _ = writeln!(out, "{result}");
-                }
-            }
+    match ask(socket, &request, limit).and_then(Reply::into_result) {
+        Ok(result) => {
+            let text = text_of(&request.op, &result)
+                .filter(|_| as_text)
+                .unwrap_or_else(|| result.to_string());
+            let _ = writeln!(out, "{text}");
             0
-        }
-        Ok(Reply { error, .. }) => {
-            let error = error
-                .unwrap_or_else(|| ApiError::new(ErrorCode::Failed, "no error given", SEE_LOG));
-            print_error(err, &error);
-            1
         }
         Err(error) => {
             print_error(err, &error);
@@ -119,29 +107,19 @@ where
     }
 }
 
-/// Whether `op`'s reply prints as plain text unless `--json` is given.
-fn prints_text(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::PaneRead { .. }
-            | Op::AgentReply { .. }
-            | Op::AgentPrompt { wait: true, .. }
-            | Op::PaneRun { wait: true, .. }
-            | Op::PaneWait { .. }
-    )
-}
-
-/// `op`'s reply `result` as plain text: a screen's or an answer's text, a
-/// waited-on command's output and exit, the line a wait matched; `None` for
-/// any other reply, or one not of its shape.
+/// `op`'s reply `result` as plain text, printed unless `--json` is given: a
+/// screen's or an answer's text, a waited-on command's output and exit, the
+/// line a wait matched; `None` for any other reply, or one not of its shape.
 fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
     match op {
-        Op::PaneRead { .. } | Op::AgentReply { .. } | Op::AgentPrompt { .. } => result
+        Op::PaneRead { .. } | Op::AgentReply { .. } | Op::AgentPrompt { wait: true, .. } => result
             .get("text")?
             .as_str()
             .map(|text| text.trim_end_matches('\n').to_owned()),
         Op::PaneWait { .. } => result.get("line")?.as_str().map(str::to_owned),
-        Op::PaneRun { pane, .. } => serde_json::from_value::<RunResult>(result.clone())
+        Op::PaneRun {
+            pane, wait: true, ..
+        } => RunResult::deserialize(result)
             .ok()
             .map(|run| run_text(*pane, &run)),
         _ => None,
@@ -178,11 +156,12 @@ fn run_text(pane: PaneId, run: &RunResult) -> String {
 
 /// Whether `--json` is among `words` before `--`.
 fn asked_json(words: &[&str]) -> bool {
-    words
-        .split(|word| *word == "--")
-        .next()
-        .unwrap_or_default()
-        .contains(&"--json")
+    before_dash(words).contains(&"--json")
+}
+
+/// The words before the first `--`, or all of them without one.
+fn before_dash<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
+    words.split(|word| *word == "--").next().unwrap_or_default()
 }
 
 /// Bare `orb` in pane `caller`: asks the orb on `socket` where the caller
@@ -193,30 +172,20 @@ where
     O: Write,
     E: Write,
 {
-    let op = Op::Here;
-    let limit = reply_limit(&op);
     let request = Request {
         caller: Some(caller),
-        op,
+        op: Op::Here,
     };
-    let refusal = match ask(socket, &request, limit) {
-        Ok(Reply {
-            ok: true, result, ..
-        }) => match serde_json::from_value::<HereResult>(result.unwrap_or_default()) {
-            Ok(here) => {
-                let _ = writeln!(out, "{}", home_text(&here));
-                return Some(0);
-            }
-            Err(error) => ApiError::new(
-                ErrorCode::Failed,
-                format!("orb sent no readable place: {error}"),
-                SEE_LOG,
-            ),
-        },
-        Ok(Reply { error, .. }) => {
-            error.unwrap_or_else(|| ApiError::new(ErrorCode::Failed, "no error given", SEE_LOG))
-        }
+    let answer = match ask(socket, &request, reply_limit(&request.op)) {
         Err(error) if error.code == ErrorCode::NotRunning => return None,
+        asked => asked.and_then(Reply::into_result),
+    };
+    let refusal = match answer.map(serde_json::from_value::<HereResult>) {
+        Ok(Ok(here)) => {
+            let _ = writeln!(out, "{}", home_text(&here));
+            return Some(0);
+        }
+        Ok(Err(error)) => ApiError::failed(format!("orb sent no readable place: {error}")),
         Err(error) => error,
     };
     print_error(err, &refusal);
@@ -314,7 +283,7 @@ impl UsageError {
             ),
             (Some(noun), None) => (format!("orb {noun} <verb> …"), format!("orb {noun} --help")),
             (None, _) => {
-                let nouns: Vec<&str> = help::NOUNS.iter().map(|noun| noun.name).collect();
+                let nouns = help::nouns();
                 (
                     format!("orb {} <verb> …", nouns.join("|")),
                     "orb help".to_owned(),
@@ -396,8 +365,7 @@ impl UsageError {
 
 /// The nouns, comma-separated.
 fn noun_list() -> String {
-    let nouns: Vec<&str> = help::NOUNS.iter().map(|noun| noun.name).collect();
-    nouns.join(", ")
+    help::nouns().join(", ")
 }
 
 /// ` (did you mean …?)` for a suggestion, nothing without one.
@@ -424,10 +392,8 @@ fn asked_help(words: &[&str]) -> Option<Result<String, UsageError>> {
         ["help", rest @ ..] => Some(help_word(rest)),
         ["--help" | "-h", ..] => Some(Ok(help::overview())),
         _ => {
-            let before_dash = words.split(|word| *word == "--").next().unwrap_or_default();
-            before_dash
-                .contains(&"--help")
-                .then(|| help_flag(before_dash))
+            let before = before_dash(words);
+            before.contains(&"--help").then(|| help_flag(before))
         }
     }
 }
@@ -478,7 +444,7 @@ fn named_noun(word: &str) -> Result<&'static str, UsageError> {
         verb: None,
         problem: UsageProblem::UnknownNoun {
             word: word.to_owned(),
-            suggestion: help::suggest(word, help::NOUNS.iter().map(|noun| noun.name)),
+            suggestion: help::suggest(word, help::nouns()),
         },
     })
 }
@@ -730,13 +696,8 @@ fn agent_words(
             let words = words()?;
             let wait = words.switch("--wait");
             let timeout = words.number("--timeout")?;
-            if timeout.is_some() && !wait {
-                return Err(UsageProblem::Needs {
-                    flag: "--timeout",
-                    needs: "--wait",
-                });
-            }
-            let given = [words.positional.as_slice(), words.after.as_slice()].concat();
+            words.needs("--wait", &["--timeout"])?;
+            let given = words.with_after();
             let [pane, text] = exact(&given, ["<pane>", "<text>"])?;
             Op::AgentPrompt {
                 pane: PaneId(number("<pane>", pane)?),
@@ -787,15 +748,8 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
             let wait = words.switch("--wait");
             let timeout = words.number("--timeout")?;
             let tail = words.number("--tail")?;
-            for (flag, given) in [("--timeout", timeout.is_some()), ("--tail", tail.is_some())] {
-                if given && !wait {
-                    return Err(UsageProblem::Needs {
-                        flag,
-                        needs: "--wait",
-                    });
-                }
-            }
-            let given = [words.positional.as_slice(), words.after.as_slice()].concat();
+            words.needs("--wait", &["--timeout", "--tail"])?;
+            let given = words.with_after();
             let [pane, line] = exact(&given, ["<pane>", "<command>"])?;
             Op::PaneRun {
                 pane: PaneId(number("<pane>", pane)?),
@@ -820,15 +774,14 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
             words.exclusive(&["--text", "--regex"])?;
             let text = words.value("--text").map(str::to_owned);
             let regex = words.value("--regex").map(str::to_owned);
-            match (&text, &regex) {
-                (None, None) => return Err(UsageProblem::MissingFlag { flag: "--text" }),
-                (_, Some(pattern)) => {
-                    regex::Regex::new(pattern).map_err(|error| UsageProblem::BadPattern {
-                        got: pattern.clone(),
-                        why: last_line(&error.to_string()).to_owned(),
-                    })?;
-                }
-                _ => {}
+            if text.is_none() && regex.is_none() {
+                return Err(UsageProblem::MissingFlag { flag: "--text" });
+            }
+            if let Some(pattern) = &regex {
+                regex::Regex::new(pattern).map_err(|error| UsageProblem::BadPattern {
+                    got: pattern.clone(),
+                    why: last_line(&error.to_string()).to_owned(),
+                })?;
             }
             Op::PaneWait {
                 pane,
@@ -892,8 +845,7 @@ fn add_words(
     })
 }
 
-/// `--direction`'s (or `flag`'s) value as a side; `NotInSet` naming `flag`
-/// otherwise.
+/// `flag`'s value as a side; `NotInSet` naming `flag` otherwise.
 fn direction(flag: &'static str, word: &str) -> Result<Direction, UsageProblem> {
     match word {
         "right" => Ok(Direction::Right),
@@ -1035,6 +987,22 @@ impl<'a> Words<'a> {
         }
     }
 
+    /// Refuses the first of `flags` given without switch `needs`.
+    fn needs(&self, needs: &'static str, flags: &[&'static str]) -> Result<(), UsageProblem> {
+        if self.switch(needs) {
+            return Ok(());
+        }
+        flags
+            .iter()
+            .find(|&&flag| self.switch(flag))
+            .map_or(Ok(()), |&flag| Err(UsageProblem::Needs { flag, needs }))
+    }
+
+    /// The positionals, then every word after `--`.
+    fn with_after(&self) -> Vec<&'a str> {
+        [self.positional.as_slice(), self.after.as_slice()].concat()
+    }
+
     /// Flag `flag`'s value as a number: `None` when absent; `NotANumber`
     /// when it isn't one.
     fn number<T>(&self, flag: &'static str) -> Result<Option<T>, UsageProblem>
@@ -1141,9 +1109,7 @@ fn reply_limit(op: &Op) -> Option<Duration> {
 /// Sends `request` over one connection and reads the one reply line, giving
 /// up with `timeout` once `limit` passes.
 fn ask(socket: &Path, request: &Request, limit: Option<Duration>) -> Result<Reply, ApiError> {
-    let failed = |error: &dyn std::fmt::Display| {
-        ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)
-    };
+    let failed = |error: &dyn std::fmt::Display| ApiError::failed(error.to_string());
     let mut stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
         ErrorKind::NotFound | ErrorKind::ConnectionRefused => ApiError::new(
             ErrorCode::NotRunning,

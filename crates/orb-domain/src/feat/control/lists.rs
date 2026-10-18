@@ -7,8 +7,6 @@
 //!
 //! It also reads what a close or settle ends, before the change runs.
 
-use serde::Serialize;
-
 use crate::AppState;
 use crate::feat::control::agent;
 use crate::feat::control::protocol::{
@@ -24,30 +22,22 @@ use crate::ids::{PaneId, ProjectId, SessionId};
 /// The reply to a list `request`, read from `app`.
 pub(super) fn route(app: &AppState, request: &Request) -> Reply {
     match request.op {
-        Op::SessionList { all, project } => answer(sessions(app, all, project)),
-        Op::TabList { session } => match in_session(app, session, request.caller) {
-            Ok(resolved) => Reply::ok(&tabs(app, resolved.session)),
-            Err(error) => Reply::err(error),
-        },
-        Op::PaneList { session } => match in_session(app, session, request.caller) {
-            Ok(resolved) => Reply::ok(&panes(app, resolved.session, request.caller)),
-            Err(error) => Reply::err(error),
-        },
+        Op::SessionList { all, project } => Reply::from_result(sessions(app, all, project)),
+        Op::TabList { session } => Reply::from_result(
+            in_session(app, session, request.caller).map(|resolved| tabs(app, resolved.session)),
+        ),
+        Op::PaneList { session } => Reply::from_result(
+            in_session(app, session, request.caller)
+                .map(|resolved| panes(app, resolved.session, request.caller)),
+        ),
         Op::AgentList {
             all,
             session,
             ref status,
-        } => answer(agents(app, all, session, status, request.caller)),
+        } => Reply::from_result(agents(app, all, session, status, request.caller)),
         Op::ProjectList => Reply::ok(&projects(app)),
-        Op::Here => match here(app, request.caller) {
-            Ok(here) => Reply::ok(&here),
-            Err(error) => Reply::err(error),
-        },
-        _ => Reply::err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not a list",
-            "orb help lists the commands",
-        )),
+        Op::Here => Reply::from_result(here(app, request.caller)),
+        _ => Reply::err(ApiError::wrong_kind("not a list")),
     }
 }
 
@@ -68,14 +58,10 @@ fn here(app: &AppState, caller: Option<PaneId>) -> Result<HereResult, ApiError> 
         layout
             .tabs()
             .iter()
-            .position(|tab| tab.pane_ids().contains(&pane))
+            .position(|tab| tab.holds(pane))
             .map(|index| index + 1)
     });
-    let session_name = app
-        .sessions
-        .session(session)
-        .map(|found| protocol::short_name(&app.sessions.title(found)))
-        .unwrap_or_default();
+    let session_name = session_name(app, session);
     let agent = app
         .sessions
         .agent_rows(session, &app.layouts)
@@ -91,6 +77,14 @@ fn here(app: &AppState, caller: Option<PaneId>) -> Result<HereResult, ApiError> 
     })
 }
 
+/// `session`'s name as the sidebar shows it, cut short; empty when it's gone.
+fn session_name(app: &AppState, session: SessionId) -> String {
+    app.sessions
+        .session(session)
+        .map(|found| protocol::short_name(&app.sessions.title(found)))
+        .unwrap_or_default()
+}
+
 /// The session named, else the caller's.
 fn in_session(
     app: &AppState,
@@ -98,11 +92,6 @@ fn in_session(
     caller: Option<PaneId>,
 ) -> Result<Resolved, ApiError> {
     target::resolve(app, session.map(Target::Session), caller)
-}
-
-/// `result` as a reply: its value, or its refusal.
-fn answer<T: Serialize>(result: Result<T, ApiError>) -> Reply {
-    result.map_or_else(Reply::err, |ok| Reply::ok(&ok))
 }
 
 /// Sessions not being deleted, of `project` when given: open ones, or all
@@ -370,11 +359,7 @@ pub(super) fn tab_panes(app: &AppState, pane: PaneId) -> Vec<PaneId> {
 pub(super) fn settled(app: &AppState, session: SessionId) -> SettledResult {
     SettledResult {
         session,
-        name: app
-            .sessions
-            .session(session)
-            .map(|found| protocol::short_name(&app.sessions.title(found)))
-            .unwrap_or_default(),
+        name: session_name(app, session),
         ended: ended(app, &app.layouts.session_panes(session)),
     }
 }

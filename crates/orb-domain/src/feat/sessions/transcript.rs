@@ -67,6 +67,16 @@ pub struct Exchange {
     pub failure: Option<String>,
 }
 
+impl Exchange {
+    /// Ends one assistant entry: a failed model call marks the exchange as
+    /// failed, and an entry that wrote text clears an earlier failure.
+    pub fn end_entry(&mut self, failed: Option<String>, wrote_text: bool) {
+        if failed.is_some() || wrote_text {
+            self.failure = failed;
+        }
+    }
+}
+
 /// Who wrote a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {

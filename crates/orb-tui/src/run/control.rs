@@ -57,11 +57,8 @@ impl App {
                 .live_pane(pane)
                 .map(|live| PaneAnswer::Shell(shell_view(live.shell()))),
             PaneRequest::Between { pane, start, end } => self.live_pane(pane).map(|live| {
-                let lines = live.text_between(start, end);
-                PaneAnswer::Lines(PaneLines {
-                    text: lines.text,
-                    truncated: lines.truncated,
-                })
+                let orb_term::Lines { text, truncated } = live.text_between(start, end);
+                PaneAnswer::Lines(PaneLines { text, truncated })
             }),
         };
         let _ = reply.send(answer);

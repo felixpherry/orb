@@ -29,7 +29,7 @@ use crate::ids::{PaneId, SessionId};
 /// What a split, stack, float or new tab comes to, read from `app`: the
 /// pane or session it adds to, settled before a bad `cwd`.
 pub(super) fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
-    match op {
+    let (session, place, name, run, cwd) = match op {
         Op::PaneSplit {
             pane,
             direction,
@@ -42,7 +42,7 @@ pub(super) fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<
                 at,
                 split: (*direction).into(),
             };
-            adding(session, place, name.clone(), run.clone(), cwd.as_deref())
+            (session, place, name, run, cwd)
         }
         Op::PaneStack {
             pane,
@@ -51,13 +51,7 @@ pub(super) fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<
             cwd,
         } => {
             let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
-            adding(
-                session,
-                ApiPlace::Stack { at },
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
+            (session, ApiPlace::Stack { at }, name, run, cwd)
         }
         Op::PaneFloat {
             session,
@@ -66,13 +60,7 @@ pub(super) fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<
             cwd,
         } => {
             let session = changing_session(app, *session, caller)?;
-            adding(
-                session,
-                ApiPlace::Float,
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
+            (session, ApiPlace::Float, name, run, cwd)
         }
         Op::TabCreate {
             session,
@@ -81,20 +69,11 @@ pub(super) fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<
             cwd,
         } => {
             let session = changing_session(app, *session, caller)?;
-            adding(
-                session,
-                ApiPlace::Tab,
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
+            (session, ApiPlace::Tab, name, run, cwd)
         }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not an add",
-            "orb help lists the commands",
-        )),
-    }
+        _ => return Err(ApiError::wrong_kind("not an add")),
+    };
+    adding(session, place, name.clone(), run.clone(), cwd.as_deref())
 }
 
 /// The add of a shell at `place` in `session`, in folder `cwd` when given:
@@ -215,11 +194,7 @@ pub(super) fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result
                 lines: lines.unwrap_or(TAIL),
             }))
         }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not pane input or output",
-            "orb help lists the commands",
-        )),
+        _ => Err(ApiError::wrong_kind("not pane input or output")),
     }
 }
 
@@ -236,10 +211,7 @@ fn key_names(pane: PaneId) -> String {
 
 /// Asks the screen loop for `request` and replies `{}` once it's done.
 pub(super) fn typed(deps: &ControlDeps, request: PaneRequest) -> Reply {
-    match deps.panes.ask(request) {
-        Ok(_) => Reply::ok(&Done {}),
-        Err(error) => Reply::err(error),
-    }
+    Reply::from_result(deps.panes.ask(request).map(|_| Done {}))
 }
 
 /// Adds the shell, then names it and types `run` into it on the screen loop,
@@ -344,10 +316,11 @@ pub(super) fn run(
         }
         let marked = before.marks_seen && !matches!(before.phase, ShellPhase::Running { .. });
         if marked {
-            marked_wait(panes, ask, before.seq, deadline, gone, timing).map(Some)
+            marked_wait(panes, ask, before.seq, deadline, gone, timing)
         } else {
-            quiet_wait(panes, ask, deadline, gone, timing).map(Some)
+            quiet_wait(panes, ask, deadline, gone, timing)
         }
+        .map(Some)
     });
     match outcome {
         Ok(None) => Reply::ok(&Done {}),
@@ -412,7 +385,7 @@ fn marked_wait(
     });
     match started {
         Some(outcome) => outcome?,
-        None if deadline.is_some_and(|deadline| deadline < gate) => {
+        None if start_by < gate => {
             return Err(ApiError::new(
                 ErrorCode::Timeout,
                 format!(

@@ -824,6 +824,11 @@ pub(crate) fn noun(word: &str) -> Option<&'static str> {
         .map(|noun| noun.name)
 }
 
+/// The nouns' names, in table order.
+pub(crate) fn nouns() -> Vec<&'static str> {
+    NOUNS.iter().map(|noun| noun.name).collect()
+}
+
 /// `noun`'s verbs, in table order.
 pub(crate) fn verbs(noun: &str) -> Vec<&'static str> {
     COMMANDS
