@@ -431,6 +431,8 @@ pub(crate) fn since_prompt(
             .collect::<Vec<_>>()
             .join("\n\n"),
         at: (last.at > 0).then_some(last.at),
+        truncated: false,
+        chars: None,
     })
 }
 
@@ -461,6 +463,8 @@ pub(crate) fn last_reply(
         at: written
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .and_then(|since| i64::try_from(since.as_millis()).ok()),
+        truncated: false,
+        chars: None,
     })
 }
 

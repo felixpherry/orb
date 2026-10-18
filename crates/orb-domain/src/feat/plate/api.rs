@@ -183,17 +183,26 @@ fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
     ApiError::new(code, reason, hint)
 }
 
-/// `plate list`'s reply: open items and those done since `today`, with each
-/// one's age at `now`.
-pub(crate) fn list(app: &AppState, now: SystemTime, today: SystemTime) -> Reply {
-    let items = app
+/// `plate list`'s reply: the items that aren't done, or every item with
+/// `all`, with each one's age at `now`. `hidden` counts the done items the
+/// default left out, and the hint says how to see them.
+pub(crate) fn list(app: &AppState, now: SystemTime, all: bool) -> Reply {
+    let (shown, hidden): (Vec<&PlateItem>, Vec<&PlateItem>) = app
         .plate
         .items()
         .iter()
-        .filter(|item| item.state.is_open() || item.done_at.is_some_and(|at| at >= today))
-        .map(|item| row(item, now))
-        .collect();
-    Reply::ok(&PlateResult { items })
+        .partition(|item| all || item.state.is_open());
+    Reply::ok(&PlateResult {
+        items: shown.into_iter().map(|item| row(item, now)).collect(),
+        hidden: hidden.len(),
+        hint: (!hidden.is_empty()).then(|| {
+            format!(
+                "orb plate list --all shows {} done item{}",
+                hidden.len(),
+                if hidden.len() == 1 { "" } else { "s" }
+            )
+        }),
+    })
 }
 
 /// `item`'s row in `plate list`, aged at `now`.

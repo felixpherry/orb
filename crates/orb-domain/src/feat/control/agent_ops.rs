@@ -21,7 +21,7 @@ use crate::feat::control::server::{
     Action, ControlDeps, StartIn, added, changing, changing_session, tiled,
 };
 use crate::feat::control::target::{self, Target};
-use crate::feat::control::turns::{Prompted, Turns};
+use crate::feat::control::turns::{self, Prompted, Turns};
 use crate::feat::control::validator;
 use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace};
 use crate::feat::sessions::state::AgentStatus;
@@ -54,6 +54,7 @@ pub(super) fn agent_io(
             text,
             wait,
             timeout,
+            full,
         } => {
             changing(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
             validator::agent_ready(app, *pane)?;
@@ -62,6 +63,7 @@ pub(super) fn agent_io(
                 text: text.clone(),
                 wait: *wait,
                 timeout: timeout.map(Duration::from_millis),
+                full: *full,
             }))
         }
         Op::AgentWait { pane, timeout } => {
@@ -81,13 +83,16 @@ pub(super) fn agent_io(
                 detail: agent_detail(app, session, agent, *pane),
             })
         }
-        Op::AgentReply { pane } => {
+        Op::AgentReply { pane, full } => {
             target::resolve(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
             let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
             if agent.transcript.is_none() {
                 return Err(agent::no_reply(*pane, "no transcript yet"));
             }
-            Ok(Action::Reply { pane: *pane })
+            Ok(Action::Reply {
+                pane: *pane,
+                full: *full,
+            })
         }
         _ => Err(ApiError::wrong_kind("not an agent request")),
     }
@@ -189,6 +194,8 @@ pub(super) struct PromptAsk {
     pub text: String,
     pub wait: bool,
     pub timeout: Option<Duration>,
+    /// With `wait`, give the whole answer, however long.
+    pub full: bool,
 }
 
 /// Has the screen loop paste the prompt into its pane's agent and press
@@ -243,11 +250,16 @@ pub(super) fn prompt_agent(
         Ok(WaitResult {
             status: WaitEnd::Idle,
         }) => match answer_after_idle(turns, ask.pane, gone, timing, deadline) {
-            Ok(reply) => Reply::ok(&AnswerResult {
-                status: WaitEnd::Idle,
-                text: reply.text,
-                at: reply.at,
-            }),
+            Ok(reply) => {
+                let reply = turns::capped(reply, ask.full);
+                Reply::ok(&AnswerResult {
+                    status: WaitEnd::Idle,
+                    text: reply.text,
+                    at: reply.at,
+                    truncated: reply.truncated,
+                    chars: reply.chars,
+                })
+            }
             Err(error) => Reply::err(error),
         },
         Ok(WaitResult {
@@ -284,7 +296,9 @@ fn answer_after_idle(
 /// the whole call, until `gone` says the caller hung up. Inside the stall
 /// gate of orb's prompt, while the agent still reads idle, the prompt counts
 /// as work: the wait sees the turn start first. A failed agent is
-/// `turn_failed`, with the transcript's error text when it holds one.
+/// `turn_failed`, with the transcript's error text when it holds one, and so
+/// is an idle one whose turn, read as `agent reply` reads it, ended in a
+/// failed model call.
 pub(super) fn wait(
     turns: Turns<'_>,
     pane: PaneId,
@@ -299,6 +313,14 @@ pub(super) fn wait(
         None => agent::wait_done(turns.state, pane, poke, gone, timing, deadline),
     };
     match waited {
+        Ok(WaitResult {
+            status: WaitEnd::Idle,
+        }) => match turns.reply(pane) {
+            Err(failed) if failed.code == ErrorCode::TurnFailed => Reply::err(failed),
+            _ => Reply::ok(&WaitResult {
+                status: WaitEnd::Idle,
+            }),
+        },
         Ok(done) => Reply::ok(&done),
         Err(error) => Reply::err(turns.failure(pane, error)),
     }
@@ -449,6 +471,7 @@ mod tests {
             text: "go on".to_owned(),
             wait: false,
             timeout: None,
+            full: false,
         };
         prompt_agent(&obliging(), turns, ask, &|| {}, &|| false, FAST)
     }
@@ -487,6 +510,7 @@ mod tests {
             text: "go on".to_owned(),
             wait: true,
             timeout: None,
+            full: false,
         };
         prompt_agent(&obliging(), turns, ask, poke, &|| false, FAST)
     }
@@ -632,6 +656,7 @@ mod tests {
             text: "go on".to_owned(),
             wait: false,
             timeout: None,
+            full: false,
         };
         prompt_agent(&obliging(), turns, ask, &|| {}, &|| false, Timing::REAL);
 
@@ -959,6 +984,50 @@ mod tests {
             "a failed turn should be turn_failed with its text, got {error:?}"
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn agent_wait_on_an_idle_agent_whose_turn_failed_is_turn_failed() {
+        // Given idle agent 1 in pane 1, whose last exchange ended in an API
+        // error.
+        let state = State::new(state_with(
+            vec![Agent {
+                transcript: Some(PathBuf::from("/t/1.jsonl")),
+                ..agent(1, AgentStatus::Idle)
+            }],
+            1,
+        ));
+        let harnesses = Harnesses::new(vec![Arc::new(
+            FakeHarness::new("claude", Vec::new()).with_exchanges(vec![Exchange {
+                failure: Some("API Error: 429 Too Many Requests".to_owned()),
+                ..Exchange::default()
+            }]),
+        )]);
+        let prompts = Prompts::default();
+
+        // When waiting on pane 1.
+        let waited = wait(
+            Turns {
+                state: &state,
+                harnesses: &harnesses,
+                prompts: &prompts,
+            },
+            PaneId(1),
+            None,
+            &|| {},
+            &|| false,
+            FAST,
+        );
+
+        // Then the wait fails as turn_failed with the error's text, not idle.
+        let error = waited.error;
+        assert_eq!(
+            error
+                .as_ref()
+                .map(|error| (error.code, error.message.as_str())),
+            Some((ErrorCode::TurnFailed, "API Error: 429 Too Many Requests")),
+            "an idle agent whose turn failed isn't a clean idle, got {error:?}"
+        );
     }
 
     #[rstest::rstest]

@@ -15,6 +15,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use serde::Deserialize;
+use unicode_segmentation::UnicodeSegmentation;
 use wherror::Error;
 
 use crate::feat::control::agent::Timing;
@@ -112,9 +113,11 @@ where
 /// line a wait matched; `None` for any other reply, or one not of its shape.
 fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
     match op {
+        Op::AgentReply { pane, .. }
+        | Op::AgentPrompt {
+            pane, wait: true, ..
+        } => answer_text(*pane, result),
         Op::PaneRead { .. }
-        | Op::AgentReply { .. }
-        | Op::AgentPrompt { wait: true, .. }
         | Op::PaneType { read: Some(_), .. }
         | Op::PaneKeys { read: Some(_), .. } => result
             .get("text")?
@@ -128,6 +131,29 @@ fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
             .map(|run| run_text(*pane, &run)),
         _ => None,
     }
+}
+
+/// An agent's answer in `result` from pane `pane` as plain text: its text,
+/// after a line naming how many earlier graphemes were cut and how to read
+/// them all when it was cut.
+fn answer_text(pane: PaneId, result: &serde_json::Value) -> Option<String> {
+    let text = result.get("text")?.as_str()?.trim_end_matches('\n');
+    let cut = result
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let chars = result.get("chars").and_then(serde_json::Value::as_u64);
+    Some(match chars {
+        Some(chars) if cut => {
+            let kept = u64::try_from(text.graphemes(true).count()).unwrap_or(chars);
+            format!(
+                "[… {} earlier characters; orb agent reply {} --full]\n{text}",
+                chars.saturating_sub(kept),
+                pane.0
+            )
+        }
+        _ => text.to_owned(),
+    })
 }
 
 /// A waited-on command's output in pane `pane` as lines: a note when its
@@ -490,11 +516,29 @@ pub(super) fn parse(args: &[OsString]) -> Result<Op, UsageError> {
         });
     };
     let command = named_command(noun, verb)?;
-    build(command, rest).map_err(|problem| UsageError {
+    let rest = without_json(command, rest);
+    build(command, &rest).map_err(|problem| UsageError {
         noun: Some(noun),
         verb: Some(command.verb),
         problem,
     })
+}
+
+/// `rest`, the words after `command`'s verb, without `--json` before `--`:
+/// every command takes it, and how the reply prints is settled apart from
+/// the request. The text `pane send` and `pane type` take as typed stays,
+/// even when it is `--json`.
+fn without_json<'a>(command: &CommandHelp, rest: &[&'a str]) -> Vec<&'a str> {
+    let as_typed = command.noun == "pane" && matches!(command.verb, "send" | "type");
+    let mut after_dash = false;
+    rest.iter()
+        .enumerate()
+        .filter(|&(at, &word)| {
+            after_dash |= word == "--";
+            after_dash || word != "--json" || (as_typed && at == 1)
+        })
+        .map(|(_, &word)| word)
+        .collect()
 }
 
 /// The request `command` makes from the words after its verb.
@@ -650,8 +694,11 @@ fn plate_words(
             item: PlateItemId(words()?.one("<item>")?),
         },
         "list" => {
-            words()?.no_positional()?;
-            Op::PlateList
+            let words = words()?;
+            words.no_positional()?;
+            Op::PlateList {
+                all: words.switch("--all"),
+            }
         }
         _ => return Err(unknown_verb(verb)),
     })
@@ -703,7 +750,7 @@ fn agent_words(
             let words = words()?;
             let wait = words.switch("--wait");
             let timeout = words.number("--timeout")?;
-            words.needs("--wait", &["--timeout"])?;
+            words.needs("--wait", &["--timeout", "--full"])?;
             let given = words.with_after();
             let [pane, text] = exact(&given, ["<pane>", "<text>"])?;
             Op::AgentPrompt {
@@ -711,6 +758,7 @@ fn agent_words(
                 text: text.to_owned(),
                 wait,
                 timeout,
+                full: words.switch("--full"),
             }
         }
         "wait" => {
@@ -723,9 +771,13 @@ fn agent_words(
         "get" => Op::AgentGet {
             pane: PaneId(words()?.one("<pane>")?),
         },
-        "reply" => Op::AgentReply {
-            pane: PaneId(words()?.one("<pane>")?),
-        },
+        "reply" => {
+            let words = words()?;
+            Op::AgentReply {
+                pane: PaneId(words.one("<pane>")?),
+                full: words.switch("--full"),
+            }
+        }
         _ => return Err(unknown_verb(verb)),
     })
 }
@@ -1188,7 +1240,7 @@ fn timeout_hint(op: &Op) -> String {
         Op::AgentPrompt { pane, .. }
         | Op::AgentWait { pane, .. }
         | Op::AgentGet { pane }
-        | Op::AgentReply { pane }
+        | Op::AgentReply { pane, .. }
         | Op::AgentStart {
             pane: Some(pane), ..
         } => format!("orb agent get {} shows where it got to", pane.0),
@@ -1647,19 +1699,24 @@ mod tests {
     )]
     #[case::prompt_wait(
         &["agent", "prompt", "3", "hi", "--wait", "--timeout", "500"],
-        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: Some(500) },
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: Some(500), full: false },
     )]
     #[case::prompt_wait_json(
         &["agent", "prompt", "3", "hi", "--wait", "--json"],
-        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None },
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None, full: false },
     )]
     #[case::prompt_dashed(
         &["agent", "prompt", "3", "--", "--hi"],
-        Op::AgentPrompt { pane: PaneId(3), text: "--hi".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(3), text: "--hi".into(), wait: false, timeout: None, full: false },
     )]
     #[case::wait(&["agent", "wait", "3"], Op::AgentWait { pane: PaneId(3), timeout: None })]
     #[case::get(&["agent", "get", "3"], Op::AgentGet { pane: PaneId(3) })]
-    #[case::reply(&["agent", "reply", "3"], Op::AgentReply { pane: PaneId(3) })]
+    #[case::reply(&["agent", "reply", "3"], Op::AgentReply { pane: PaneId(3), full: false })]
+    #[case::reply_full(&["agent", "reply", "3", "--full"], Op::AgentReply { pane: PaneId(3), full: true })]
+    #[case::prompt_wait_full(
+        &["agent", "prompt", "3", "hi", "--wait", "--full"],
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None, full: true },
+    )]
     fn agent_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -1857,7 +1914,8 @@ mod tests {
         },
     )]
     #[case::done(&["plate", "done", "3"], Op::PlateDone { item: PlateItemId(3) })]
-    #[case::list(&["plate", "list"], Op::PlateList)]
+    #[case::list(&["plate", "list"], Op::PlateList { all: false })]
+    #[case::list_all(&["plate", "list", "--all"], Op::PlateList { all: true })]
     fn plate_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -2312,7 +2370,7 @@ mod tests {
         &["pane", "read", "3", "--json"],
         Op::PaneRead { pane: Some(PaneId(3)), lines: 0, head: None, tail: None },
     )]
-    #[case::agent_reply_json(&["agent", "reply", "3", "--json"], Op::AgentReply { pane: PaneId(3) })]
+    #[case::agent_reply_json(&["agent", "reply", "3", "--json"], Op::AgentReply { pane: PaneId(3), full: false })]
     fn list_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -2338,15 +2396,51 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn json_flag_is_refused_where_nothing_prints_text() {
-        // Given / When parsing `session list --json`.
-        let problem = problem(&["session", "list", "--json"]);
+    #[case::session_list(&["session", "list"])]
+    #[case::pane_list(&["pane", "list"])]
+    #[case::pane_close(&["pane", "close", "3"])]
+    #[case::pane_rename(&["pane", "rename", "3", "web"])]
+    #[case::plate_done(&["plate", "done", "7"])]
+    fn json_flag_is_taken_by_every_command(#[case] words: &[&str]) {
+        // Given the words with --json added.
+        let with_json = [words, &["--json"]].concat();
 
-        // Then --json is an unknown flag there.
-        assert!(
-            matches!(&problem, Some(UsageProblem::UnknownFlag { flag, .. }) if flag == "--json"),
-            "session list always prints JSON, so it takes no --json, got {problem:?}"
+        // When parsing both.
+        let (plain, json) = (parse(&args(words)), parse(&args(&with_json)));
+
+        // Then --json makes the same request.
+        assert_eq!(json, plain, "{words:?} takes --json and asks the same");
+    }
+
+    #[rstest::rstest]
+    fn json_as_typed_text_is_kept() {
+        // Given / When parsing `pane send 3 --json`.
+        let op = parse(&args(&["pane", "send", "3", "--json"]));
+
+        // Then --json is the text sent.
+        assert_eq!(
+            op,
+            Ok(Op::PaneSend {
+                pane: PaneId(3),
+                text: "--json".into()
+            }),
+            "send takes its text as typed"
         );
+    }
+
+    /// An orb answer to `pane list`.
+    const PANES: &str = r#"{"ok":true,"result":{"panes":[]}}"#;
+
+    #[rstest::rstest]
+    fn list_with_json_prints_the_same_json() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb that answers `pane list` with no panes.
+        // When running `pane list` with and without --json.
+        let plain = answered(&["pane", "list"], PANES)?;
+        let json = answered(&["pane", "list", "--json"], PANES)?;
+
+        // Then both print the same JSON and succeed.
+        assert_eq!(json, plain, "--json on a JSON command changes nothing");
+        Ok(())
     }
 
     /// The exit code and stdout of running `words` against an orb that
@@ -2369,6 +2463,30 @@ mod tests {
 
     /// An orb answer to `agent reply`.
     const ANSWER: &str = r#"{"ok":true,"result":{"text":"done","at":5}}"#;
+
+    /// An orb answer to `agent reply` cut to its last 3 of 12,345
+    /// graphemes.
+    const CUT_ANSWER: &str =
+        r#"{"ok":true,"result":{"text":"end","at":5,"truncated":true,"chars":12345}}"#;
+
+    #[rstest::rstest]
+    fn cut_reply_prints_a_line_naming_the_cut_first() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose reply was cut.
+        // When running `agent reply 1`.
+        let (code, out) = answered(&["agent", "reply", "1"], CUT_ANSWER)?;
+
+        // Then a line names how much was cut and the --full command, then the
+        // kept end.
+        assert_eq!(
+            (code, out.as_str()),
+            (
+                0,
+                "[… 12342 earlier characters; orb agent reply 1 --full]\nend\n"
+            ),
+            "a cut reply says so before its end"
+        );
+        Ok(())
+    }
 
     #[rstest::rstest]
     fn read_prints_plain_text_by_default() -> Result<(), Box<dyn Error + Send + Sync>> {

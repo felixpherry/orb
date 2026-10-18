@@ -327,6 +327,9 @@ pub enum Op {
         /// goes on.
         #[serde(default)]
         timeout: Option<u64>,
+        /// With `wait`, give the whole answer, however long.
+        #[serde(default)]
+        full: bool,
     },
     /// Waits until a pane's agent is idle or waits on the user.
     #[serde(rename = "agent.wait")]
@@ -341,7 +344,12 @@ pub enum Op {
     AgentGet { pane: PaneId },
     /// The last reply in a pane's agent's transcript.
     #[serde(rename = "agent.reply")]
-    AgentReply { pane: PaneId },
+    AgentReply {
+        pane: PaneId,
+        /// Give the whole reply, however long.
+        #[serde(default)]
+        full: bool,
+    },
     /// A new item on the user's plate.
     #[serde(rename = "plate.add")]
     PlateAdd {
@@ -387,9 +395,12 @@ pub enum Op {
     /// Closes an item.
     #[serde(rename = "plate.done")]
     PlateDone { item: PlateItemId },
-    /// Open items and those done today.
+    /// Items that aren't done, or every item with `all`.
     #[serde(rename = "plate.list")]
-    PlateList,
+    PlateList {
+        #[serde(default)]
+        all: bool,
+    },
 }
 
 /// How `pane type` and `pane keys` read the screen back: once it stays the
@@ -836,20 +847,31 @@ pub struct WaitResult {
 }
 
 /// `agent prompt --wait`'s result: the turn ended, with everything the
-/// agent wrote since the prompt and when, in unix milliseconds.
+/// agent wrote since the prompt and when, in unix milliseconds. A long
+/// answer is cut to its end, `truncated`, with `chars` its whole length in
+/// graphemes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnswerResult {
     pub status: WaitEnd,
     pub text: String,
     pub at: Option<i64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chars: Option<usize>,
 }
 
 /// `agent reply`'s result: the last reply's text and when it was written,
-/// in unix milliseconds.
+/// in unix milliseconds. A long reply is cut to its end, `truncated`, with
+/// `chars` its whole length in graphemes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplyResult {
     pub text: String,
     pub at: Option<i64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chars: Option<usize>,
 }
 
 /// `agent list`'s result.
@@ -908,4 +930,9 @@ pub struct PlateItemRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlateResult {
     pub items: Vec<PlateItemRow>,
+    /// Done items the open-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }

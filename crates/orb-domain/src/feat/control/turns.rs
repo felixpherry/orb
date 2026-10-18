@@ -1,11 +1,14 @@
 //! What orb last pasted into each pane's agent, and what that agent's turn
 //! came to: everything it wrote since, whether the prompt still counts as
-//! work underway, and the text of a failed turn.
+//! work underway, and the text of a failed turn. A long answer is cut to its
+//! end, where the conclusion usually is.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
+
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::State;
 use crate::feat::control::agent::{self, Sent};
@@ -67,6 +70,26 @@ impl Prompts {
             map.remove(&pane);
         }
         map.get(&pane).cloned()
+    }
+}
+
+/// How many graphemes of an answer `agent reply` and `agent prompt --wait`
+/// give unless asked for all of it.
+pub(crate) const REPLY_CAP: usize = 12_000;
+
+/// `reply` as given, or, past [`REPLY_CAP`] graphemes and without `full`,
+/// its last `REPLY_CAP` graphemes, marked `truncated` with `chars` its whole
+/// length.
+pub(crate) fn capped(reply: ReplyResult, full: bool) -> ReplyResult {
+    let chars = reply.text.graphemes(true).count();
+    if full || chars <= REPLY_CAP {
+        return reply;
+    }
+    ReplyResult {
+        text: reply.text.graphemes(true).skip(chars - REPLY_CAP).collect(),
+        truncated: true,
+        chars: Some(chars),
+        ..reply
     }
 }
 
@@ -179,7 +202,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use super::{Prompted, Prompts, Turns};
+    use super::{Prompted, Prompts, REPLY_CAP, Turns, capped};
     use crate::State;
     use crate::feat::control::agent::Sent;
     use crate::feat::control::protocol::{ErrorCode, ReplyResult};
@@ -425,6 +448,8 @@ mod tests {
             Ok(ReplyResult {
                 text: "Looking.\n\nFixed.".to_owned(),
                 at: Some(3_000),
+                truncated: false,
+                chars: None,
             }),
             "every answer since the prompt should be joined by a blank line"
         );
@@ -553,6 +578,84 @@ mod tests {
                     })
             }),
             "a turn ending in a failure should be turn_failed with its text, got {error:?}"
+        );
+    }
+
+    /// A reply of `text`, at no known time.
+    fn plain(text: String) -> ReplyResult {
+        ReplyResult {
+            text,
+            at: None,
+            truncated: false,
+            chars: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn long_reply_is_cut_to_its_last_graphemes() {
+        // Given a reply of 2,000 a's then 12,000 b's.
+        let text = format!("{}{}", "a".repeat(2_000), "b".repeat(REPLY_CAP));
+
+        // When capping it.
+        let cut = capped(plain(text), false);
+
+        // Then its last 12,000 graphemes are kept, marked cut, with the
+        // whole length.
+        assert_eq!(
+            cut,
+            ReplyResult {
+                text: "b".repeat(REPLY_CAP),
+                at: None,
+                truncated: true,
+                chars: Some(14_000),
+            },
+            "a long reply keeps its end"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reply_is_cut_by_grapheme() {
+        // Given a reply of 12,001 family emoji, each one grapheme of several
+        // characters.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let text = family.repeat(REPLY_CAP + 1);
+
+        // When capping it.
+        let cut = capped(plain(text), false);
+
+        // Then 12,000 whole emoji are kept.
+        assert_eq!(
+            (cut.text, cut.chars),
+            (family.repeat(REPLY_CAP), Some(REPLY_CAP + 1)),
+            "no grapheme is split"
+        );
+    }
+
+    #[rstest::rstest]
+    fn full_reply_is_never_cut() {
+        // Given a reply of 13,000 graphemes.
+        let text = "x".repeat(13_000);
+
+        // When capping it with --full.
+        let cut = capped(plain(text.clone()), true);
+
+        // Then all of it is kept.
+        assert_eq!(cut, plain(text), "--full gives the whole reply");
+    }
+
+    #[rstest::rstest]
+    fn cut_reply_carries_truncated_and_chars_in_json() {
+        // Given a reply one grapheme over the cap.
+        let cut = capped(plain("x".repeat(REPLY_CAP + 1)), false);
+
+        // When writing it as JSON.
+        let json = serde_json::to_value(&cut).unwrap_or_default();
+
+        // Then it says it was cut and how long it was.
+        assert_eq!(
+            (json.get("truncated").cloned(), json.get("chars").cloned()),
+            (Some(true.into()), Some((REPLY_CAP + 1).into())),
+            "the JSON carries the cut"
         );
     }
 }

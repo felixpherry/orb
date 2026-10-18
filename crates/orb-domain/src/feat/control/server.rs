@@ -29,7 +29,7 @@ use crate::feat::control::protocol::{
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
-use crate::feat::control::turns::{Prompts, Turns};
+use crate::feat::control::turns::{self, Prompts, Turns};
 use crate::feat::control::typed_lines::TypedLines;
 use crate::feat::control::validator;
 use crate::feat::control::{agent_ops, pane_ops};
@@ -261,8 +261,9 @@ pub(super) enum Action {
         pane: PaneId,
         timeout: Option<Duration>,
     },
-    /// What a pane's agent wrote since orb's prompt, else its last reply.
-    Reply { pane: PaneId },
+    /// What a pane's agent wrote since orb's prompt, else its last reply;
+    /// cut to its end unless `full`.
+    Reply { pane: PaneId, full: bool },
     /// An agent's full row, its status read through a just-sent prompt.
     Get { pane: PaneId, detail: AgentDetail },
     /// A plate add, update or close the sessions actor answers.
@@ -329,7 +330,10 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             let poke = || agent_ops::poke(deps);
             return agent_ops::wait(deps.turns(), pane, timeout, &poke, gone, Timing::REAL);
         }
-        Ok(Action::Reply { pane }) => return Reply::from_result(deps.turns().reply(pane)),
+        Ok(Action::Reply { pane, full }) => {
+            let reply = deps.turns().reply(pane);
+            return Reply::from_result(reply.map(|reply| turns::capped(reply, full)));
+        }
         Ok(Action::Add { add, name, run }) => pane_ops::add_pane(deps, add, name, run),
         Ok(Action::Start(start)) => start_session(deps, start),
         Ok(Action::Change(change)) => pane_ops::typed(deps, PaneRequest::Change(change)),
@@ -490,14 +494,7 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::AgentWait { .. }
         | Op::AgentGet { .. }
         | Op::AgentReply { .. } => agent_ops::agent_io(app, &request.op, caller),
-        Op::PlateList => {
-            let now = SystemTime::now();
-            Ok(Action::Answered(plate::list(
-                app,
-                now,
-                app.zone.midnight(now),
-            )))
-        }
+        Op::PlateList { all } => Ok(Action::Answered(plate::list(app, SystemTime::now(), *all))),
         Op::PlateAdd { .. } | Op::PlateUpdate { .. } | Op::PlateDone { .. } => {
             plate::plan(app, &request.op, caller).map(Action::Plate)
         }
@@ -833,7 +830,7 @@ mod tests {
     #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false, force: false })]
     #[case::agent_start_split(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: Some(Direction::Right), tab: false, force: false })]
     #[case::agent_start_tab(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: true, force: false })]
-    #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None })]
+    #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false })]
     #[case::agent_wait(Op::AgentWait { pane: PaneId(1), timeout: None })]
     fn request_on_a_settled_session_is_refused(#[case] op: Op) {
         // Given session 1, settled, with pane 1.
@@ -978,7 +975,7 @@ mod tests {
             &app,
             &Request {
                 caller: None,
-                op: Op::PlateList,
+                op: Op::PlateList { all: false },
             },
         );
 
@@ -1420,6 +1417,7 @@ mod tests {
                 text: "secret".into(),
                 wait: true,
                 timeout: Some(9),
+                full: false,
             },
         };
 
@@ -1784,19 +1782,19 @@ mod tests {
     #[case::no_agent(
         state_with(vec![stopped(1)], 1),
         None,
-        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false },
         ErrorCode::NoAgent,
     )]
     #[case::agent_blocked(
         state_with(vec![agent(1, AgentStatus::NeedsInput)], 1),
         None,
-        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None, full: false },
         ErrorCode::AgentBlocked,
     )]
     #[case::no_reply(
         state_with(vec![agent(1, AgentStatus::Idle)], 1),
         None,
-        Op::AgentReply { pane: PaneId(1) },
+        Op::AgentReply { pane: PaneId(1), full: false },
         ErrorCode::NoReply,
     )]
     fn refusals_carry_a_hint_naming_a_command(
