@@ -469,6 +469,7 @@ Entries are added or amended **only with human approval**.
 - (plate) `gx` or `1`–`9` opens an item's web link or HTML file in its session's one terminal-browser tab, opening that tab when there is none, and shows it; other files open in `$EDITOR` in a new tab.
 - (plate) With no terminal-browser installed, or no session to open in, the desktop opener takes a plate link and the plate stays open.
 - (plate) A settled session's terminal-browser tab isn't reused for plate links; a new one opens.
+- (plate) A plate link's terminal-browser tab doesn't count as a pane holding an agent, so orb answers its image questions.
 - (plate) A new plate item plays no sound and shows no notice.
 - (mouse) While the plate has the keys, a left click off it closes it like `Esc`, the wheel over the sidebar still scrolls the sidebar's view, and every other mouse event does nothing.
 - (store) orb persists plate items to `~/.orb/userdata/state.sqlite` (schema v17 added them) and at start deletes done items closed before that day's midnight.

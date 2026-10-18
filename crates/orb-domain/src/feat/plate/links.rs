@@ -199,11 +199,19 @@ pub(crate) fn open_link(state: &mut AppState, now: SystemTime, n: usize) -> Vec<
     commands
 }
 
+/// What every browser tab's line starts with, before the quoted URL.
+const BROWSER_COMMAND: &str = "exec terminal-browser open ";
+
 /// The line a browser tab's fresh shell runs to show `url`:
 /// `exec terminal-browser open '<url>'`, so the tab closes when the browser
 /// quits.
-pub(crate) fn browser_line(url: &str) -> String {
-    format!("exec terminal-browser open {}", quoted(url))
+pub fn browser_line(url: &str) -> String {
+    format!("{BROWSER_COMMAND}{}", quoted(url))
+}
+
+/// Whether `line` is a browser tab's line (see [`browser_line`]).
+pub fn is_browser_line(line: &str) -> bool {
+    line.starts_with(BROWSER_COMMAND)
 }
 
 /// The line an editor tab's fresh shell runs to show `path`:

@@ -30,7 +30,7 @@ use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::notify::none::NoneNotifier;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::{SoundError, SoundPlayer, SoundService};
-use orb_domain::feat::plate::LinkService;
+use orb_domain::feat::plate::{LinkService, browser_line};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
@@ -1132,6 +1132,19 @@ fn pane_holds_an_agent_when_one_runs_or_comes_back_there(
 
     // Then it does exactly when an agent runs or comes back there.
     assert_eq!(held, expected, "pane 1 holds an agent");
+}
+
+#[rstest::rstest]
+fn plate_browser_tab_holds_no_agent() {
+    // Given pane 1 opened by a plate link, its fresh shell running the browser.
+    let line = browser_line("https://example.com/a");
+    let state = pane_1_with(false, Some(&line));
+
+    // When asking whether it holds an agent.
+    let held = holds_agent(&state, PaneId(1));
+
+    // Then it doesn't, so the browser is told images work.
+    assert!(!held, "a plate link's browser tab holds no agent");
 }
 
 /// Session 1's pane 1, in `orb-p1` on `/zmx`.

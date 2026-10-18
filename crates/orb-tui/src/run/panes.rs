@@ -2,6 +2,8 @@
 //! change, what a pane's exit means, and bringing panes back at start-up with
 //! their resume command typed.
 
+use orb_domain::feat::plate::is_browser_line;
+
 use super::*;
 
 /// What `Command::Attach` does for an agent without a live pane.
@@ -25,14 +27,16 @@ pub(super) fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan
 }
 
 /// Whether pane `id` holds an agent: one runs there, or the pane brings one
-/// back. Such a pane tells its child images don't work, so agents look as
+/// back. A plate link's browser tab brings none back, so its browser can
+/// draw. Such a pane tells its child images don't work, so agents look as
 /// they always did.
 pub(super) fn holds_agent(state: &AppState, id: PaneId) -> bool {
     state.sessions.agent_in(id).is_some()
         || state
             .layouts
             .entry(id)
-            .is_some_and(|entry| entry.resume.is_some())
+            .and_then(|entry| entry.resume.as_deref())
+            .is_some_and(|line| !is_browser_line(line))
 }
 
 /// Each pane of an unsettled session, with its owner and zmx session: what

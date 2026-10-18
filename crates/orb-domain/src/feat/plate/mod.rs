@@ -20,7 +20,7 @@ pub mod view;
 
 pub use board::{Board, BoardRow, Group, GroupKind, OrbAsk, RowKey, RowSource, your_move_count};
 pub use intent::PlateKey;
-pub use links::BrowserTabs;
+pub use links::{BrowserTabs, browser_line, is_browser_line};
 pub use opener::{LinkOpener, LinkService};
 pub use state::{
     ItemDoneError, ItemState, Link, LinkKind, NewPlateItem, Plate, PlateChange, PlateItem, Verb,
