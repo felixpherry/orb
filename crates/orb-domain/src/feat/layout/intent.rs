@@ -374,7 +374,7 @@ pub(crate) fn grow_or_shrink(state: &mut AppState, step: SizeStep) -> Vec<Comman
                 .into_iter()
                 .collect()
         }
-        Focus::Picker | Focus::Rename | Focus::Search => vec![],
+        Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => vec![],
     }
 }
 

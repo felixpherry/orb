@@ -255,20 +255,19 @@ pub(super) fn exit_outcome(exit: PaneExit, reattached: bool) -> ExitOutcome {
     }
 }
 
-/// The start screen's pane error once panes are dropped, given for each
-/// dropped pane whether its program exited within [`EARLY_EXIT`] of
-/// starting and its session's title: `session <title> exited at start`
-/// for the first that did (`session exited at start` with no title), else
-/// `error` as it was.
-pub(super) fn pane_error_after<I>(error: Option<String>, dropped: I) -> Option<String>
+/// The message box's error once panes are dropped, given for each dropped
+/// pane whether its program exited within [`EARLY_EXIT`] of starting and its
+/// session's title: `session <title> exited at start` for the first that did
+/// (`session exited at start` with no title), else none.
+pub(super) fn exited_at_start<I>(dropped: I) -> Option<String>
 where
     I: IntoIterator<Item = (bool, Option<String>)>,
 {
-    match dropped.into_iter().find(|(early, _)| *early) {
-        Some((_, Some(title))) => Some(format!("session {title} exited at start")),
-        Some((_, None)) => Some(EXITED_AT_START.to_owned()),
-        None => error,
-    }
+    let (_, title) = dropped.into_iter().find(|(early, _)| *early)?;
+    Some(title.map_or_else(
+        || EXITED_AT_START.to_owned(),
+        |title| format!("session {title} exited at start"),
+    ))
 }
 
 impl App {
@@ -370,9 +369,10 @@ impl App {
     /// any more that didn't end is killed with `zmx kill`; a broken pane no
     /// layout holds any more is killed too. A pane that ended
     /// within [`EARLY_EXIT`] of starting leaves `session <title> exited at
-    /// start` on the start screen, and that line in the log. Every pane of an attached session gets a client;
-    /// when one can't start, its session leaves `attached` and `couldn't
-    /// start zmx attach` shows on the start screen. A pane holding an agent
+    /// start` in the message box, and that line in the log. Every pane of an
+    /// attached session gets a client; when one can't start, its session
+    /// leaves `attached` and `couldn't start zmx attach` shows in the message
+    /// box. A pane holding an agent
     /// (see [`holds_agent`]) stops answering image questions before the
     /// agent's resume command is typed. If the keys were in a pane and no
     /// layout is shown any more, they go to the sidebar.
@@ -406,18 +406,15 @@ impl App {
             self.execute(&Command::Sessions(SessionsCommand::SaveLayout(owner)));
         }
         let gone = to_drop(self.panes.keys().map(|id| (*id, ended.contains(id))), &keep);
-        let early_exit = pane_error_after(
-            None,
-            gone.iter().filter_map(|id| {
-                self.panes
-                    .get(id)
-                    .map(|pane| (pane.exited_early(EARLY_EXIT), titles.get(id).cloned()))
-            }),
-        );
-        if let Some(text) = &early_exit {
-            self.log.line("error", text);
+        let early_exit = exited_at_start(gone.iter().filter_map(|id| {
+            self.panes
+                .get(id)
+                .map(|pane| (pane.exited_early(EARLY_EXIT), titles.get(id).cloned()))
+        }));
+        if let Some(text) = early_exit {
+            self.log.line("error", &text);
+            self.toasts.error(text, Instant::now());
         }
-        self.pane_error = early_exit.or_else(|| self.pane_error.take());
         for id in to_kill(&gone, &ended, &all) {
             if let Some(session) = self.pane_sessions.get(&id) {
                 self.zmx.kill(session, "closed in its layout");
@@ -464,7 +461,8 @@ impl App {
                 None => {
                     self.typing.remove(&id);
                     self.pastes.remove(&id);
-                    self.pane_error = Some("couldn't start zmx attach".to_owned());
+                    self.toasts
+                        .error("couldn't start zmx attach".to_owned(), Instant::now());
                     let mut app = self.state.write();
                     if let Some(owner) = app.layouts.owner_of(id) {
                         app.attached.remove(&owner);

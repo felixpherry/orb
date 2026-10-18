@@ -27,10 +27,11 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier};
 
-use super::{BACKGROUND, layout, render};
+use super::{BACKGROUND, Drawn, layout, render};
 use crate::sidebar::{
     APPROVAL_ICON, BLACK, BLUE, COMMENT, COMPLETED_ICON, GUTTER, INPUT_ICON, MAGENTA, YELLOW,
 };
+use crate::tabs;
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::keymap::{Keys, LEADER, Scope, keymap, press};
@@ -93,37 +94,27 @@ fn draw(state: &AppState) -> Buffer {
 
 /// Draws `state` on an 80x8 screen with `keys` pending.
 fn draw_with(state: &AppState, keys: &Keys) -> Buffer {
-    frame(state, None, keys, 8, BACKGROUND)
-        .backend()
-        .buffer()
-        .clone()
+    frame(state, keys, 8, BACKGROUND).backend().buffer().clone()
 }
 
 /// Draws `state` on an 80x40 screen, tall enough for the whole start screen.
-fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
+fn draw_tall(state: &AppState) -> Buffer {
     let keys = Keys::new(keymap(), Scope::SIDEBAR);
-    frame(state, pane_error, &keys, 40, BACKGROUND)
+    frame(state, &keys, 40, BACKGROUND)
         .backend()
         .buffer()
         .clone()
 }
 
 /// The terminal after drawing `state` on an 80-column screen `height`
-/// rows tall, with `pane_error` and `keys` pending, on `background`.
-fn frame(
-    state: &AppState,
-    pane_error: Option<&str>,
-    keys: &Keys,
-    height: u16,
-    background: Color,
-) -> Terminal<TestBackend> {
+/// rows tall, with `keys` pending, on `background`.
+fn frame(state: &AppState, keys: &Keys, height: u16, background: Color) -> Terminal<TestBackend> {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, height));
     let Ok(_) = terminal.draw(|frame| {
         render(
             frame,
             state,
             &HashMap::new(),
-            pane_error,
             None,
             keys,
             SystemTime::UNIX_EPOCH,
@@ -239,7 +230,6 @@ fn draw_with_pane_and_toast(
             frame,
             state,
             panes,
-            None,
             toast,
             &keys,
             SystemTime::UNIX_EPOCH,
@@ -350,7 +340,7 @@ fn session_picker_is_drawn_by_its_own_renderer() {
     };
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the input row shows the session picker's `0/0` count.
     let screen = text(&buffer, buffer.area);
@@ -367,7 +357,7 @@ fn worktree_picker_is_drawn_by_its_own_renderer() {
     };
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the list box is titled ` Worktrees ` over a `0/0` count.
     let screen = text(&buffer, buffer.area);
@@ -433,16 +423,10 @@ fn delete_worktree_confirm_draws_over_the_worktree_list() {
     let state = delete_worktree_confirm();
 
     // When drawing a frame.
-    let buffer = frame(
-        &state,
-        None,
-        &Keys::new(keymap(), Scope::SIDEBAR),
-        20,
-        BACKGROUND,
-    )
-    .backend()
-    .buffer()
-    .clone();
+    let buffer = frame(&state, &Keys::new(keymap(), Scope::SIDEBAR), 20, BACKGROUND)
+        .backend()
+        .buffer()
+        .clone();
 
     // Then the list's row and the confirm's title are both on screen.
     let screen = text(&buffer, buffer.area);
@@ -465,7 +449,6 @@ fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
                 frame,
                 &state,
                 &HashMap::new(),
-                None,
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
@@ -513,30 +496,11 @@ fn selected_agent_shows_the_start_screen() {
     let state = selected(Focus::Sidebar);
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
-    // Then the right side is the start screen's banner.
+    // Then the right side is the plate.
     let right = text(&buffer, right_of(&buffer));
-    assert!(
-        right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
-        "right side was\n{right}"
-    );
-}
-
-#[rstest::rstest]
-fn pane_error_shows_on_the_start_screen() {
-    // Given a selected agent whose session couldn't start.
-    let state = selected(Focus::Sidebar);
-
-    // When drawing a frame with the pane's error.
-    let buffer = draw_tall(&state, Some("zmx attach failed"));
-
-    // Then the error is on the right side.
-    let right = text(&buffer, right_of(&buffer));
-    assert!(
-        right.contains("zmx attach failed"),
-        "right side was\n{right}"
-    );
+    assert!(right.contains("Plate"), "right side was\n{right}");
 }
 
 #[rstest::rstest]
@@ -547,7 +511,7 @@ fn pane_error_shows_on_the_start_screen() {
             picker: Some(PickerState::projects(vec![], Focus::Sidebar)),
             ..AppState::default()
         },
-        (70, 1)
+        (79, 1)
     )]
 fn cells_without_a_background_get_orbs(#[case] state: AppState, #[case] at: (u16, u16)) {
     // Given a frame's state.
@@ -571,7 +535,6 @@ fn cells_without_a_background_get_the_chosen_background() {
     // When drawing an empty frame on it.
     let buffer = frame(
         &AppState::default(),
-        None,
         &Keys::new(keymap(), Scope::SIDEBAR),
         8,
         background,
@@ -709,7 +672,6 @@ fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
             &state,
             &HashMap::new(),
             None,
-            None,
             &keys,
             SystemTime::UNIX_EPOCH,
             &TimeZone::UTC,
@@ -743,7 +705,6 @@ fn leader_popup_sits_above_the_mode_line() {
             frame,
             &state,
             &HashMap::new(),
-            None,
             None,
             &keys,
             SystemTime::UNIX_EPOCH,
@@ -818,14 +779,11 @@ fn attached_agent_without_a_layout_shows_the_start_screen() {
     let state = left_pane();
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
-    // Then the right side is the start screen's banner.
+    // Then the right side is the plate.
     let right = right_side(&buffer);
-    assert!(
-        right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
-        "right side was\n{right}"
-    );
+    assert!(right.contains("Plate"), "right side was\n{right}");
 }
 
 #[rstest::rstest]
@@ -855,7 +813,6 @@ fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position
             frame,
             state,
             panes,
-            None,
             None,
             &keys,
             SystemTime::UNIX_EPOCH,
@@ -989,13 +946,10 @@ fn no_selection_shows_the_start_screen() {
     let state = unselected(Focus::Sidebar);
 
     // When drawing a frame.
-    let right = right_side(&draw_tall(&state, None));
+    let right = right_side(&draw_tall(&state));
 
-    // Then the right side is the start screen's banner.
-    assert!(
-        right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
-        "right side was\n{right}"
-    );
+    // Then the right side is the plate.
+    assert!(right.contains("Plate"), "right side was\n{right}");
 }
 
 #[rstest::rstest]
@@ -1040,16 +994,16 @@ fn hidden(state: AppState) -> AppState {
 }
 
 #[rstest::rstest]
-fn hidden_sidebar_centres_the_start_screen_on_the_whole_width() {
+fn hidden_sidebar_gives_the_plate_the_whole_width() {
     // Given no row selected with the sidebar hidden.
     let state = hidden(unselected(Focus::Sidebar));
 
     // When drawing a frame 80 columns wide.
     let buffer = draw(&state);
 
-    // Then the 25-column banner's second row starts in column 27.
-    let row = text(&buffer, Rect::new(27, 1, 25, 1));
-    assert_eq!(row, "██╔═══██╗██╔══██╗██╔══██╗", "the banner's second row");
+    // Then the plate's list box starts two columns from the screen's left edge.
+    let corner = text(&buffer, Rect::new(2, 1, 1, 1));
+    assert_eq!(corner, "╭", "the list box's top-left corner");
 }
 
 #[rstest::rstest]
@@ -1845,7 +1799,7 @@ fn stack_list_names_every_stacked_pane(#[case] row: &str) {
     let state = stacked();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the list has a row reading its name, else its agent's title, else shell.
     let right = right_side(&buffer);
@@ -1871,7 +1825,7 @@ fn stack_list_names_have_no_icon() {
     let state = agent_1_as(stacked(), AgentStatus::NeedsInput);
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the agent's row reads its title alone.
     let right = right_side(&buffer);
@@ -1894,7 +1848,7 @@ fn stack_list_cuts_long_names() {
     let state = stacked_naming(&"abcdefghij".repeat(6));
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then its row ends in `…`.
     let right = right_side(&buffer);
@@ -1911,7 +1865,7 @@ fn stack_list_has_no_frame() {
     let state = stacked();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the body's only frame is the shown pane's.
     let right = right_of(&buffer);
@@ -1928,7 +1882,7 @@ fn stack_list_sits_above_the_shown_pane() {
     let state = stacked();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the first body row is the first stacked pane's, and the shown
     // pane's frame starts under the four rows.
@@ -1950,7 +1904,7 @@ fn stack_list_rows_have_a_bar_on_each_side() {
     let state = stacked();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then each of the four list rows starts and ends with a bar, past
     // the shown row's `>`.
@@ -1972,7 +1926,7 @@ fn stack_list_is_centred() {
     let state = stacked();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the first list row has as much space on its left as on its
     // right, give or take a column.
@@ -1993,7 +1947,6 @@ fn draw_hits(state: &AppState) -> (Buffer, HitMap) {
             frame,
             state,
             &HashMap::new(),
-            None,
             None,
             &keys,
             SystemTime::UNIX_EPOCH,
@@ -2092,7 +2045,7 @@ fn each_stack_list_marks_its_own_shown_pane() {
     let state = two_stacks();
 
     // When drawing a frame tall enough for every row.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then each list has a `>` on its own shown pane's row.
     let right = right_side(&buffer);
@@ -2197,11 +2150,10 @@ fn hidden_sidebar_returns_no_layout() {
     let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
     let mut sidebar_layout = None;
     let Ok(_) = terminal.draw(|frame| {
-        (sidebar_layout, _, _) = render(
+        sidebar_layout = render(
             frame,
             &state,
             &HashMap::new(),
-            None,
             None,
             &Keys::new(keymap(), Scope::SIDEBAR),
             SystemTime::UNIX_EPOCH,
@@ -2211,7 +2163,8 @@ fn hidden_sidebar_returns_no_layout() {
             &mut PickerScroll::default(),
             &mut HitMap::default(),
             &mut Vec::new(),
-        );
+        )
+        .sidebar;
     });
 
     // Then there's no sidebar layout to replace the last drawn one.
@@ -2227,7 +2180,7 @@ fn pane_mode_draws_its_key_box() {
     };
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then the move key box is drawn.
     let text = text(&buffer, buffer.area);
@@ -2243,7 +2196,7 @@ fn pane_mode_draws_no_key_box_away_from_the_pane() {
     };
 
     // When drawing a frame.
-    let buffer = draw_tall(&state, None);
+    let buffer = draw_tall(&state);
 
     // Then no mode key box is drawn.
     let text = text(&buffer, buffer.area);
@@ -2333,5 +2286,142 @@ fn click_on_a_tab_with_floats_shown_keeps_the_keys_in_the_float() {
             Intent::FocusPane(PaneId(3))
         ])),
         "a tab click keeps the floats shown"
+    );
+}
+
+/// What drawing `state` on an 80x40 screen keeps, and the screen.
+fn drawn_tall(state: &AppState) -> (Drawn, Buffer) {
+    let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 40));
+    let mut drawn = Drawn::default();
+    let Ok(_) = terminal.draw(|frame| {
+        drawn = render(
+            frame,
+            state,
+            &HashMap::new(),
+            None,
+            &Keys::new(keymap(), Scope::SIDEBAR),
+            SystemTime::UNIX_EPOCH,
+            &TimeZone::UTC,
+            BACKGROUND,
+            &mut SidebarScroll::default(),
+            &mut PickerScroll::default(),
+            &mut HitMap::default(),
+            &mut Vec::new(),
+        );
+    });
+    (drawn, terminal.backend().buffer().clone())
+}
+
+/// The shown session's tab bar and tab body on `buffer` with the default
+/// sidebar.
+fn tab_areas(buffer: &Buffer) -> [Rect; 2] {
+    tabs::areas(right_of(buffer))
+}
+
+/// The top-left cell of a rect 92% as wide and 86% as tall as `body`,
+/// centred in it.
+fn float_corner(body: Rect) -> Position {
+    let width = body.width * 92 / 100;
+    let height = body.height * 86 / 100;
+    Position::new(
+        body.x + (body.width - width) / 2,
+        body.y + (body.height - height) / 2,
+    )
+}
+
+#[rstest::rstest]
+fn plate_floats_over_the_shown_session_while_it_has_the_keys() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the plate's list box is in the tab body.
+    let [_, body] = tab_areas(&buffer);
+    assert!(
+        text(&buffer, body).contains("\u{f0ae} Plate"),
+        "tab body was\n{}",
+        text(&buffer, body)
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_is_92_by_86_percent_of_the_tab_body() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the list box's corner is at the top left of a centred rect 92%
+    // as wide and 86% as tall as the tab body.
+    let [_, body] = tab_areas(&buffer);
+    let corner = float_corner(body);
+    assert_eq!(
+        buffer.cell(corner).map(Cell::symbol),
+        Some("╭"),
+        "the float should start at {corner:?}, screen was\n{}",
+        text(&buffer, buffer.area)
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_leaves_the_tab_bar_and_sidebar_drawn() {
+    // Given session 1 shown, once with the sidebar holding the keys.
+    let before = draw_tall(&shown(Focus::Sidebar));
+
+    // When the plate has the keys.
+    let buffer = draw_tall(&shown(Focus::Plate));
+
+    // Then the tab bar and the sidebar read as they did.
+    let [bar, _] = tab_areas(&buffer);
+    let [sidebar, _, _] = layout(buffer.area, &SidebarView::default());
+    assert_eq!(
+        (text(&buffer, bar), text(&buffer, sidebar)),
+        (text(&before, bar), text(&before, sidebar)),
+        "the float should cover only the tab body"
+    );
+}
+
+#[rstest::rstest]
+fn plate_float_is_not_drawn_without_the_keys() {
+    // Given session 1 shown, the sidebar with the keys.
+    let state = shown(Focus::Sidebar);
+
+    // When drawing a frame.
+    let buffer = draw_tall(&state);
+
+    // Then the tab body has no plate.
+    let [_, body] = tab_areas(&buffer);
+    assert!(
+        !text(&buffer, body).contains("Plate"),
+        "tab body was\n{}",
+        text(&buffer, body)
+    );
+}
+
+#[rstest::rstest]
+fn keyed_plate_reports_its_page() {
+    // Given session 1 shown, the plate with the keys.
+    let state = shown(Focus::Plate);
+
+    // When drawing a frame.
+    let (drawn, buffer) = drawn_tall(&state);
+
+    // Then the page is the rows inside the list box under its top inset.
+    let [_, body] = tab_areas(&buffer);
+    let top = float_corner(body);
+    let bottom = (top.y..body.bottom())
+        .find(|&y| {
+            buffer
+                .cell((top.x, y))
+                .is_some_and(|cell| cell.symbol() == "╰")
+        })
+        .unwrap_or(top.y);
+    assert_eq!(
+        drawn.plate_page,
+        Some(usize::from(bottom.saturating_sub(top.y + 2))),
+        "the keyed plate should report how many rows its list shows"
     );
 }

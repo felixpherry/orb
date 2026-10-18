@@ -494,9 +494,16 @@ impl Emulator {
     }
 
     /// Types `line` and Enter into the child as raw input, never as a
-    /// bracketed paste, so a shell runs it.
+    /// bracketed paste, so a shell runs it. Control characters (C0, DEL and
+    /// C1) are left out: typed into a prompt they act as keys, so a Ctrl-C
+    /// or Ctrl-U would drop what came before it and a newline would run the
+    /// line early.
     pub(crate) fn type_line(&self, line: &str) {
-        self.write(format!("{line}\r").as_bytes());
+        let printable: String = line
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        self.write(format!("{printable}\r").as_bytes());
     }
 
     /// Sends a mouse event over the pane drawn at `area` to the child;
@@ -942,6 +949,23 @@ mod tests {
 
         // Then the child receives the line and a carriage return.
         assert_eq!(input.contents(), b"claude --resume aa\r", "typed line");
+    }
+
+    #[rstest::rstest]
+    fn typed_line_leaves_out_control_characters() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing a line holding Ctrl-C, Ctrl-U, a newline, DEL and a
+        // C1 character.
+        emulator.type_line("open 'a\u{3}b\u{15}c\nd\u{7f}e\u{9b}f'");
+
+        // Then only the printable text and the closing Enter reach the child.
+        assert_eq!(
+            input.contents(),
+            b"open 'abcdef'\r",
+            "control characters shouldn't act on the prompt"
+        );
     }
 
     #[rstest::rstest]

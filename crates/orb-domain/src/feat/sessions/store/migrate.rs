@@ -137,6 +137,14 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     UPDATE sessions SET kind = 'colony' WHERE kind IN ('research', 'learn');
 "),
     Migration::Sql("ALTER TABLE threads ADD COLUMN waiting_since INTEGER;"),
+    Migration::Sql("
+    CREATE TABLE plate_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      verb TEXT NOT NULL, state TEXT NOT NULL, title TEXT NOT NULL, what TEXT,
+      links TEXT NOT NULL DEFAULT '[]', urgent INTEGER NOT NULL DEFAULT 0,
+      session_id INTEGER NOT NULL, session_title TEXT NOT NULL, pane_id INTEGER NOT NULL,
+      harness TEXT, changed_at INTEGER NOT NULL, done_at INTEGER, created_at INTEGER NOT NULL);
+"),
 ];
 
 /// Applies the migrations the database hasn't seen, all in one transaction.

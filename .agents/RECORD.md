@@ -88,6 +88,7 @@ Entries are added or amended **only with human approval**.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells, except the cells over a pane's shown image, which keep the outer terminal's own background.
 - (tui) When the outer terminal's own background is exactly `#222436`, orb paints `#222437` in its place and answers a pane's background question with it, since kitty draws pane images over any cell of its own background colour.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval, input and unread-finished counts, and the local time on the right.
+- (tui) The mode line's right side shows a count of the plate's Your move rows, orb's included, after the approval, input and unread-finished counts and before the local time, and the mode reads PLATE while the plate has the keys.
 - (tui) The mode line's approval count is yellow, its input count magenta and its unread-finished count (`✓N`) green.
 - (tui) The mode line's running, approval, input and unread-finished counts include every agent, even ones the project filter hides; the unread-finished count leaves out settled sessions.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
@@ -148,8 +149,8 @@ Entries are added or amended **only with human approval**.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`<C-g>` for the leader), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
 - (keybinds) `<C-g> ?` in the sidebar or a pane, and `?` in the sidebar, open a searchable list of every key that works there, Alt and jump keys included.
 - (keybinds) which-key labels `<C-g> e` "toggle sidebar", `<C-g> h` "go to sidebar", `<C-g> l` "go to panes", `<C-g> t 1`–`9` "tab 1"–"tab 9", `<C-g> w` "session's worktree" and `<C-g> W` "all worktrees".
-- (dashboard) While no session whose panes orb holds is shown, the right-hand area shows a LazyVim-style start screen: a gradient ORB banner and a footer counting working agents, sessions and projects, with no menu and no keys.
-- (dashboard) When a pane's client can't start, the reason shows in red under the start screen's footer; other errors show in the message box.
+- (plate) While no session whose panes orb holds is shown, the right-hand area shows the plate as the start screen: a list box titled Plate beside a preview of the selected item.
+- (pane) When a pane's client can't start, the reason shows in the message box as an error.
 - (pane) orb keeps a `zmx attach` client for every pane of each attached session, and showing another session leaves them running.
 - (pane) A session is attached from when it is entered, or from orb's start while it's unsettled, until it is settled, deleted or moved to another workspace, or a pane's client can't be reattached.
 - (tui) At start orb draws its first frame before it reconnects the panes of its unsettled sessions, so the sidebar shows while they reconnect.
@@ -178,7 +179,7 @@ Entries are added or amended **only with human approval**.
 - (picker) `d` on a session asks `Delete <name>?`, or `Delete <name> and its folder?` for a colony in a fresh world, and on an agent row `Close <name>?`.
 - (keybinds) In the sidebar or a pane, `<C-[>`/`<C-]>` move back/forward through the jump list, as `<C-o>`/`<C-i>` do in neovim.
 - (keybinds) `<C-g> a`, in the sidebar or a pane, moves the keys into the pane of the next agent that needs the user (waiting for approval, then input, then finished but unread, each longest-waiting first, ties in sidebar order), ignoring the project filter and wrapping at the end.
-- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, a session, search or `Send to` picker pick, or `<C-g> a`; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
+- (jumps) A jump is entering a session's pane (`⏎` on its card or an agent row, `<C-g> l`, `<C-g> e`, a double-click on its row, a click into its pane, or a new session starting), moving the keys to another pane of the shown session (Alt h/j/k/l or the arrows, a tab switch, a click on a pane or a stacked title, Alt f), `gg`/`G`, a search ended by `⏎` or a click, a session, search or `Send to` picker pick, `⏎` in the plate or a plate link that opens in a tab, or `<C-g> a`; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-[>`/`<C-]>` landed on, or an agent of the card it landed on, records nothing.
 - (jumps) Each agent is its own jump target: entering a session or picking it records the agent in its focused pane (its card when that pane is a shell), a session picker pick records the picked agent, a move between panes records the agent left and the agent entered (a shell pane records nothing), and a jump pressed in a pane starts from its focused agent.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one, and landing on an agent shows that agent's own pane; it never attaches or clears the project filter.
 - (jumps) Deleted rows, closed agents, rows hidden by the project filter, and the Settled header are skipped; a jump that lands under a folded card or colonists row opens it, and a jump to the agent of a one-agent colonist lands on the colonist.
@@ -332,7 +333,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
 - (keybinds) `<C-g> [` in a pane opens that pane's history, as plain text, in a new tab right after the shown one, running `$EDITOR`, else `less`; the floats hide so the tab has the keys. When the editor quits the tab closes and the tab it was opened from shows again.
-- (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
+- (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, `⏎` in the plate, a jump, a search ended by `⏎`, a new session starting, `<C-g> l`) makes it active.
 - (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell, the card is folded or the card is a one-agent colonist, and it follows every focus change inside the session.
 - (sidebar) The hovered row has a filled background, and the active row's title is blue and bold, with search matches in it keeping their own blue.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
@@ -382,7 +383,7 @@ Entries are added or amended **only with human approval**.
 - (repo) `just lint` fails when a Rust file's production part (lines before its first `#[cfg(test)]`) passes 2,000 lines; test-only files (`tests.rs`, `test_support.rs`, listed once in scripts/lint-rules.py) have no production part.
 - (repo) No Rust source file over 2,000 lines keeps its tests inline; they live in a sibling `<file>/tests.rs`.
 - (api) A running orb takes agent requests on `~/.orb/orb.sock`, which only the user can open, and removes it when it quits.
-- (api) `orb session|tab|pane|agent <verb>` sends one request to the running orb and prints its JSON reply, or fails with `orb is not running`.
+- (api) `orb session|tab|pane|agent|plate <verb>` sends one request to the running orb and prints its JSON reply, or fails with `orb is not running`.
 - (api) An API request names its pane, tab or session by ID, and defaults to the calling pane's from `ORB_PANE_ID`.
 - (api) The API can't delete a session or worktree, remove a project or quit orb.
 - (api) `orb agent start` types `claude` or `pi`, with any flags given, into a shell pane and replies once orb's hook reports the agent started.
@@ -392,11 +393,11 @@ Entries are added or amended **only with human approval**.
 - (api) orb closes an API connection that sends no request within 5 s, and stops waiting on an agent once the caller hangs up.
 - (api) orb session create is refused with starting while another session is starting; the sessions actor checks and claims the start.
 - (integration) `orb integration install` writes orb's skills into Claude Code's `~/.claude/skills` and pi's `~/.agents/skills`.
-- (integration) orb's skills are the `orb` skill, which teaches agents the API (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits), and 17 workflow skills that take an approved plan to an open pull request.
+- (integration) orb's skills are the `orb` skill, which teaches agents the API and the plate (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits, and that colonists report to their chief instead of adding plate items), and 17 workflow skills that take an approved plan to an open pull request, of which plan-with-me and ship-plan add a plate item when they finish.
 - (integration) `orb integration install` removes the `orb` skill copy that older orb versions wrote to `~/.pi/agent/skills`, unless pi's skills folder resolves to a folder the install writes.
 - (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
-- (sessions) A session that finishes starting while a picker, the rename box or search has the keys waits until they close.
+- (sessions) A session that finishes starting while a picker, the rename box, search or the plate has the keys waits until they close.
 - (pane) While orb runs in kitty, orb forwards a pane's kitty graphics commands to the outer kitty with the image data untouched, rewriting only image ids, placement positions, and when they are sent; a pane holding an agent drops them.
 - (pane) orb, not the pane emulator, holds a pane's synchronized update until the child ends it or 150 ms pass, and shows its text and images in the same screen update.
 - (pane) A pane's images leave the screen while the pane isn't shown, and are deleted when its client goes away, its program clears the screen or resets, or it leaves the alternate screen.
@@ -455,3 +456,21 @@ Entries are added or amended **only with human approval**.
 - (docs) README.md is the short user intro: the problem, the demo, the one install command, a first run, how AI is used, credits, a timeline and the license.
 - (docs) docs/keys.md is the user's reference for every key, the mouse and setup (the macOS Cmd block, notifications, pi kits, files).
 - (docs) CHANGELOG.md lists each release in the Keep a Changelog format, grouped by area.
+- (plate) The plate is one list of what needs the user across all of orb, ignoring the project filter, grouped as Your move, Waiting on others, Parked and Done today (folded), never by session or colony.
+- (plate) Agents add, change, close and list plate items with `orb plate add|update|done|list`, and orb never reads transcripts for the plate.
+- (plate) A plate item has a verb from a fixed set of 11 (DECIDE, REVIEW, READ, WALK, PICK, APPROVE, ANSWER, REPLY, MERGE, NOTE, IDEA), a title, an optional description and links, an urgent flag, the agent that added it, and the pane `⏎` goes to (the adding pane unless `--pane` names another) with that pane's session.
+- (plate) `orb plate add` replies with the new item's ID as `{"item": N}`.
+- (plate) `orb plate add` from a colonist's pane is refused with `colonists report to their chief`.
+- (plate) `orb plate add` and `orb plate update` refuse a link holding a control character with `link N holds a control character`, and a line orb types into a pane's shell drops control characters.
+- (plate) An item added with the `idea` verb lands in Parked as an agent's offer.
+- (plate) orb adds its own Your move row, built from status alone, for each agent waiting for approval or an answer, colonists included; it leaves once the agent stops waiting, and `x` and `p` don't act on it.
+- (plate) Your move sorts urgent items first, then orb's approval rows, then its answer rows, then the rest oldest first; Waiting on others sorts oldest first, and Parked and Done today newest first.
+- (plate) A plate item stays until an agent closes it or the user presses `x`, whether its session is settled or deleted, and orb never closes one by itself.
+- (plate) `gx` or `1`–`9` opens an item's web link or HTML file in its session's one terminal-browser tab, opening that tab when there is none, and shows it; other files open in `$EDITOR` in a new tab.
+- (plate) With no terminal-browser installed, or no session to open in, the desktop opener takes a plate link and the plate stays open.
+- (plate) A settled session's terminal-browser tab isn't reused for plate links; a new one opens.
+- (plate) A new plate item plays no sound and shows no notice.
+- (mouse) While the plate has the keys, a left click off it closes it like `Esc`, the wheel over the sidebar still scrolls the sidebar's view, and every other mouse event does nothing.
+- (store) orb persists plate items to `~/.orb/userdata/state.sqlite` (schema v17 added them) and at start deletes done items closed before that day's midnight.
+- (keybinds) `<C-g> o` in the sidebar or a pane opens the plate as a float over the shown session, and on the start screen moves the keys into the plate.
+- (keybinds) In the plate, `j`/`k` and `gg`/`G` move, `⏎` shows the item's pane with the keys in it, `gx` or `1`–`9` opens a link, `x` marks an item done, `p` parks it or brings it back, `u` undoes the last `x` or `p`, `z` opens or folds Done today, and `Esc` closes it.

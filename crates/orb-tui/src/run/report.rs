@@ -20,8 +20,8 @@ pub(super) struct Ready {
 pub(super) enum StartedAttach {
     /// The user opened another session meanwhile: drop it.
     Drop,
-    /// The user is typing (a picker, the rename box, the search): keep the
-    /// request until the keys are back.
+    /// The user is typing (a picker, the rename box, the search) or the
+    /// plate has the keys: keep the request until the keys are back.
     Wait,
     /// Attach now. `keep_keys` leaves the keys in the sidebar, for a request
     /// that waited and came back there.
@@ -31,7 +31,8 @@ pub(super) enum StartedAttach {
 /// What to do with a ready session, asked for while `if_active` was the
 /// active session, given the `active` session now, where the keys are, and
 /// whether it has `waited` already. From the sidebar or a pane it opens at
-/// once; in a pane it takes the keys into its own pane. Moving the cursor
+/// once; in a pane it takes the keys into its own pane. Behind a picker, a
+/// text box or the plate it waits. Moving the cursor
 /// around doesn't cancel it; opening another session does.
 pub(super) fn started_attach(
     if_active: Option<SessionId>,
@@ -41,7 +42,7 @@ pub(super) fn started_attach(
 ) -> StartedAttach {
     match focus {
         _ if if_active != active => StartedAttach::Drop,
-        Focus::Picker | Focus::Rename | Focus::Search => StartedAttach::Wait,
+        Focus::Picker | Focus::Rename | Focus::Search | Focus::Plate => StartedAttach::Wait,
         Focus::Pane => StartedAttach::Attach { keep_keys: false },
         Focus::Sidebar => StartedAttach::Attach { keep_keys: waited },
     }

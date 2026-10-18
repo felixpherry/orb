@@ -28,6 +28,8 @@ use orb_domain::feat::integration::{self, IntegrationPaths};
 use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, OrbCli, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::sound::SoundService;
+use orb_domain::feat::plate::opener::DesktopLinks;
+use orb_domain::feat::plate::{BrowserTabs, LinkService};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::{ORB_PANE_ID, child_env, terminal_browser_socket_env};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
@@ -39,8 +41,8 @@ use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::ids::PaneId;
 use orb_domain::{
-    AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
-    run_within, stop_gracefully,
+    AppState, Finished, LocalZone, Log, Services, State, ancestry, ends_orb, panic_text,
+    parse_parents, run_within, stop_gracefully,
 };
 use orb_tui::{Frontend, PANE_READER_THREAD};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -148,6 +150,10 @@ fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
 
 /// Everything after the log opens: integrations, store, actors, frontend,
 /// then the shutdown in order.
+#[expect(
+    clippy::too_many_lines,
+    reason = "start-up builds and wires every service, actor and the frontend in order"
+)]
 fn run(
     home: PathBuf,
     orb_root: PathBuf,
@@ -174,13 +180,17 @@ fn run(
     let history_dir = orb_root.join("history");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let context = runtime.enter();
+    let tz = TimeZone::system();
+    let links = desktop_links();
     let state = State::new(AppState {
         home,
+        zone: LocalZone(tz.clone()),
+        browser_tabs: BrowserTabs::new(links.terminal_browser.is_some()),
         ..AppState::default()
     });
-    let frontend = Frontend::new(TimeZone::system());
+    let frontend = Frontend::new(tz.clone());
     quit_on_signals(frontend.quitter(), log);
-    let services = services(&env, claude_dir, pi_sessions, &orb_root, log);
+    let services = services(&env, claude_dir, pi_sessions, &orb_root, log, links);
     let git = services.git.clone();
     let harnesses = services.harnesses.clone();
     let zmx = services.zmx.clone();
@@ -289,14 +299,15 @@ fn remove_sockets(sockets: &[PathBuf; 2], log: &Log) {
     }
 }
 
-/// The outside services the actors use: git, the agent harnesses, zmx and the
-/// log.
+/// The outside services the actors use: git, the agent harnesses, zmx, the
+/// log and the plate's link opener.
 fn services(
     env: &[(OsString, OsString)],
     claude_dir: PathBuf,
     pi_sessions: PathBuf,
     orb_root: &Path,
     log: &Log,
+    links: DesktopLinks,
 ) -> Services {
     let git = GitService::new(Arc::new(GitCli::new(env.to_vec())), log.clone());
     let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.to_vec())), claude_dir);
@@ -310,6 +321,7 @@ fn services(
             log.clone(),
         ),
         log: log.clone(),
+        links: LinkService::new(Arc::new(links)),
     }
 }
 
@@ -411,6 +423,21 @@ fn desktop_notifier(home: &Path) -> NotifierService {
         home: home.to_owned(),
     });
     NotifierService::desktop(&path, ClickTarget { kitty, niri, orb })
+}
+
+/// The programs plate links open with, found on `PATH`: terminal-browser, and
+/// the desktop's opener (`open` on macOS, `xdg-open` elsewhere).
+fn desktop_links() -> DesktopLinks {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    DesktopLinks {
+        terminal_browser: on_path("terminal-browser", &path),
+        system: on_path(opener, &path),
+    }
 }
 
 /// herdr's sounds, written into `~/.orb/sounds` and played by the OS's own

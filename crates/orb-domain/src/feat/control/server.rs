@@ -28,6 +28,7 @@ use crate::feat::control::protocol::{
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
 use crate::feat::harness::{HarnessId, Harnesses};
+use crate::feat::plate::api::{self as plate, PlateAsk};
 use crate::feat::sessions::sessions_actor::{
     ApiAdd, ApiPlace, ApiStart, ApiStartError, SessionsActor,
 };
@@ -221,6 +222,8 @@ enum Action {
     },
     /// The last reply in an agent's transcript.
     Transcript { harness: HarnessId, path: PathBuf },
+    /// A plate add, update or close the sessions actor answers.
+    Plate(PlateAsk),
 }
 
 /// The reply to `request`: worked out from the state (with no lock held
@@ -264,18 +267,24 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             wait,
             timeout,
         }) => prompt_agent(deps, pane, text, wait, timeout, gone),
+        Ok(Action::Plate(ask)) => plate::ask(deps, ask),
         Err(error) => Reply::err(error),
     };
     deps.log.line("api", &log_text(request, &reply));
     reply
 }
 
-/// `<op> caller=<id> pane=<id> session=<id> project=<id> -> ok|<code>`, with
-/// only the IDs `request` carries: never a name, a prompt or pasted text. A
-/// `failed` reply adds its reason, which may quote git but never a prompt or
-/// pasted text.
+/// `<op> caller=<id> item=<id> pane=<id> session=<id> project=<id> ->
+/// ok|<code>`, with only the IDs `request` carries, and the new item's an add
+/// replies with: never a name, a title, a prompt or pasted text. A `failed`
+/// reply adds its reason, which may quote git but never a prompt or pasted
+/// text.
 fn log_text(request: &Request, reply: &Reply) -> String {
-    let fields = serde_json::to_value(request).unwrap_or_default();
+    let mut fields = serde_json::to_value(request).unwrap_or_default();
+    let added = reply.result.as_ref().and_then(|result| result.get("item"));
+    if let (Some(fields), Some(item)) = (fields.as_object_mut(), added) {
+        fields.entry("item").or_insert_with(|| item.clone());
+    }
     let text = |key| match fields.get(key) {
         Some(serde_json::Value::String(op)) if key == "op" => Some(op.clone()),
         Some(serde_json::Value::Number(id)) => Some(format!("{key}={id}")),
@@ -289,7 +298,7 @@ fn log_text(request: &Request, reply: &Reply) -> String {
             .and_then(|code| code.as_str().map(str::to_owned))
             .unwrap_or_default(),
     };
-    ["op", "caller", "pane", "session", "project"]
+    ["op", "caller", "item", "pane", "session", "project"]
         .into_iter()
         .filter_map(text)
         .chain([format!("-> {result}")])
@@ -367,6 +376,17 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::AgentWait { .. }
         | Op::AgentGet { .. }
         | Op::AgentReply { .. } => agent_io(app, &request.op, caller),
+        Op::PlateList => {
+            let now = SystemTime::now();
+            Ok(Action::Answered(plate::list(
+                app,
+                now,
+                app.zone.midnight(now),
+            )))
+        }
+        Op::PlateAdd { .. } | Op::PlateUpdate { .. } | Op::PlateDone { .. } => {
+            plate::plan(app, &request.op, caller).map(Action::Plate)
+        }
     }
 }
 
@@ -878,11 +898,11 @@ mod tests {
     };
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
-        AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
+        AgentKind, ApiError, Direction, Done, ErrorCode, ItemResult, Op, Reply, Request,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind};
-    use crate::ids::{PaneId, SessionId};
+    use crate::ids::{PaneId, PlateItemId, SessionId};
     use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
     use crate::{AppState, Log, State};
 
@@ -1031,6 +1051,82 @@ mod tests {
         assert_eq!(
             text, "session.rename caller=4 session=2 -> settled",
             "the log line carries IDs only"
+        );
+    }
+
+    #[rstest::rstest]
+    fn plate_update_log_line_carries_the_item_and_no_title() {
+        // Given pane 4 retitling plate item 7.
+        let request = Request {
+            caller: Some(PaneId(4)),
+            op: Op::PlateUpdate {
+                item: PlateItemId(7),
+                title: Some("secret title".into()),
+                verb: Some("review".into()),
+                what: Some("secret text".into()),
+                links: None,
+                urgent: None,
+                waiting: None,
+            },
+        };
+
+        // When writing its log line.
+        let text = log_text(&request, &Reply::ok(&Done {}));
+
+        // Then it has the op, the caller and the item, and no title or text.
+        assert_eq!(
+            text, "plate.update caller=4 item=7 -> ok",
+            "a plate change logs its item, never its words"
+        );
+    }
+
+    #[rstest::rstest]
+    fn plate_add_log_line_carries_the_new_item() {
+        // Given pane 4 adding an item that orb saved as item 12.
+        let request = Request {
+            caller: Some(PaneId(4)),
+            op: Op::PlateAdd {
+                title: "secret title".into(),
+                verb: "review".into(),
+                what: None,
+                links: vec![],
+                urgent: false,
+                waiting: false,
+                pane: None,
+            },
+        };
+        let reply = Reply::ok(&ItemResult {
+            item: PlateItemId(12),
+        });
+
+        // When writing its log line.
+        let text = log_text(&request, &reply);
+
+        // Then it names the new item from the reply, and no title.
+        assert_eq!(
+            text, "plate.add caller=4 item=12 -> ok",
+            "an add logs the item it made"
+        );
+    }
+
+    #[rstest::rstest]
+    fn plate_list_is_planned_as_a_read() {
+        // Given session 1 with agent 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `plate list` from outside orb.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::PlateList,
+            },
+        );
+
+        // Then it's answered from the state, with no ask.
+        assert!(
+            matches!(planned, Ok(Action::Answered(_))),
+            "plate list is a read, got {planned:?}"
         );
     }
 

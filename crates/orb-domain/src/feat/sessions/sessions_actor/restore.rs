@@ -1,4 +1,4 @@
-//! Bringing back orb's saved projects, agents, sessions and layouts at start.
+//! Bringing back orb's saved projects, agents, sessions, layouts and plate at start.
 
 use super::*;
 
@@ -8,7 +8,8 @@ impl SessionsActor {
     /// that's still shown and not removed, and selects its first row. Each
     /// project learns whether it is a git repository. The saved jump list comes back
     /// without the rows that no longer exist, and every session's layout comes
-    /// back as it was saved. orb's Incognito, Research and Learn projects are
+    /// back as it was saved. The plate comes back without the items closed
+    /// before today. orb's Incognito, Research and Learn projects are
     /// added (or un-removed) first, and Incognito's folder made; each is added
     /// even when another fails.
     #[expect(
@@ -71,7 +72,12 @@ impl SessionsActor {
                 )),
             ),
         };
-        let error = error.or(layouts_error);
+        let (plate, plate_error) = restore_plate(
+            &store,
+            &services.log,
+            state.read().zone.midnight(SystemTime::now()),
+        );
+        let error = error.or(layouts_error).or(plate_error);
         {
             let mut app = state.write();
             for (session, layout) in layouts {
@@ -125,6 +131,7 @@ impl SessionsActor {
             let app = &mut *guard;
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             app.jumps = jumps;
+            app.plate = plate;
             app.harnesses = services.harnesses.infos();
             let sessions = &mut app.sessions;
             sessions.projects = projects;

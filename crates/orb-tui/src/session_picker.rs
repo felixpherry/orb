@@ -111,7 +111,7 @@ pub(crate) fn big(area: Rect) -> Rect {
 }
 
 /// A `width`×`height` rect centred in `area`, cut to fit it.
-fn centred(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centred(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
     Rect::new(
         area.x + (area.width - width) / 2,

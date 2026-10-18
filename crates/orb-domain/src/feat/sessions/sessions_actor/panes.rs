@@ -19,20 +19,32 @@ impl SessionsActor {
         placement: Placement,
         line: Option<String>,
     ) {
-        let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
-            return;
-        };
+        self.place_pane(session, placement, line);
+    }
+
+    /// [`Self::add_pane`], returning the new pane, if one was added.
+    pub(super) fn place_pane(
+        &mut self,
+        session: SessionId,
+        placement: Placement,
+        line: Option<String>,
+    ) -> Option<PaneId> {
+        let dir = self.sessions.get(&session).map(|row| row.dir.clone())?;
         let first = self.state.read().layouts.get(session).is_none();
         if first && !matches!(placement, Placement::Tab) {
-            return;
+            return None;
         }
         let entry = match self.shell_entry(session, dir) {
             Ok(entry) => PaneEntry {
                 resume: line,
                 ..entry
             },
-            Err(error) => return self.report.report(Outcome::Failed(error)),
+            Err(error) => {
+                self.report.report(Outcome::Failed(error));
+                return None;
+            }
         };
+        let id = entry.id;
         {
             let mut app = self.state.write();
             match placement {
@@ -54,6 +66,7 @@ impl SessionsActor {
                 if_active: Some(session),
             });
         }
+        Some(id)
     }
 
     /// Opens a tab in `session` whose fresh shell types the command that

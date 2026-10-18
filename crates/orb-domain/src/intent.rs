@@ -5,6 +5,7 @@ use std::fmt;
 use crate::PaneMode;
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::picker::state::SessionFilter;
+use crate::feat::plate::PlateKey;
 use crate::feat::sessions::state::SidebarItem;
 use crate::ids::PaneId;
 
@@ -176,6 +177,11 @@ pub enum Intent {
     ToggleSettle,
     /// Ask to delete the selected session.
     Delete,
+    /// `<C-g> o`: give the plate the keys, floating it over the shown
+    /// session; inside the plate, close it.
+    OpenPlate,
+    /// A key inside the plate (see [`PlateKey`]).
+    Plate(PlateKey),
     /// Show the selected card's agent rows, or the Settled shelf's sessions
     /// on its header (`l`).
     Unfold,
@@ -329,6 +335,7 @@ impl fmt::Display for Intent {
             Self::Search | Self::PickerStartSearch => "search",
             Self::ToggleSettle => "settle",
             Self::Delete | Self::PickerBackspace => "delete",
+            Self::OpenPlate | Self::Plate(_) => "plate",
             Self::Unfold => "open",
             Self::Fold => "close",
             Self::AddProject => "add project",
@@ -391,6 +398,18 @@ mod tests {
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");
+    }
+
+    #[rstest::rstest]
+    fn open_plate_is_labelled_plate() {
+        // Given the plate's key.
+        let intent = Intent::OpenPlate;
+
+        // When which-key labels it.
+        let label = intent.to_string();
+
+        // Then it reads plate.
+        assert_eq!(label, "plate", "<C-g> o is labelled plate");
     }
 
     #[rstest::rstest]

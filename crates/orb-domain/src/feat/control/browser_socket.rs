@@ -79,7 +79,7 @@ impl PaneFinder for LaunchEnv {
 /// The pane the last `ORB_PANE_ID=<id>` word in `env` names. Words split at
 /// whitespace and NULs, so this reads `ps -E` (the command, then the
 /// environment) and `/proc/<pid>/environ` alike.
-fn pane_in(env: &str) -> Option<PaneId> {
+pub(crate) fn pane_in(env: &str) -> Option<PaneId> {
     env.split(|c: char| c == '\0' || c.is_whitespace())
         .rev()
         .find_map(|word| word.strip_prefix(ORB_PANE_ID)?.strip_prefix('='))

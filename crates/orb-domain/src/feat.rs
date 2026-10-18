@@ -9,6 +9,7 @@ pub mod layout;
 pub mod notify;
 pub mod pane;
 pub mod picker;
+pub mod plate;
 pub mod search;
 pub mod sessions;
 pub mod sidebar;

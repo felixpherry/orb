@@ -29,6 +29,7 @@ use std::fmt;
 
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
+use orb_domain::feat::plate::PlateKey;
 use orb_domain::feat::sessions::state::{SessionKind, SidebarItem};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -242,6 +243,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ("<leader>W", Intent::OpenWorktreePicker, Navigation),
             ("<leader>?", Intent::OpenKeyList, General),
             ("<leader>a", Intent::NextNeedsYou, Navigation),
+            ("<leader>o", Intent::OpenPlate, Navigation),
         ],
     );
     bind(
@@ -638,6 +640,33 @@ pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Inte
     }
 }
 
+/// What a key does while the plate has the keys. Every press is the
+/// plate's: one it doesn't use ends a sequence in progress and does nothing.
+pub(crate) fn plate_route(key: KeyEvent) -> Intent {
+    let pressed = match (key.code, key.modifiers) {
+        _ if is_leader(key) => PlateKey::Leader,
+        (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => PlateKey::Next,
+        (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => PlateKey::Prev,
+        (KeyCode::Char('g'), KeyModifiers::NONE) => PlateKey::G,
+        (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => PlateKey::Last,
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => PlateKey::HalfPageDown,
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => PlateKey::HalfPageUp,
+        (KeyCode::Enter, KeyModifiers::NONE) => PlateKey::Go,
+        (KeyCode::Char('x'), KeyModifiers::NONE) => PlateKey::Done,
+        (KeyCode::Char('p'), KeyModifiers::NONE) => PlateKey::Park,
+        (KeyCode::Char('u'), KeyModifiers::NONE) => PlateKey::Undo,
+        (KeyCode::Char('z'), KeyModifiers::NONE) => PlateKey::ToggleDone,
+        (KeyCode::Esc, KeyModifiers::NONE) => PlateKey::Close,
+        (KeyCode::Char('o'), KeyModifiers::NONE) => PlateKey::O,
+        (KeyCode::Char(digit @ '1'..='9'), KeyModifiers::NONE) => digit
+            .to_digit(10)
+            .and_then(|n| usize::try_from(n).ok())
+            .map_or(PlateKey::Other, PlateKey::Link),
+        _ => PlateKey::Other,
+    };
+    Intent::Plate(pressed)
+}
+
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
@@ -655,11 +684,12 @@ mod tests {
 
     use super::{
         ALT_KEYS, JUMP_KEYS, KeyCategory, Keys, LEADER, Route, Row, Scope, Side, alt_route,
-        jump_route, key_rows, keymap, mode_route, picker_list_route, picker_route, press, route,
-        walk,
+        jump_route, key_rows, keymap, mode_route, picker_list_route, picker_route, plate_route,
+        press, route, walk,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
     use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
+    use orb_domain::feat::plate::PlateKey;
 
     /// The scopes by the names tests use.
     impl Scope {
@@ -1715,6 +1745,25 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_o_opens_the_plate(
+        #[values(Scope::SIDEBAR, Scope::SIDEBAR_EMPTY, Scope::PANE)] scope: Scope,
+    ) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `o`.
+        let intent = press(&mut keys, key(KeyCode::Char('o')));
+
+        // Then it opens the plate.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenPlate),
+            "<C-g> o should open the plate in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
     #[case(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
     #[case(key(KeyCode::Char('[')))]
     #[case(key(KeyCode::Char(']')))]
@@ -2488,23 +2537,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::SIDEBAR, "/ ? C P Space W a b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_EMPTY, "/ ? C P Space W a c e f i l n q")]
-    #[case(Scope::SIDEBAR_INCOGNITO, "/ ? C P Space W a c e f i l n q t")]
-    #[case(Scope::PANE, "/ <C-g> ? C P Space W [ a b c e h i m n p q r s t w y")]
+    #[case(Scope::SIDEBAR, "/ ? C P Space W a b c e f i l n o q t w")]
+    #[case(Scope::SIDEBAR_EMPTY, "/ ? C P Space W a c e f i l n o q")]
+    #[case(Scope::SIDEBAR_INCOGNITO, "/ ? C P Space W a c e f i l n o q t")]
+    #[case(Scope::PANE, "/ <C-g> ? C P Space W [ a b c e h i m n o p q r s t w y")]
     #[case(
         Scope::PANE_INCOGNITO,
-        "/ <C-g> ? C P Space W [ a c e h i m n p q r s t y"
+        "/ <C-g> ? C P Space W [ a c e h i m n o p q r s t y"
     )]
-    #[case(Scope::SIDEBAR_AGENT, "/ ? C P Space W a b c e f i l n q t w")]
-    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ ? C P Space W a c e f i l n q t")]
-    #[case(Scope::SIDEBAR_COLONY, ", / ? C P Space W a c e f i l n q t")]
-    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / ? C P Space W a c e f i l n q t")]
+    #[case(Scope::SIDEBAR_AGENT, "/ ? C P Space W a b c e f i l n o q t w")]
+    #[case(Scope::SIDEBAR_AGENT_INCOGNITO, "/ ? C P Space W a c e f i l n o q t")]
+    #[case(Scope::SIDEBAR_COLONY, ", / ? C P Space W a c e f i l n o q t")]
+    #[case(Scope::SIDEBAR_AGENT_COLONY, ", / ? C P Space W a c e f i l n o q t")]
     #[case(
         Scope::PANE_COLONY,
-        ", / <C-g> ? C P Space W [ a c e h i m n p q r s t y"
+        ", / <C-g> ? C P Space W [ a c e h i m n o p q r s t y"
     )]
-    #[case(Scope::SIDEBAR_COLONISTS, ", / ? C P Space W a c e f i l n q")]
+    #[case(Scope::SIDEBAR_COLONISTS, ", / ? C P Space W a c e f i l n o q")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 
@@ -2654,5 +2703,57 @@ mod tests {
 
         // Then it reads "agents".
         assert_eq!(label, "agents", "the agents section should read agents");
+    }
+
+    #[rstest::rstest]
+    #[case::j(key(KeyCode::Char('j')), PlateKey::Next)]
+    #[case::down(key(KeyCode::Down), PlateKey::Next)]
+    #[case::k(key(KeyCode::Char('k')), PlateKey::Prev)]
+    #[case::up(key(KeyCode::Up), PlateKey::Prev)]
+    #[case::g(key(KeyCode::Char('g')), PlateKey::G)]
+    #[case::capital_g(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT), PlateKey::Last)]
+    #[case::ctrl_d(ctrl('d'), PlateKey::HalfPageDown)]
+    #[case::ctrl_u(ctrl('u'), PlateKey::HalfPageUp)]
+    #[case::enter(key(KeyCode::Enter), PlateKey::Go)]
+    #[case::x(key(KeyCode::Char('x')), PlateKey::Done)]
+    #[case::p(key(KeyCode::Char('p')), PlateKey::Park)]
+    #[case::u(key(KeyCode::Char('u')), PlateKey::Undo)]
+    #[case::z(key(KeyCode::Char('z')), PlateKey::ToggleDone)]
+    #[case::esc(key(KeyCode::Esc), PlateKey::Close)]
+    #[case::leader(LEADER, PlateKey::Leader)]
+    #[case::o(key(KeyCode::Char('o')), PlateKey::O)]
+    #[case::one(key(KeyCode::Char('1')), PlateKey::Link(1))]
+    #[case::nine(key(KeyCode::Char('9')), PlateKey::Link(9))]
+    fn plate_route_maps_each_key(#[case] pressed: KeyEvent, #[case] expected: PlateKey) {
+        // Given the plate with the keys.
+
+        // When routing the key.
+        let intent = plate_route(pressed);
+
+        // Then the plate gets it as its own key.
+        assert_eq!(
+            intent,
+            Intent::Plate(expected),
+            "{pressed:?} should reach the plate as {expected:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::q(key(KeyCode::Char('q')))]
+    #[case::alt_h(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT))]
+    #[case::zero(key(KeyCode::Char('0')))]
+    #[case::question(key(KeyCode::Char('?')))]
+    fn plate_route_makes_every_other_key_do_nothing(#[case] pressed: KeyEvent) {
+        // Given the plate with the keys.
+
+        // When routing a key it doesn't use.
+        let intent = plate_route(pressed);
+
+        // Then it reaches the plate as a key that does nothing.
+        assert_eq!(
+            intent,
+            Intent::Plate(PlateKey::Other),
+            "{pressed:?} should only end a sequence in the plate"
+        );
     }
 }
