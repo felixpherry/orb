@@ -405,6 +405,12 @@ impl Pane {
         lock(&self.emulator).text(lines)
     }
 
+    /// The child's screen as [`Pane::text`] gives it, without the lines
+    /// holding its shell's command lines, as its prompt marks show them.
+    pub fn output_text(&self, lines: usize) -> String {
+        lock(&self.emulator).output_text(lines)
+    }
+
     /// What the child shell is doing, from its prompt marks (see
     /// [`ShellState`]).
     pub fn shell(&self) -> ShellState {

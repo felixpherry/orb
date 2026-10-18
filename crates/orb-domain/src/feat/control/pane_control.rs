@@ -53,6 +53,12 @@ pub enum PaneRequest {
         pane: PaneId,
         lines: usize,
     },
+    /// The pane's screen as `Read` gives it, without the lines its shell's
+    /// prompt marks show held command lines.
+    Output {
+        pane: PaneId,
+        lines: usize,
+    },
     /// What the pane's shell is doing.
     Shell {
         pane: PaneId,
@@ -86,6 +92,9 @@ pub enum ShellPhase {
     /// No mark yet.
     #[default]
     Unknown,
+    /// Drawing its prompt: a prompt or a command ended, and the prompt
+    /// hasn't ended yet.
+    Drawing,
     /// At its prompt; `leftover` when text sits on the command line (the
     /// cursor moved since the prompt ended).
     AtPrompt { leftover: bool },
@@ -117,6 +126,14 @@ pub struct PaneLines {
     pub truncated: bool,
 }
 
+/// A pane's screen text without its command lines, and whether its shell
+/// sent prompt marks, so the command lines were known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneOutput {
+    pub text: String,
+    pub marked: bool,
+}
+
 /// The loop's answer to one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneAnswer {
@@ -124,6 +141,8 @@ pub enum PaneAnswer {
     Done,
     /// The screen text a `Read` asked for.
     Text(String),
+    /// The text an `Output` asked for.
+    Output(PaneOutput),
     /// The shell a `Shell` asked about.
     Shell(ShellView),
     /// The lines a `Between` asked for.
@@ -257,6 +276,20 @@ impl PaneControl {
     pub fn text(&self, pane: PaneId, lines: usize) -> Result<String, ApiError> {
         match self.ask(PaneRequest::Read { pane, lines })? {
             PaneAnswer::Text(text) => Ok(text),
+            _ => Err(wrong_kind()),
+        }
+    }
+
+    /// Pane `pane`'s screen after up to `lines` lines of history, without
+    /// the lines its shell's prompt marks show held command lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::ask`] does, or `failed` when the loop answers
+    /// with something other than output.
+    pub fn output(&self, pane: PaneId, lines: usize) -> Result<PaneOutput, ApiError> {
+        match self.ask(PaneRequest::Output { pane, lines })? {
+            PaneAnswer::Output(output) => Ok(output),
             _ => Err(wrong_kind()),
         }
     }

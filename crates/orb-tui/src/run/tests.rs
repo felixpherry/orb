@@ -2741,6 +2741,18 @@ fn prints_prompt_marks(_: &ZmxSession) -> Vec<OsString> {
     .to_vec()
 }
 
+/// A client whose shell prints a line, runs `echo hi` between prompt marks,
+/// and waits at a new prompt.
+fn runs_a_marked_command(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf 'before\\n\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\echo hi\\n\\033]133;C\\033\\\\hi\\n\\033]133;D;0\\033\\\\\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
 /// A client that prints three lines, then waits.
 fn prints_three_lines(_: &ZmxSession) -> Vec<OsString> {
     [
@@ -2780,6 +2792,36 @@ impl LoopTest {
         }
         Ok(last)
     }
+}
+
+#[rstest::rstest]
+fn agent_output_request_leaves_out_the_command_lines() -> io::Result<()> {
+    // Given attached pane 1 whose shell printed a line, then ran `echo hi`
+    // between prompt marks.
+    let mut test = loop_app(FakeZmx::listing(""), runs_a_marked_command)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks for pane 1's output.
+    let request = PaneRequest::Output {
+        pane: PaneId(1),
+        lines: 0,
+    };
+    let answer = test.ask_until(
+        &request,
+        |answer| matches!(answer, PaneAnswer::Output(output) if output.text.contains("hi")),
+    )?;
+
+    // Then it holds the printed lines, not the command line or the prompt.
+    let text = match answer {
+        Some(PaneAnswer::Output(output)) => Some(output.text),
+        _ => None,
+    };
+    assert_eq!(
+        text.as_deref(),
+        Some("before\nhi"),
+        "the command line's rows are left out"
+    );
+    Ok(())
 }
 
 #[rstest::rstest]

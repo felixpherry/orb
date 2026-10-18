@@ -714,6 +714,37 @@ impl Emulator {
         self.rows_text(-above, bottom)
     }
 
+    /// The screen's text as [`Emulator::text`] gives it, without the lines
+    /// that hold the shell's command lines (see [`ShellTracker::command_lines`]),
+    /// so only what was printed around them is left. While the alternate
+    /// screen shows, or before the shell sent prompt marks, it is the whole
+    /// text.
+    pub(crate) fn output_text(&self, history: usize) -> String {
+        if self.alt_screen() || !self.shell.marks_seen() {
+            return self.text(history);
+        }
+        let top = self.scrolled;
+        let above = i64::try_from(history.min(self.term.history_size())).unwrap_or(0);
+        let end = top + i64::try_from(self.term.screen_lines()).unwrap_or(1);
+        let mut skip = self.shell.command_lines(self.cursor_spot());
+        skip.sort_by_key(|lines| lines.start);
+        let mut pieces = Vec::new();
+        let mut from = top - above;
+        for lines in skip.iter().chain([&(end..end)]) {
+            let to = lines.start.clamp(from, end);
+            let rows = i32::try_from(from - top)
+                .ok()
+                .zip(i32::try_from(to - top - 1).ok());
+            if let Some((first, last)) = rows
+                && to > from
+            {
+                pieces.push(self.rows_text(first, last));
+            }
+            from = from.max(lines.end);
+        }
+        pieces.join("\n").trim_end().to_owned()
+    }
+
     /// Grid rows `first..=last` as plain text: soft-wrapped rows joined into
     /// one line, trailing blanks dropped from each line and from the end.
     fn rows_text(&self, first: i32, last: i32) -> String {
@@ -2649,6 +2680,64 @@ mod tests {
             last_output(&emulator).map(|lines| lines.truncated),
             Some(true),
             "output past the history says it was cut"
+        );
+    }
+
+    #[rstest::rstest]
+    fn output_text_leaves_out_the_command_line() {
+        // Given fish at its prompt.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(FISH_PROMPT);
+
+        // When it runs `echo ZEBRA`, which prints ZEBRA.
+        let run = [
+            fish_start("echo ZEBRA", "echo%20ZEBRA").as_slice(),
+            b"ZEBRA\r\n\x1b]133;D;0\x1b\\",
+            FISH_PROMPT,
+        ]
+        .concat();
+        emulator.feed(&run);
+
+        // Then the output text holds the printed line and the new prompt,
+        // not the command line.
+        assert_eq!(
+            emulator.output_text(0),
+            "ZEBRA",
+            "the echoed command line isn't output"
+        );
+    }
+
+    #[rstest::rstest]
+    fn output_text_leaves_out_a_line_still_being_typed() {
+        // Given fish at its prompt.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(b"before\r\n");
+        emulator.feed(FISH_PROMPT);
+
+        // When `echo ZEBRA` is typed but not yet run.
+        emulator.feed(b"echo ZEBRA");
+
+        // Then the output text holds only the line above the prompt.
+        assert_eq!(
+            emulator.output_text(0),
+            "before",
+            "an unrun command line isn't output"
+        );
+    }
+
+    #[rstest::rstest]
+    fn output_text_without_marks_is_the_whole_text() {
+        // Given a shell that sends no prompt marks.
+        let mut emulator = emulator_of(40, 10);
+
+        // When it shows a command line and its output.
+        emulator.feed(b"$ echo ZEBRA\r\nZEBRA");
+
+        // Then the output text is all of it.
+        assert_eq!(
+            emulator.output_text(0),
+            "$ echo ZEBRA\nZEBRA",
+            "without marks nothing is known to be a command line"
         );
     }
 

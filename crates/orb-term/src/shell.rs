@@ -1,9 +1,16 @@
 //! What a pane's shell is doing, read from the prompt marks (OSC 133) it sends:
 //! at its prompt, running a command (and which program), and how the last
-//! command ended and which lines its output took. Lines are absolute: counted
-//! from the pane's first line, so they stay put as the screen scrolls.
+//! command ended and which lines its output took, and which lines held the
+//! command lines it ran. Lines are absolute: counted from the pane's first
+//! line, so they stay put as the screen scrolls.
+
+use std::collections::VecDeque;
+use std::ops::Range;
 
 use crate::splitter::Mark;
+
+/// How many of the newest command lines a pane remembers.
+const COMMAND_LINES: usize = 16;
 
 /// A cell by absolute line and column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +79,9 @@ pub(crate) struct ShellTracker {
     phase: ShellPhase,
     last: Option<Finished>,
     seq: u64,
+    /// The absolute lines of the newest command lines the shell ran, oldest
+    /// first: from the line typing started on to the line its output starts.
+    commands: VecDeque<Range<i64>>,
 }
 
 impl ShellTracker {
@@ -90,11 +100,24 @@ impl ShellTracker {
             Mark::InputStart => ShellPhase::AtPrompt {
                 input_at: Some(cursor),
             },
-            Mark::CommandStart { program } => ShellPhase::Running {
-                program: program.clone(),
-                start_line: line_from(cursor),
-                started: self.seq,
-            },
+            Mark::CommandStart { program } => {
+                let start_line = line_from(cursor);
+                if let ShellPhase::AtPrompt {
+                    input_at: Some(input),
+                } = &self.phase
+                {
+                    if self.commands.len() == COMMAND_LINES {
+                        self.commands.pop_front();
+                    }
+                    self.commands
+                        .push_back(input.line..start_line.max(input.line + 1));
+                }
+                ShellPhase::Running {
+                    program: program.clone(),
+                    start_line,
+                    started: self.seq,
+                }
+            }
             Mark::CommandEnd { exit } => {
                 if let ShellPhase::Running {
                     program,
@@ -118,6 +141,20 @@ impl ShellTracker {
     /// Whether any mark arrived.
     pub(crate) fn marks_seen(&self) -> bool {
         self.seq > 0
+    }
+
+    /// The absolute lines that hold command lines, with the cursor now at
+    /// `cursor`: those of the newest commands the shell ran, and the line
+    /// being typed at its prompt, from where typing started to the cursor's
+    /// line.
+    pub(crate) fn command_lines(&self, cursor: Spot) -> Vec<Range<i64>> {
+        let typing = match &self.phase {
+            ShellPhase::AtPrompt {
+                input_at: Some(input),
+            } => Some(input.line..cursor.line.max(input.line) + 1),
+            _ => None,
+        };
+        self.commands.iter().cloned().chain(typing).collect()
     }
 
     /// The snapshot, with the cursor now at `cursor`.
@@ -288,6 +325,60 @@ mod tests {
             (state.last, state.phase),
             (None, ShellPhase::AtPrompt { input_at: None }),
             "an end with no start isn't a command"
+        );
+    }
+
+    #[rstest::rstest]
+    fn command_start_records_its_command_line() {
+        // Given a shell whose prompt ended at column 2 of line 3.
+        let mut shell = ShellTracker::default();
+        shell.mark(&Mark::InputStart, spot(3, 2));
+
+        // When a command typed over lines 3 and 4 starts at line 5.
+        shell.mark(&start("ls"), spot(5, 0));
+
+        // Then lines 3 and 4 hold its command line.
+        assert_eq!(
+            shell.command_lines(spot(5, 0)),
+            vec![3..5],
+            "the lines from the input mark to the output are command line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn line_being_typed_counts_as_a_command_line() {
+        // Given a shell whose prompt ended on line 3.
+        let mut shell = ShellTracker::default();
+        shell.mark(&Mark::InputStart, spot(3, 2));
+
+        // When reading its command lines with the cursor on line 4.
+        let lines = shell.command_lines(spot(4, 1));
+
+        // Then lines 3 and 4 hold the line being typed.
+        assert_eq!(
+            lines,
+            vec![3..5],
+            "the unrun command line is command line too"
+        );
+    }
+
+    #[rstest::rstest]
+    fn only_the_newest_command_lines_are_kept() {
+        // Given a shell that ran 20 commands, one a line.
+        let mut shell = ShellTracker::default();
+        for line in 0..20 {
+            shell.mark(&Mark::InputStart, spot(line * 2, 2));
+            shell.mark(&start("ls"), spot(line * 2 + 1, 0));
+        }
+
+        // When reading its command lines.
+        let lines = shell.command_lines(spot(40, 0));
+
+        // Then the newest 16 are kept, oldest first.
+        assert_eq!(
+            (lines.len(), lines.first().cloned()),
+            (16, Some(8..9)),
+            "older command lines drop out"
         );
     }
 

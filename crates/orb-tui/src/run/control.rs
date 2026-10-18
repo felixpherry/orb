@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 
 use orb_domain::feat::control::change;
 use orb_domain::feat::control::pane_control::{
-    Finished, PaneAnswer, PaneLines, PaneReply, PaneRequest, ShellPhase, ShellView,
+    Finished, PaneAnswer, PaneLines, PaneOutput, PaneReply, PaneRequest, ShellPhase, ShellView,
 };
 use orb_domain::feat::control::protocol::{ApiError, ErrorCode};
 use orb_domain::ids::PaneId;
@@ -53,6 +53,12 @@ impl App {
             PaneRequest::Read { pane, lines } => self
                 .live_pane(pane)
                 .map(|live| PaneAnswer::Text(live.text(lines))),
+            PaneRequest::Output { pane, lines } => self.live_pane(pane).map(|live| {
+                PaneAnswer::Output(PaneOutput {
+                    text: live.output_text(lines),
+                    marked: live.shell().marks_seen,
+                })
+            }),
             PaneRequest::Shell { pane } => {
                 let held = self.typing.contains_key(&pane);
                 self.live_pane(pane)
@@ -121,14 +127,15 @@ impl App {
 }
 
 /// `shell` as the control server sees it, `held` when a typed line waits
-/// for the pane's first output: the command line holds leftover text when
-/// the cursor moved since the prompt ended. A running command's start line
-/// stays behind.
+/// for the pane's first output: a prompt that hasn't ended is still being
+/// drawn, and the command line holds leftover text when the cursor moved
+/// since the prompt ended. A running command's start line stays behind.
 fn shell_view(shell: orb_term::ShellState, held: bool) -> ShellView {
     let phase = match shell.phase {
         orb_term::ShellPhase::Unknown => ShellPhase::Unknown,
-        orb_term::ShellPhase::AtPrompt { input_at } => ShellPhase::AtPrompt {
-            leftover: input_at.is_some_and(|at| at != shell.cursor),
+        orb_term::ShellPhase::AtPrompt { input_at: None } => ShellPhase::Drawing,
+        orb_term::ShellPhase::AtPrompt { input_at: Some(at) } => ShellPhase::AtPrompt {
+            leftover: at != shell.cursor,
         },
         orb_term::ShellPhase::Running {
             program, started, ..
