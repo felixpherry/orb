@@ -44,7 +44,7 @@ orb pane run 12 "just test" --wait              # its output, then [exit 0]
 
 - **`--wait` prints the output's last 200 lines, then `[exit n]`.** `--tail <n>` keeps a different number. `--timeout <ms>` caps the call.
 - **`busy`: a program already runs in the pane,** named in the message.
-- **`not_run`: the shell took the line but didn't run it.** It kept a line it rejected (a syntax error), or it waits for more of the line (an unfinished quote or bracket). orb presses nothing: clear the line with `orb pane keys <pane> ctrl+c`, then fix the command and run it again.
+- **`not_run`: the shell took the line but didn't run it.** It kept a line it rejected (a syntax error), or it waits for more of the line (an unfinished quote or bracket). orb presses nothing: clear the line with `orb pane keys <pane> ctrl+c`, then fix the command and run it again. If it showed a new prompt without running the line, there is nothing to clear.
 - **A `timeout` saying it may still run** means orb couldn't tell: the shell was still drawing its prompt, or it hasn't shown a command start yet. `orb pane read` the pane and press ctrl+c only if the line still sits at the prompt. Don't run the line again.
 - **A program that never ends makes `--wait` run to its timeout.** Start a REPL, server or editor with plain `run` (or `--run` on a new pane), then use `pane wait`, or talk to it with `pane type --enter --read`.
 - **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen stays quiet for 1 s, no sooner than 2 s after the line is typed, and prints `[exit ?]`, and `busy` is never checked.
@@ -206,7 +206,7 @@ orb plate list --all                 # done items too
 | `prompt_stalled` | `orb pane read` to see why. Don't paste the prompt twice. |
 | `turn_failed` | The model call failed (quota, API error). Tell the user. |
 | `busy` | Type a line into it (`pane type --enter`), quit it, or ask; `--force` only into your own. |
-| `not_run` | Clear the line with `orb pane keys <pane> ctrl+c`, fix it and run it again. |
+| `not_run` | If the line was kept or is unfinished, clear it with `orb pane keys <pane> ctrl+c`. Then fix it and run it again. |
 | `timeout` | Check with `orb agent get` or `orb pane read` before trying again; a session may already be there. |
 
 ## Commands
