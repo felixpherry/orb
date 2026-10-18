@@ -54,7 +54,7 @@ If the arguments say `ci-only`, skip review comments and don't wait for reviewer
 ## Cross-refs
 
 - Use `interrogate` before opening if the diff is contested; once open, babysit takes over.
-- Use `humanizer`, if you have it, on any prose you write here (commit messages, the report).
+- Use `unslop`, if you have it, on any prose you write here (commit messages, the report).
 
 ## Provenance
 

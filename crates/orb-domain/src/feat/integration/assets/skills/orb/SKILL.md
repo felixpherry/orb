@@ -17,11 +17,12 @@ description: Drive orb, the terminal multiplexer you run in. List sessions, pane
 
 ## How commands answer
 
-- **Exit 0: done.** Data comes as JSON on stdout. `pane read`, `pane run --wait`, `pane wait`, `agent prompt --wait` and `agent reply` print plain text; add `--json` to get JSON. A change with nothing to report prints `{}`.
+- **Exit 0: done.** Data comes as JSON on stdout. `pane read`, `pane run --wait`, `pane wait`, `pane type --read`, `pane keys --read`, `agent prompt --wait` and `agent reply` print plain text; add `--json` to get JSON. A change with nothing to report prints `{}`.
+- **Every command takes `--json`.** On one that already prints JSON it changes nothing.
 - **Exit 1: refused.** `{"code", "message", "hint"}` on stderr. **Do what the hint says;** it names the command that fixes it.
 - **Exit 2: typed wrong.** One line names the bad word, then come the command's usage line and its help command. Run that help.
 - **IDs are numbers,** plate item IDs too. A `[<pane>]` or `[<session>]` left out means your own.
-- **Lists show open sessions and live agents.** `hidden` says how many they left out; `--all` shows them.
+- **Lists show open sessions, live agents and plate items that aren't done.** `hidden` says how many they left out; `--all` shows them.
 
 ## Rules
 
@@ -32,7 +33,7 @@ description: Drive orb, the terminal multiplexer you run in. List sessions, pane
 - **Settled sessions are read-only.** The lists, `agent get` and `agent reply` still work; everything else is refused. Don't try to un-settle one; that's the user's call.
 - **There is no delete or quit.** orb can't delete a session or worktree, remove a project or quit through these commands. Don't look for a way.
 - **Wait, don't poll.** Use `--wait`, `orb pane wait` or `orb agent wait`. Never loop on sleep and read.
-- **Don't `--force` into a program you didn't start.** `busy` means a program runs in that pane; quit it with `orb pane keys` or ask the user.
+- **Don't `--force` into a program you didn't start.** `busy` means a program runs in that pane. To talk to it (a REPL), type a line with `orb pane type <pane> <text> --enter`; to quit it, `orb pane keys`; or ask the user.
 
 ## Run a command and get its result
 
@@ -42,7 +43,10 @@ orb pane run 12 "just test" --wait              # its output, then [exit 0]
 ```
 
 - **`--wait` prints the output's last 200 lines, then `[exit n]`.** `--tail <n>` keeps a different number. `--timeout <ms>` caps the call.
-- **`busy`: a program already runs in the pane,** named in the message. **`not_run`: the shell didn't run the line,** for example a syntax error; fix it. **A `timeout` saying it may still run** means the shell was slow: read the pane, don't run the line again.
+- **`busy`: a program already runs in the pane,** named in the message.
+- **`not_run`: the shell took the line but didn't run it.** It kept a line it rejected (a syntax error), or it waits for more of the line (an unfinished quote or bracket). orb already pressed ctrl+c to clear it, so fix the command and run it again.
+- **A `timeout` saying it may still run** means the shell was still drawing its prompt: read the pane, don't run the line again.
+- **A program that never ends makes `--wait` run to its timeout.** Start a REPL, server or editor with plain `run` (or `--run` on a new pane), then use `pane wait`, or talk to it with `pane type --enter --read`.
 - **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen stays quiet for 1 s, no sooner than 2 s after the line is typed, and prints `[exit ?]`, and `busy` is never checked.
 - **Without `--wait`, `run` types the line and Enter and replies `{}`.** A pane not drawn yet gets it once it draws, so no sleep is needed after `split`.
 - **The command is one quoted word,** with `--` before it if it starts with `--`.
@@ -57,6 +61,7 @@ orb pane read 14 --tail 40                               # the screen's last 40 
 
 - **`--name`, `--run` and `--cwd` work on `tab create`, `pane split`, `pane stack` and `pane float`.** None of them moves the user's keys.
 - **`pane wait` counts text already on screen.** So wait for text only the new output prints. `--regex` takes a pattern instead.
+- **`pane wait` never matches a command line the shell echoed,** or a line you typed into a REPL, only what the pane printed around it. Waiting for `ZEBRA42` after `run "sleep 3; echo ZEBRA42"` returns once it prints. The shell's current prompt does match, so `--text '~>'` waits for fish to be back.
 - **`pane read` is a snapshot.** `--lines <n>` adds history above the screen; `--head <n>` and `--tail <n>` keep the first or last lines.
 
 ## A helper agent
@@ -68,7 +73,8 @@ orb agent start --kind pi --split down -- --model sonnet      # words after -- g
 ```
 
 - **`--split right|down` or `--tab` makes its pane.** `--pane <id>` uses a shell pane you already have. Leave all three out and it means your own pane, where you already run, so from a shell prompt it's refused with `busy` naming orb: use `--split right` or `--tab`. `--force` goes only with an existing pane.
-- **`prompt --wait` prints what the agent wrote since your prompt.** `--timeout <ms>` caps the call. `agent_blocked`: it stopped to ask the user; tell them. `turn_failed`: its model call failed and the message is the error; tell the user.
+- **`prompt --wait` prints what the agent wrote since your prompt.** `--timeout <ms>` caps the call. `agent_blocked`: it stopped to ask the user; tell them. `turn_failed`: its model call failed and the message is the error; tell the user. `agent wait` gives `turn_failed` the same way.
+- **Long answers are cut to their last 12,000 characters.** A first line says how many were cut. `--full` on `agent reply` or `prompt --wait` prints it all.
 - **Prompt an agent that is idle.** Sent mid-turn, your prompt may be folded into the turn already running, so `--wait` ends with that turn. `orb agent reply` still gives everything written since your prompt. If the answer doesn't cover your prompt, `orb agent wait` and read the reply again.
 - **The prompt is one quoted word.** If it starts with `-`, put the flags first and `--` before it: `orb agent prompt 15 --wait -- "--force is broken"`.
 - **`timeout` on start:** orb never saw it start: either `orb integration install` hasn't run, or Claude is asking whether to trust a new folder. `orb pane read` the pane to see which, and tell the user.
@@ -86,16 +92,23 @@ orb agent reply 15
 - **They work at the same time.** Wait on each in turn, then read its reply.
 - **A prompt orb sent under 5 s ago counts as work,** so `agent wait` right after it waits for the turn to start.
 
-## Programs like vim
+## Programs like vim and REPLs
 
 ```sh
-orb pane keys 12 esc
-orb pane type 12 ":wq"
-orb pane keys 12 enter
+orb pane run 12 "python3"
+orb pane type 12 "print(6*7)" --enter --read   # the screen's last lines, showing 42
 ```
 
-- **`type` presses each character, with no paste and no Enter.** `send` pastes, which a program like vim inserts as text. Both take one quoted word, as is.
+```sh
+orb pane keys 12 i
+orb pane type 12 "hello"
+orb pane keys 12 esc
+orb pane type 12 ":wq" --enter --read          # the screen once vim is done
+```
+
+- **`type` presses each character, with no paste.** `--enter` presses Enter after it. `send` pastes, which a program like vim inserts as text. Both take one quoted word, as is.
 - **`keys` presses key names and single characters,** like `ctrl+c`, `alt+x`, `f5`, `space` or `q`. `orb pane keys --help` lists the names. An unknown name sends nothing.
+- **`--read` on `type` and `keys` prints the screen once it settles.** It waits until the screen changes and then stays the same for 300 ms, at most 3 s (`--timeout <ms>`), and prints its last 20 lines (`--tail <n>`). No sleeps needed. A screen that keeps changing (top, a spinner), or never changes, prints at the timeout.
 
 ## Find things
 
@@ -148,7 +161,8 @@ orb plate add "Try the new picker" --verb walk --what "Built on orb/picker; run 
 orb plate add "Add a retry to payouts?" --verb idea
 orb plate update 7 --waiting         # the next move is someone else's
 orb plate done 7                     # {}
-orb plate list                       # {"items": [...]}
+orb plate list                       # {"items": [...], "hidden": N}: items that aren't done
+orb plate list --all                 # done items too
 ```
 
 - **The plate is the user's one list of what needs them,** across all of orb. orb shows it on the start screen and with `<C-g> o`.
@@ -191,7 +205,8 @@ orb plate list                       # {"items": [...]}
 | `agent_blocked` | Tell the user. Only if they asked, `orb pane read` the dialog and answer with `orb pane keys`. |
 | `prompt_stalled` | `orb pane read` to see why. Don't paste the prompt twice. |
 | `turn_failed` | The model call failed (quota, API error). Tell the user. |
-| `busy` | Quit the program or ask; `--force` only into your own. |
+| `busy` | Type a line into it (`pane type --enter`), quit it, or ask; `--force` only into your own. |
+| `not_run` | Fix the line and run it again; orb already cleared it. |
 | `timeout` | Check with `orb agent get` or `orb pane read` before trying again; a session may already be there. |
 
 ## Commands
