@@ -47,6 +47,7 @@ Entries are added or amended **only with human approval**.
 - (pane) While a pane has the keys, every key but orb's own (the Alt keys, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
+- (pane) orb tracks the prompt marks a pane's shell sends (fish sends them by default), so it knows when a command starts and ends and with which exit code.
 - (identity) An agent is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
 - (identity) orb's code and screens call each agent conversation an agent; the stored database keeps its older `threads` table and `thread` column names.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
@@ -383,19 +384,45 @@ Entries are added or amended **only with human approval**.
 - (repo) `just lint` fails when a Rust file's production part (lines before its first `#[cfg(test)]`) passes 2,000 lines; test-only files (`tests.rs`, `test_support.rs`, listed once in scripts/lint-rules.py) have no production part.
 - (repo) No Rust source file over 2,000 lines keeps its tests inline; they live in a sibling `<file>/tests.rs`.
 - (api) A running orb takes agent requests on `~/.orb/orb.sock`, which only the user can open, and removes it when it quits.
-- (api) `orb session|tab|pane|agent|plate <verb>` sends one request to the running orb and prints its JSON reply, or fails with `orb is not running`.
+- (api) `orb session|tab|pane|agent|plate|project <verb>` sends one request to the running orb and prints its reply, JSON for data and plain text for screen text, agent answers and help, or fails with `orb is not running`.
 - (api) An API request names its pane, tab or session by ID, and defaults to the calling pane's from `ORB_PANE_ID`.
 - (api) The API can't delete a session or worktree, remove a project or quit orb.
 - (api) `orb agent start` types `claude` or `pi`, with any flags given, into a shell pane and replies once orb's hook reports the agent started.
 - (api) `orb agent prompt` is refused while the agent waits for approval or input.
-- (api) `orb agent reply` returns the agent's last reply from its transcript.
+- (api) `orb agent reply` returns everything the agent wrote since orb's last prompt to it, read from its transcript.
 - (api) orb session create waits up to 3 minutes for orb's answer; other requests without a limit of their own wait 60 s.
 - (api) orb closes an API connection that sends no request within 5 s, and stops waiting on an agent once the caller hangs up.
 - (api) orb session create is refused with starting while another session is starting; the sessions actor checks and claims the start.
+- (api) `orb help`, `orb <noun> --help` and `orb <noun> <verb> --help` print help with examples and exit 0.
+- (api) A first word orb doesn't know is a usage error and never starts the app.
+- (api) A usage error names the word orb couldn't take and prints only that command's usage line, with exit code 2.
+- (api) Every API refusal carries a code, a message and a hint naming the command that fixes it.
+- (api) `orb` with no arguments inside an orb pane prints the caller's pane and session and how to get help instead of starting a second orb.
+- (api) `orb session list` lists open sessions and `orb agent list` live agents unless `--all` is given, and each reply says how many rows it hid.
+- (api) API lists cut session and agent names to 60 graphemes, and `orb agent get` returns the full text.
+- (api) `orb project list` lists each project's ID, name and folder.
+- (api) `orb pane read`, `orb agent reply` and `orb agent prompt --wait` print plain text, and `--json` prints it as JSON.
+- (api) `orb pane keys` takes key names and single characters, and `orb pane type` types text key by key with no paste and no Enter.
+- (api) `orb tab create`, `orb pane split`, `orb pane stack` and `orb pane float` take `--name`, `--run` and `--cwd`, so one call opens a named pane running a command.
+- (api) `orb agent start --split right|down` or `--tab` starts the agent in a new pane, and without them it uses `--pane` or the caller's pane.
+- (api) `orb pane run --wait` returns the command's exit code and output once the shell's prompt is back, and in a shell that sends no prompt marks it returns the output once the screen goes quiet, with no exit code.
+- (api) `orb pane run` is refused with the running program's name while a pane's shell is running it, unless `--force` is given.
+- (api) In a pane whose shell sends no prompt marks, `orb pane run` types without checking what runs there.
+- (api) `orb pane run --wait` in a shell that has sent no prompt marks yet gives it 2 s from the moment the line is typed to send marks of its own (a command start naming the command's program, or a fresh shell's first prompt for a line held until the pane first printed), and then follows the marks; other marks, and marks after those 2 s, leave it on the quiet screen.
+- (api) `orb agent start` from a shell prompt with no place flag is refused with `busy` naming orb, the hint offering only `--split right` or `--tab`; `--force` with `--split` or `--tab` is a usage error.
+- (api) `orb pane run --wait` fails with `not_run` only when the shell shows a new empty prompt without starting the command, and with a `timeout` saying the command may still run when the shell hasn't answered within 2 s.
+- (api) `orb agent start` into an existing pane is refused with `busy` and the running program's name while the pane's shell runs a program, unless `--force` is given.
+- (api) `orb agent prompt` is accepted by an agent whose last turn failed, and `orb agent start` into its pane is refused with `pane_busy`.
+- (api) `orb pane wait` returns once a pane's screen or recent history shows the given text or pattern, or fails with `timeout`.
+- (api) `orb agent prompt --wait` prints the agent's answer to that prompt.
+- (api) `orb agent wait` and `orb agent get` treat a prompt orb just sent as work underway until the agent's turn starts or 5 s pass.
+- (api) A turn that ended in an API error makes `orb agent reply` and `orb agent prompt --wait` fail with `turn_failed` and the error's text.
+- (api) `orb pane close`, `orb tab close` and `orb session settle` reply with the panes and agents they ended.
 - (integration) `orb integration install` writes orb's skills into Claude Code's `~/.claude/skills` and pi's `~/.agents/skills`.
-- (integration) orb's skills are the `orb` skill, which teaches agents the API and the plate (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits, and that colonists report to their chief instead of adding plate items), and 17 workflow skills that take an approved plan to an open pull request, of which plan-with-me and ship-plan add a plate item when they finish.
+- (integration) orb's skills are the `orb` skill, which teaches agents the API's rules and recipes and the plate and sends them to `orb help` for the commands (including that colonists are sessions made with `orb session create` from a colony's pane, never pane splits, and that colonists report to their chief instead of adding plate items), and 17 workflow skills that take an approved plan to an open pull request, of which plan-with-me and ship-plan add a plate item when they finish.
 - (integration) `orb integration install` removes the `orb` skill copy that older orb versions wrote to `~/.pi/agent/skills`, unless pi's skills folder resolves to a folder the install writes.
 - (log) The running orb writes one line to the log for each API request that changes something, with the reason after failed when it failed.
+- (log) A refused settle is logged with the working panes' IDs only, never the agents' names.
 - (sessions) A session that finishes starting while the keys are in a pane opens at once and takes the keys into its pane.
 - (sessions) A session that finishes starting while a picker, the rename box, search or the plate has the keys waits until they close.
 - (pane) While orb runs in kitty, orb forwards a pane's kitty graphics commands to the outer kitty with the image data untouched, rewriting only image ids, placement positions, and when they are sent; a pane holding an agent drops them.

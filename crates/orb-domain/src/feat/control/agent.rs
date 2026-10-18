@@ -1,19 +1,25 @@
 //! Agents in panes, for the control socket: which agent a pane holds, the line
 //! that starts one, waiting on orb's state until an agent starts, works or
-//! stops, and its last reply.
+//! stops, and what it replied: everything since orb's prompt, else its last
+//! reply.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+
 use crate::feat::control::protocol::{
-    AgentKind, ApiError, ErrorCode, ReplyResult, StartedResult, WaitEnd, WaitResult,
+    AgentKind, ApiError, ErrorCode, ReplyResult, StartedResult, WaitEnd, WaitResult, cut,
 };
 use crate::feat::control::target::{self, Target};
 use crate::feat::control::validator;
-use crate::feat::harness::{HarnessId, Harnesses};
+use crate::feat::harness::Harness;
 use crate::feat::sessions::state::{Agent, AgentStatus};
+use crate::feat::sessions::transcript::{Message, Role};
 use crate::ids::PaneId;
 use crate::{AppState, State};
 
@@ -28,6 +34,9 @@ pub(crate) struct Timing {
     pub start_limit: Duration,
     /// How long `agent prompt --wait` waits to see work start.
     pub stall_gate: Duration,
+    /// How long `agent prompt --wait` keeps reading the transcript for an
+    /// answer after the turn ended with none yet.
+    pub reply_grace: Duration,
 }
 
 impl Timing {
@@ -37,15 +46,14 @@ impl Timing {
         poke_every: Duration::from_secs(1),
         start_limit: Duration::from_secs(30),
         stall_gate: Duration::from_secs(5),
+        reply_grace: Duration::from_secs(2),
     };
 }
 
-/// Whether an agent with `status` may still be running.
+/// Whether an agent with `status` may still be running. A failed agent
+/// still runs: only its last turn failed, and it takes the next prompt.
 pub(crate) fn live(status: AgentStatus) -> bool {
-    !matches!(
-        status,
-        AgentStatus::Stopped | AgentStatus::Gone | AgentStatus::Failed
-    )
+    !matches!(status, AgentStatus::Stopped | AgentStatus::Gone)
 }
 
 /// The agent bound to `pane`: a live one before a dead one.
@@ -59,11 +67,7 @@ pub(crate) fn pane_agent(app: &AppState, pane: PaneId) -> Option<&Agent> {
 /// `kind`'s program and `args` as one shell line, each arg quoted by
 /// [`quoted`].
 pub(crate) fn shell_line(kind: AgentKind, args: &[String]) -> String {
-    let program = match kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Pi => "pi",
-    };
-    args.iter().fold(program.to_owned(), |line, arg| {
+    args.iter().fold(kind.program().to_owned(), |line, arg| {
         format!("{line} {}", quoted(arg))
     })
 }
@@ -131,11 +135,31 @@ fn pane_open(app: &AppState, pane: PaneId) -> Result<(), ApiError> {
     validator::not_settled(app, resolved.session)
 }
 
-/// Why a prompt can't go to an agent that waits on the user.
-pub(crate) fn blocked() -> ApiError {
+/// Why a prompt can't go to `pane`'s agent, which waits on the user.
+pub(crate) fn blocked(pane: PaneId) -> ApiError {
     ApiError::new(
         ErrorCode::AgentBlocked,
         "the agent waits for approval or input",
+        format!(
+            "orb pane read {} to see the question, then tell the user",
+            pane.0
+        ),
+    )
+}
+
+/// Why `agent prompt --wait` ended without an answer: the agent stopped
+/// to ask the user.
+pub(crate) fn asked_user(pane: PaneId) -> ApiError {
+    ApiError::new(
+        ErrorCode::AgentBlocked,
+        format!(
+            "the agent in pane {} stopped to ask for an approval or an answer",
+            pane.0
+        ),
+        format!(
+            "orb pane read {} to see the question, then tell the user",
+            pane.0
+        ),
     )
 }
 
@@ -144,12 +168,17 @@ pub(crate) fn no_agent(pane: PaneId) -> ApiError {
     ApiError::new(
         ErrorCode::NoAgent,
         format!("no live agent in pane {}", pane.0),
+        format!("orb agent start --kind claude --pane {}", pane.0),
     )
 }
 
 /// Why a wait ended without an answer: nobody is listening any more.
-fn caller_left() -> ApiError {
-    ApiError::new(ErrorCode::Timeout, "the caller hung up")
+pub(crate) fn caller_left() -> ApiError {
+    ApiError::new(
+        ErrorCode::Timeout,
+        "the caller hung up",
+        "keep the command running until orb replies",
+    )
 }
 
 /// Why a wait on `pane`'s agent gave up.
@@ -160,12 +189,26 @@ fn ran_out(pane: PaneId) -> ApiError {
             "the agent in pane {} was still working at the timeout",
             pane.0
         ),
+        format!(
+            "orb agent get {0} shows its status; orb agent wait {0} waits again",
+            pane.0
+        ),
     )
 }
 
-/// `pane`'s live agent, once the pane is checked still open; `no_agent`
-/// when none is live.
+/// `pane`'s live agent, once the pane is checked still open; `turn_failed`
+/// when its last turn failed, `no_agent` when none is live.
 fn live_agent(app: &AppState, pane: PaneId) -> Result<&Agent, ApiError> {
+    let agent = running_agent(app, pane)?;
+    if agent.status == AgentStatus::Failed {
+        return Err(turn_failed(pane, None));
+    }
+    Ok(agent)
+}
+
+/// `pane`'s live agent, failed last turn or not, once the pane is checked
+/// still open; `no_agent` when none is live.
+fn running_agent(app: &AppState, pane: PaneId) -> Result<&Agent, ApiError> {
     pane_open(app, pane)?;
     pane_agent(app, pane)
         .filter(|agent| live(agent.status))
@@ -182,9 +225,10 @@ fn wrote_since(state: &State, pane: PaneId, pasted: SystemTime) -> bool {
 }
 
 /// Waits until `pane`'s agent is idle or blocked, through work and an
-/// unknown status. An agent that stops or leaves is `no_agent`, a closed
-/// pane `not_found`, a settled session `settled`; `timeout` once `deadline`
-/// passes or `gone` says the caller hung up.
+/// unknown status. An agent that fails is `turn_failed`, one that stops or
+/// leaves `no_agent`, a closed pane `not_found`, a settled session
+/// `settled`; `timeout` once `deadline` passes or `gone` says the caller
+/// hung up.
 pub(crate) fn wait_done(
     state: &State,
     pane: PaneId,
@@ -201,22 +245,32 @@ pub(crate) fn wait_done(
         let status = match agent.status {
             AgentStatus::Idle => WaitEnd::Idle,
             AgentStatus::NeedsApproval | AgentStatus::NeedsInput => WaitEnd::Blocked,
+            AgentStatus::Failed => return Some(Err(turn_failed(pane, None))),
             AgentStatus::Working
             | AgentStatus::Unknown
             | AgentStatus::Stopped
-            | AgentStatus::Gone
-            | AgentStatus::Failed => return None,
+            | AgentStatus::Gone => return None,
         };
         Some(Ok(WaitResult { status }))
     });
     done.unwrap_or_else(|| Err(ran_out(pane)))
 }
 
-/// After a prompt pasted at `pasted`: waits up to `stall_gate` to see a turn
-/// underway, then [`wait_done`]. Seeing none is `prompt_stalled`, unless the
-/// agent wrote its transcript since the paste (a turn too short to see).
-/// `deadline` covers both halves; when it comes before the gate, running
-/// out is `timeout`, as is `gone` saying the caller hung up.
+/// A prompt orb pasted: when, and how long the stall gate still runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sent {
+    /// When orb pasted it.
+    pub at: SystemTime,
+    /// How long is left to see the turn start.
+    pub gate: Duration,
+}
+
+/// After the prompt `sent`: waits what is left of the stall gate to see a
+/// turn underway, then [`wait_done`]; an agent whose last turn failed is
+/// waited on like an idle one until then. Seeing none is `prompt_stalled`,
+/// unless the agent wrote its transcript since the paste (a turn too short
+/// to see). `deadline` covers both halves; when it comes before the gate,
+/// running out is `timeout`, as is `gone` saying the caller hung up.
 pub(crate) fn wait_prompted(
     state: &State,
     pane: PaneId,
@@ -224,9 +278,9 @@ pub(crate) fn wait_prompted(
     gone: &dyn Fn() -> bool,
     timing: Timing,
     deadline: Option<Instant>,
-    pasted: SystemTime,
+    sent: Sent,
 ) -> Result<WaitResult, ApiError> {
-    let gate = Instant::now() + timing.stall_gate;
+    let gate = Instant::now() + sent.gate;
     let first = deadline.map_or(gate, |deadline| deadline.min(gate));
     let seen = poll_until(
         state,
@@ -234,7 +288,7 @@ pub(crate) fn wait_prompted(
         gone,
         timing,
         Some(first),
-        |app| match live_agent(app, pane) {
+        |app| match running_agent(app, pane) {
             Ok(agent) => agent.status.in_progress().then_some(Ok(())),
             Err(error) => Some(Err(error)),
         },
@@ -242,13 +296,17 @@ pub(crate) fn wait_prompted(
     match seen {
         Some(Err(error)) => return Err(error),
         None if first < gate => return Err(ran_out(pane)),
-        None if !wrote_since(state, pane, pasted) => {
+        None if !wrote_since(state, pane, sent.at) => {
             return Err(ApiError::new(
                 ErrorCode::PromptStalled,
                 format!(
                     "the agent in pane {} didn't start working within {} s",
                     pane.0,
                     timing.stall_gate.as_secs()
+                ),
+                format!(
+                    "orb pane read {} to see why; don't send the prompt twice",
+                    pane.0
                 ),
             ));
         }
@@ -279,7 +337,7 @@ pub(crate) fn wait_started(
                 harness: agent.harness.to_string(),
                 status: agent.status,
             })),
-            AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Some(Err(blocked())),
+            AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Some(Err(blocked(pane))),
             AgentStatus::Unknown
             | AgentStatus::Stopped
             | AgentStatus::Gone
@@ -294,33 +352,110 @@ pub(crate) fn wait_started(
                 pane.0,
                 timing.start_limit.as_secs()
             ),
+            format!("orb pane read {} shows what the shell printed", pane.0),
         ))
     })
 }
 
-/// The reply of the last exchange that has one, in `transcript` as `harness`
-/// reads it; `no_reply` when there is none or orb doesn't know the harness,
-/// `failed` when the file can't be read.
-pub(crate) fn last_reply(
-    harnesses: &Harnesses,
-    harness: &HarnessId,
-    transcript: &Path,
+/// Why `pane`'s agent has nothing to reply with yet: `why`.
+pub(crate) fn no_reply(pane: PaneId, why: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::NoReply,
+        why,
+        format!("orb agent wait {0}, then orb agent reply {0}", pane.0),
+    )
+}
+
+/// Why the transcript at `path` of `pane`'s agent couldn't be read.
+pub(crate) fn unreadable(path: &Path, error: &io::Error, pane: PaneId) -> ApiError {
+    ApiError::new(
+        ErrorCode::Failed,
+        format!("couldn't read {}: {error}", path.display()),
+        format!("orb pane read {} shows the agent's screen", pane.0),
+    )
+}
+
+/// How many graphemes of a failed turn's text a refusal carries.
+const FAILURE_LIMIT: usize = 300;
+
+/// Why `pane`'s agent's turn gave no answer: its model call failed with
+/// `text`, cut to 300 graphemes, else just that it failed.
+pub(crate) fn turn_failed(pane: PaneId, text: Option<&str>) -> ApiError {
+    ApiError::new(
+        ErrorCode::TurnFailed,
+        text.map_or_else(
+            || format!("the agent in pane {} failed", pane.0),
+            |text| cut(text, FAILURE_LIMIT),
+        ),
+        format!(
+            "the agent's model call failed; tell the user, or retry later; orb pane read {} shows its screen",
+            pane.0
+        ),
+    )
+}
+
+/// What `pane`'s agent wrote since orb's prompt at `prompted`, from the
+/// `messages` read after it: every assistant message joined by a blank
+/// line, at the last one's time; `turn_failed` when the last is a failure;
+/// `no_reply` naming the prompt's time in `zone` when there is none yet.
+pub(crate) fn since_prompt(
+    messages: &[Message],
+    prompted: SystemTime,
+    zone: &TimeZone,
+    pane: PaneId,
 ) -> Result<ReplyResult, ApiError> {
-    let no_reply = |why: &str| ApiError::new(ErrorCode::NoReply, why);
-    let reader = harnesses
-        .get(harness)
-        .ok_or_else(|| no_reply(&format!("orb can't read {harness} transcripts")))?;
-    let (_, exchanges) = reader.exchanges(transcript).map_err(|error| {
-        ApiError::new(
-            ErrorCode::Failed,
-            format!("couldn't read {}: {error}", transcript.display()),
-        )
-    })?;
-    let (text, written) = exchanges
+    let ended = messages
+        .iter()
+        .rfind(|message| matches!(message.role, Role::Assistant | Role::Failure));
+    if let Some(failed) = ended.filter(|message| message.role == Role::Failure) {
+        return Err(turn_failed(pane, Some(&failed.text)));
+    }
+    let answers: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+    let Some(last) = answers.last() else {
+        let time = Timestamp::try_from(prompted).map_or_else(
+            |_| "an unknown time".to_owned(),
+            |time| time.to_zoned(zone.clone()).strftime("%H:%M:%S").to_string(),
+        );
+        return Err(no_reply(
+            pane,
+            &format!("no answer since orb's prompt at {time}"),
+        ));
+    };
+    Ok(ReplyResult {
+        text: answers
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        at: (last.at > 0).then_some(last.at),
+    })
+}
+
+/// The reply of the last exchange that has one, in `transcript` as `reader`
+/// reads it, for the agent in `pane`; `turn_failed` when that exchange ended
+/// in a failed model call, `no_reply` when there is none, `failed` when the
+/// file can't be read.
+pub(crate) fn last_reply(
+    reader: &dyn Harness,
+    transcript: &Path,
+    pane: PaneId,
+) -> Result<ReplyResult, ApiError> {
+    let (_, exchanges) = reader
+        .exchanges(transcript)
+        .map_err(|error| unreadable(transcript, &error, pane))?;
+    let last = exchanges
         .into_iter()
-        .rev()
-        .find_map(|exchange| exchange.reply)
-        .ok_or_else(|| no_reply("the agent hasn't replied yet"))?;
+        .rfind(|exchange| exchange.reply.is_some() || exchange.failure.is_some())
+        .ok_or_else(|| no_reply(pane, "the agent hasn't replied yet"))?;
+    if let Some(failure) = last.failure {
+        return Err(turn_failed(pane, Some(&failure)));
+    }
+    let (text, written) = last
+        .reply
+        .ok_or_else(|| no_reply(pane, "the agent hasn't replied yet"))?;
     Ok(ReplyResult {
         text,
         at: written
@@ -336,26 +471,37 @@ pub(crate) fn last_reply(
 )]
 mod tests {
     use std::path::Path;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, SystemTime};
 
-    use super::{Timing, last_reply, shell_line, wait_done, wait_prompted, wait_started};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant, SystemTime};
+
+    use super::{
+        Sent, Timing, last_reply, shell_line, turn_failed, wait_done, wait_prompted, wait_started,
+    };
     use crate::State;
     use crate::feat::control::protocol::{AgentKind, ErrorCode, WaitEnd, WaitResult};
     use crate::feat::harness::fake::FakeHarness;
-    use crate::feat::harness::{HarnessId, Harnesses};
+
     use crate::feat::sessions::state::{Agent, AgentStatus};
     use crate::feat::sessions::transcript::Exchange;
     use crate::ids::{AgentId, PaneId};
-    use crate::intent_handler::test_support::{agent, launch, state_with, stopped};
+    use crate::intent_handler::test_support::{agent, launch, settle, state_with, stopped};
 
     const FAST: Timing = Timing {
         tick: Duration::from_millis(1),
         poke_every: Duration::from_millis(1),
         start_limit: Duration::from_millis(50),
         stall_gate: Duration::from_millis(50),
+        reply_grace: Duration::from_millis(50),
     };
+
+    /// A prompt pasted at `at`, the whole stall gate left.
+    fn sent(at: SystemTime) -> Sent {
+        Sent {
+            at,
+            gate: FAST.stall_gate,
+        }
+    }
 
     /// Pane 1 of session 1 holding stopped agent 1.
     fn stopped_pane() -> State {
@@ -392,10 +538,8 @@ mod tests {
 
     /// `last_reply` from a claude transcript holding `exchanges`.
     fn reply_from(exchanges: Vec<Exchange>) -> Result<String, ErrorCode> {
-        let harnesses = Harnesses::new(vec![Arc::new(
-            FakeHarness::new("claude", Vec::new()).with_exchanges(exchanges),
-        )]);
-        last_reply(&harnesses, &HarnessId::new("claude"), Path::new("/t"))
+        let reader = FakeHarness::new("claude", Vec::new()).with_exchanges(exchanges);
+        last_reply(&reader, Path::new("/t"), PaneId(1))
             .map(|reply| reply.text)
             .map_err(|error| error.code)
     }
@@ -472,7 +616,7 @@ mod tests {
             &|| false,
             FAST,
             None,
-            SystemTime::now(),
+            sent(SystemTime::now()),
         );
 
         // Then the prompt is stalled.
@@ -503,7 +647,7 @@ mod tests {
             &|| false,
             FAST,
             None,
-            SystemTime::now(),
+            sent(SystemTime::now()),
         );
 
         // Then the turn ends idle.
@@ -513,6 +657,39 @@ mod tests {
                 status: WaitEnd::Idle
             }),
             "working then idle should end the wait idle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_wait_on_an_agent_whose_last_turn_failed_waits_for_the_new_turn() {
+        // Given agent 1 in pane 1 whose last turn failed, which the first
+        // poll sees working on the new prompt and the third sees idle.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Failed)], 1));
+        let polls = AtomicUsize::new(0);
+        let poke = || match polls.fetch_add(1, Ordering::SeqCst) + 1 {
+            1 => set_status(&state, 1, AgentStatus::Working),
+            3 => set_status(&state, 1, AgentStatus::Idle),
+            _ => {}
+        };
+
+        // When waiting on a prompt with no deadline.
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &poke,
+            &|| false,
+            FAST,
+            None,
+            sent(SystemTime::now()),
+        );
+
+        // Then the old failure doesn't end the wait; the new turn ends idle.
+        assert_eq!(
+            waited.map_err(|error| error.code),
+            Ok(WaitResult {
+                status: WaitEnd::Idle
+            }),
+            "a failed last turn should not end the wait on the next prompt"
         );
     }
 
@@ -647,7 +824,7 @@ mod tests {
             &|| false,
             FAST,
             None,
-            SystemTime::UNIX_EPOCH,
+            sent(SystemTime::UNIX_EPOCH),
         );
 
         // Then the turn counts as done, not stalled.
@@ -659,5 +836,129 @@ mod tests {
             "a transcript written since the paste means the turn ran"
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn wait_timeout_hint_names_agent_get() {
+        // Given working agent 1 in pane 1 that never finishes.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Working)], 1));
+
+        // When waiting on pane 1 past a deadline that has come.
+        let waited = wait_done(
+            &state,
+            PaneId(1),
+            &|| {},
+            &|| false,
+            FAST,
+            Some(Instant::now()),
+        );
+
+        // Then the timeout points at the agent's status.
+        let hint = waited.err().and_then(|error| error.hint);
+        assert!(
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("orb agent get 1")),
+            "a wait that ran out points at orb agent get, got {hint:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stalled_prompt_hint_says_to_read_the_pane() {
+        // Given idle agent 1 in pane 1 with no transcript, which never starts
+        // working.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Idle)], 1));
+
+        // When waiting on a prompt with no deadline.
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &|| {},
+            &|| false,
+            FAST,
+            None,
+            sent(SystemTime::now()),
+        );
+
+        // Then the stall points at the pane's screen.
+        let hint = waited.err().and_then(|error| error.hint);
+        assert!(
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("orb pane read 1")),
+            "a stalled prompt says to read the pane, got {hint:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn failure_text_is_cut_to_300_graphemes() {
+        // Given an error 400 graphemes long, each an e with a combining accent.
+        let text = "e\u{301}".repeat(400);
+
+        // When refusing with it.
+        let error = turn_failed(PaneId(1), Some(&text));
+
+        // Then the message keeps 299 of them and an ellipsis.
+        assert_eq!(
+            error.message,
+            format!("{}…", "e\u{301}".repeat(299)),
+            "the failure text should be cut to 300 graphemes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reply_whose_last_exchange_failed_is_turn_failed() {
+        // Given a transcript replying "first", then a turn whose model call
+        // failed.
+        let exchanges = vec![
+            exchange(Some("first")),
+            Exchange {
+                failure: Some("API Error: 500".to_owned()),
+                ..exchange(Some("API Error: 500"))
+            },
+        ];
+
+        // When reading the last reply.
+        let reply = reply_from(exchanges);
+
+        // Then the turn failed.
+        assert_eq!(
+            reply,
+            Err(ErrorCode::TurnFailed),
+            "a last exchange ending in a failure should be turn_failed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wait_on_a_failed_agent_is_turn_failed() {
+        // Given failed agent 1 in pane 1.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Failed)], 1));
+
+        // When waiting on pane 1.
+        let waited = wait_done(&state, PaneId(1), &|| {}, &|| false, FAST, None);
+
+        // Then the wait ends at once as a failed turn.
+        assert_eq!(
+            waited.map_err(|error| error.code),
+            Err(ErrorCode::TurnFailed),
+            "a failed agent should end the wait with turn_failed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wait_on_a_failed_agent_in_a_settled_session_is_settled() {
+        // Given failed agent 1 in pane 1, its session settled.
+        let state = State::new(settle(
+            state_with(vec![agent(1, AgentStatus::Failed)], 1),
+            &[1],
+        ));
+
+        // When waiting on pane 1.
+        let waited = wait_done(&state, PaneId(1), &|| {}, &|| false, FAST, None);
+
+        // Then the settled session is refused first.
+        assert_eq!(
+            waited.map_err(|error| error.code),
+            Err(ErrorCode::Settled),
+            "a settled session should be refused before the failed agent"
+        );
     }
 }

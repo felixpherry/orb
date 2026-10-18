@@ -193,6 +193,7 @@ impl fmt::Debug for Harnesses {
 pub(crate) mod fake {
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, PoisonError};
 
     use async_trait::async_trait;
@@ -201,7 +202,7 @@ pub(crate) mod fake {
     use super::{
         Harness, HarnessError, HarnessId, HarnessInfo, RunningAgent, Scan, TranscriptFormat,
     };
-    use crate::feat::sessions::transcript::{Exchange, MessageRead};
+    use crate::feat::sessions::transcript::{Exchange, Message, MessageRead};
 
     /// A harness named `id` whose every transcript holds the exchanges the
     /// test scripts, and that sees the agents the test scripts running.
@@ -209,10 +210,15 @@ pub(crate) mod fake {
         id: &'static str,
         /// What [`TranscriptFormat::exchanges`] answers for any path.
         exchanges: Vec<Exchange>,
+        /// What [`TranscriptFormat::messages`] reads from any path.
+        messages: Vec<Message>,
         /// What [`Harness::running`] answers.
         running: Mutex<Result<Vec<RunningAgent>, String>>,
         /// What [`Harness::reports_status`] answers.
         reports: bool,
+        /// How many more [`TranscriptFormat::messages`] reads see nothing,
+        /// as if the agent hadn't written yet.
+        unwritten_reads: AtomicUsize,
     }
 
     impl FakeHarness {
@@ -221,14 +227,30 @@ pub(crate) mod fake {
             Self {
                 id,
                 exchanges: Vec::new(),
+                messages: Vec::new(),
                 running: Mutex::new(Ok(running)),
                 reports: false,
+                unwritten_reads: AtomicUsize::new(0),
             }
         }
 
         /// This harness, reading `exchanges` from any transcript.
         pub(crate) fn with_exchanges(self, exchanges: Vec<Exchange>) -> Self {
             Self { exchanges, ..self }
+        }
+
+        /// This harness, reading `messages` from any transcript: those at or
+        /// past the offset asked for.
+        pub(crate) fn with_messages(self, messages: Vec<Message>) -> Self {
+            Self { messages, ..self }
+        }
+
+        /// This harness, whose first `reads` message reads see nothing.
+        pub(crate) fn answering_after(self, reads: usize) -> Self {
+            Self {
+                unwritten_reads: AtomicUsize::new(reads),
+                ..self
+            }
         }
 
         /// A harness like pi, whose status comes from its pane reports.
@@ -265,8 +287,19 @@ pub(crate) mod fake {
             offset: u64,
             prompt_offset: u64,
         ) -> io::Result<MessageRead> {
+            let unwritten = self
+                .unwritten_reads
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
             Ok(MessageRead {
-                messages: Vec::new(),
+                messages: self
+                    .messages
+                    .iter()
+                    .filter(|message| !unwritten && message.offset >= offset)
+                    .cloned()
+                    .collect(),
                 offset,
                 restarted: false,
                 prompt_offset,

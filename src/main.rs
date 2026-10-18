@@ -15,9 +15,10 @@ use std::{panic, thread};
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use orb_domain::feat::control::browser_socket;
-use orb_domain::feat::control::client;
+use orb_domain::feat::control::client::{self, Entry};
 use orb_domain::feat::control::protocol::socket_path;
 use orb_domain::feat::control::server::{self, ControlDeps};
+use orb_domain::feat::control::turns::Prompts;
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::harness::Harnesses;
@@ -61,10 +62,12 @@ const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
 fn main() -> Result<ExitCode, Report<OrbError>> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--version" || arg == "-V")
-    {
+    let caller = std::env::var(ORB_PANE_ID)
+        .ok()
+        .and_then(|id| id.parse().ok())
+        .map(PaneId);
+    let entry = client::entry(&args, caller.is_some());
+    if entry == Entry::Version {
         writeln!(
             std::io::stdout().lock(),
             "orb {}",
@@ -77,22 +80,30 @@ fn main() -> Result<ExitCode, Report<OrbError>> {
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
     let orb_root = home.join(".orb");
-    if args
-        .first()
-        .is_some_and(|arg| client::NOUNS.iter().any(|noun| arg == noun))
-    {
-        let caller = std::env::var(ORB_PANE_ID)
-            .ok()
-            .and_then(|id| id.parse().ok())
-            .map(PaneId);
-        let code = client::run(
-            &args,
-            caller,
-            &socket_path(&orb_root),
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
-        );
-        return Ok(ExitCode::from(code));
+    let socket = socket_path(&orb_root);
+    match (entry, caller) {
+        (Entry::Client, _) => {
+            let code = client::run(
+                &args,
+                caller,
+                &socket,
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
+            );
+            return Ok(ExitCode::from(code));
+        }
+        (Entry::Home, Some(pane)) => {
+            let shown = client::home(
+                pane,
+                &socket,
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
+            );
+            if let Some(code) = shown {
+                return Ok(ExitCode::from(code));
+            }
+        }
+        _ => {}
     }
     let log = Log::new(orb_root.join("orb.log"));
     log.line(
@@ -229,6 +240,7 @@ fn run(
             runtime: runtime.handle().clone(),
             panes: frontend.controller(),
             harnesses: harnesses.clone(),
+            prompts: Prompts::default(),
         },
     );
     let ended = frontend

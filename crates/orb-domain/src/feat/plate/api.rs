@@ -10,7 +10,7 @@ use kameo::error::SendError;
 use crate::AppState;
 use crate::feat::control::agent;
 use crate::feat::control::protocol::{
-    ApiError, Done, ErrorCode, ItemResult, Op, PlateItemRow, PlateResult, Reply,
+    ApiError, Done, ErrorCode, ItemResult, Op, PlateItemRow, PlateResult, Reply, SEE_LOG,
 };
 use crate::feat::control::server::ControlDeps;
 use crate::feat::control::target::{self, Target};
@@ -63,7 +63,7 @@ pub(crate) fn plan(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Pl
             validator::known_item(app, *item)?;
             Ok(PlateAsk::Done(ApiPlateDone { item: *item }))
         }
-        _ => Err(ApiError::new(ErrorCode::BadRequest, "not a plate request")),
+        _ => Err(ApiError::wrong_kind("not a plate request")),
     }
 }
 
@@ -82,7 +82,7 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
         pane,
     } = op
     else {
-        return Err(ApiError::new(ErrorCode::BadRequest, "not a plate add"));
+        return Err(ApiError::wrong_kind("not a plate add"));
     };
     let from = validator::adding_session(app, caller)?;
     let verb = validator::verb(verb)?;
@@ -91,11 +91,16 @@ fn add(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<PlateAsk, ApiE
         return Err(ApiError::new(
             ErrorCode::BadRequest,
             "an idea can't be waiting",
+            "drop --waiting, or pick another --verb",
         ));
     }
-    let caller_pane = from
-        .pane
-        .ok_or_else(|| ApiError::new(ErrorCode::NoTarget, "not inside an orb pane"))?;
+    let caller_pane = from.pane.ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::NoTarget,
+            "not inside an orb pane",
+            "run orb plate add from an orb pane",
+        )
+    })?;
     let (session, pane) = match pane {
         Some(pane) => {
             let target = target::resolve(app, Some(Target::Pane(*pane)), caller)?;
@@ -164,18 +169,18 @@ fn changed<M>(answer: Result<(), SendError<M, Report<PlateApiError>>>) -> Reply 
 /// it failed, and the report's latest reason as the message.
 fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
     let SendError::HandlerError(report) = error else {
-        return ApiError::new(ErrorCode::Failed, error.to_string());
+        return ApiError::failed(error.to_string());
     };
-    let code = match report.current_context() {
-        PlateApiError::NotFound => ErrorCode::NotFound,
-        PlateApiError::Done => ErrorCode::BadRequest,
-        PlateApiError::Unsaved => ErrorCode::Failed,
+    let (code, hint) = match report.current_context() {
+        PlateApiError::NotFound => (ErrorCode::NotFound, "orb plate list shows the items"),
+        PlateApiError::Done => (ErrorCode::BadRequest, "orb plate list shows the open items"),
+        PlateApiError::Unsaved => (ErrorCode::Failed, SEE_LOG),
     };
     let reason = report
         .downcast_ref::<String>()
         .cloned()
         .unwrap_or_else(|| format!("{:?}", report.current_context()));
-    ApiError::new(code, reason)
+    ApiError::new(code, reason, hint)
 }
 
 /// `plate list`'s reply: open items and those done since `today`, with each

@@ -199,7 +199,11 @@ impl SearchIndex {
                 )
                 .change_context(SearchIndexError)
                 .attach("failed to prepare the message insert")?;
-            for message in &read.messages {
+            for (message, role) in read
+                .messages
+                .iter()
+                .filter_map(|message| Some((message, role_str(message.role)?)))
+            {
                 insert
                     .execute(params![
                         key.0.0,
@@ -207,7 +211,7 @@ impl SearchIndex {
                         text_path,
                         message.offset,
                         message.prompt_offset,
-                        role_str(message.role),
+                        role,
                         message.at,
                         message.text,
                     ])
@@ -466,11 +470,13 @@ fn unmark(marked: &str) -> (String, Vec<usize>) {
     (text, lit)
 }
 
-/// How a role is stored in `messages.role`.
-fn role_str(role: Role) -> &'static str {
+/// How a role is stored in `messages.role`; `None` for a failed model call,
+/// which isn't indexed.
+fn role_str(role: Role) -> Option<&'static str> {
     match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
+        Role::User => Some("user"),
+        Role::Assistant => Some("assistant"),
+        Role::Failure => None,
     }
 }
 
@@ -1050,6 +1056,31 @@ mod tests {
             lit,
             [(12..19).collect::<Vec<usize>>()],
             "highlights should point at the matched graphemes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn api_error_line_is_not_indexed() -> Result<(), Report<SearchIndexError>> {
+        // Given a prompt answered by an API error line.
+        let error = json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "error": "rate_limit",
+            "timestamp": stamp(2),
+            "message": {"content": [{"type": "text", "text": "You've hit your weekly limit"}]},
+        })
+        .to_string();
+        let index = indexed(&[prompt("Fix the weekly report", 1), error])?;
+
+        // When querying a word the prompt and the error share.
+        let texts = found(&index, "weekly")?;
+
+        // Then only the prompt is found.
+        assert_eq!(
+            texts,
+            ["Fix the weekly report"],
+            "an API error should not be indexed"
         );
         Ok(())
     }

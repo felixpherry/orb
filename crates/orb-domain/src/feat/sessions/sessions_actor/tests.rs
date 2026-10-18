@@ -10229,6 +10229,7 @@ async fn api_add_split_replies_with_the_saved_pane() -> Result<(), Report<StoreE
             at: inserted.pane,
             split: Split::Right,
         },
+        dir: None,
     };
     let pane = api_add(&actor, add).await?;
 
@@ -10242,6 +10243,45 @@ async fn api_add_split_replies_with_the_saved_pane() -> Result<(), Report<StoreE
     assert!(
         saved.contains(&pane),
         "the new pane {pane:?} should be saved, got {saved:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn api_add_in_a_folder_saves_the_pane_there() -> Result<(), Report<StoreError>> {
+    // Given a store file with agent aa, a folder, and the actor started
+    // through its mailbox.
+    let dir = tempfile::tempdir().change_context(StoreError)?;
+    let path = dir.path().join("state.sqlite");
+    let folder = tempfile::tempdir().change_context(StoreError)?;
+    let store = Store::open(&path)?;
+    let inserted = insert_agent(&store, "aa")?;
+    let zmx = zmx_running(&store);
+    let (actor, _state) = spawned(store, &listing(Vec::new()), zmx).await?;
+
+    // When an agent asks to split aa's pane right in that folder.
+    let add = ApiAdd {
+        session: inserted.session,
+        place: ApiPlace::Split {
+            at: inserted.pane,
+            split: Split::Right,
+        },
+        dir: Some(folder.path().to_path_buf()),
+    };
+    let pane = api_add(&actor, add).await?;
+
+    // Then the new pane is saved running in that folder.
+    let saved = Store::open(&path)?
+        .layouts()?
+        .panes
+        .into_iter()
+        .find(|row| row.id == pane)
+        .map(|row| row.cwd);
+    assert_eq!(
+        saved.as_deref(),
+        Some(folder.path()),
+        "the new pane {pane:?} should be saved in the folder"
     );
     Ok(())
 }

@@ -87,15 +87,23 @@ impl SessionsActor {
         }
     }
 
-    /// Adds a shell pane in `session`'s directory where an agent asked,
-    /// leaving the shown tab, the focus and whether the floats show as they
-    /// were, then saves the layout. Never reports the session ready. Replies
-    /// with the new pane, or why there is none: the session is gone or has no
-    /// layout, the pane to split or stack isn't in one of its tabs, or the
-    /// pane couldn't be saved.
+    /// Adds a shell pane in `dir`, else `session`'s directory, where an
+    /// agent asked, leaving the shown tab, the focus and whether the floats
+    /// show as they were, then saves the layout. Never reports the session
+    /// ready. Replies with the new pane, or why there is none: the session is
+    /// gone or has no layout, the pane to split or stack isn't in one of its
+    /// tabs, or the pane couldn't be saved.
     pub(super) fn add_pane_at(&mut self, add: &ApiAdd) -> Result<PaneId, String> {
-        let &ApiAdd { session, place } = add;
-        let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
+        let ApiAdd {
+            session,
+            place,
+            ref dir,
+        } = *add;
+        let Some(dir) = self
+            .sessions
+            .get(&session)
+            .map(|row| dir.clone().unwrap_or_else(|| row.dir.clone()))
+        else {
             return Err(format!("no session {}", session.0));
         };
         if self.state.read().layouts.get(session).is_none() {

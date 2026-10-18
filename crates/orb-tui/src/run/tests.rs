@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use orb_domain::feat::control::change::Change;
-use orb_domain::feat::control::pane_control::PaneRequest;
+use orb_domain::feat::control::pane_control::{
+    PaneAnswer, PaneLines, PaneRequest, ShellPhase, ShellView,
+};
 use orb_domain::feat::control::protocol::ErrorCode;
 use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
 use orb_domain::feat::layout::tree::Split;
@@ -2593,6 +2595,34 @@ fn agent_run_types_the_line_and_enter_into_the_pane() -> io::Result<()> {
 }
 
 #[rstest::rstest]
+fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent types `:wq` into pane 1, then presses Enter.
+    let typed_text = PaneRequest::Type {
+        pane: PaneId(1),
+        text: ":wq".into(),
+    };
+    let enter = PaneRequest::Keys {
+        pane: PaneId(1),
+        keys: vec![KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)],
+    };
+    test.app
+        .handle(LoopEvent::Control(typed_text, tx.clone()), &mut io::sink())?;
+    test.app
+        .handle(LoopEvent::Control(enter, tx), &mut io::sink())?;
+
+    // Then the program gets the text and only the key's one Enter.
+    let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
+    assert_eq!(typed, ":wq\n", "the text is typed with no Enter of its own");
+    Ok(())
+}
+
+#[rstest::rstest]
 fn agent_run_into_a_silent_pane_waits_for_its_output() -> io::Result<()> {
     // Given attached pane 1 whose client hasn't printed anything.
     let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
@@ -2620,6 +2650,34 @@ fn agent_run_into_a_silent_pane_waits_for_its_output() -> io::Result<()> {
     assert_eq!(
         typed, "early\nlate\n",
         "a run into a silent pane waits for its first output"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_shell_request_says_a_line_is_held_for_the_first_output() -> io::Result<()> {
+    // Given attached pane 1 whose client hasn't printed anything, and an
+    // agent's run of `late` waiting for its first output.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let (tx, _rx) = mpsc::channel();
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "late".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(run, tx), &mut io::sink())?;
+
+    // When an agent asks what pane 1's shell is doing.
+    let answer = test.ask_until(&PaneRequest::Shell { pane: PaneId(1) }, |_| true)?;
+
+    // Then the answer says the line is held.
+    assert!(
+        matches!(
+            answer,
+            Some(PaneAnswer::Shell(ShellView { held: true, .. }))
+        ),
+        "a line waiting for the pane's first output is held, got {answer:?}"
     );
     Ok(())
 }
@@ -2672,6 +2730,114 @@ fn agent_prompt_pastes_the_text_then_presses_enter() -> io::Result<()> {
     Ok(())
 }
 
+/// A client whose shell draws a prompt between its prompt marks, then waits.
+fn prints_prompt_marks(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf '\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// A client that prints three lines, then waits.
+fn prints_three_lines(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf 'one\\ntwo\\nthree\\n'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+impl LoopTest {
+    /// Asks the loop `request` after each of its events, for up to five
+    /// seconds, until `done` holds for the answer; the last answer.
+    fn ask_until(
+        &mut self,
+        request: &PaneRequest,
+        done: impl Fn(&PaneAnswer) -> bool,
+    ) -> io::Result<Option<PaneAnswer>> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Ok(event) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                self.app.handle(event, &mut io::sink())?;
+            }
+            let (tx, rx) = mpsc::channel();
+            self.app
+                .handle(LoopEvent::Control(request.clone(), tx), &mut io::sink())?;
+            let answer = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(io::Error::other)?
+                .ok();
+            if answer.as_ref().is_some_and(&done) {
+                return Ok(answer);
+            }
+            last = answer;
+        }
+        Ok(last)
+    }
+}
+
+#[rstest::rstest]
+fn agent_shell_request_reads_the_panes_prompt_marks() -> io::Result<()> {
+    // Given attached pane 1 whose shell drew a prompt between its prompt
+    // marks.
+    let mut test = loop_app(FakeZmx::listing(""), prints_prompt_marks)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks what pane 1's shell is doing.
+    let answer = test.ask_until(
+        &PaneRequest::Shell { pane: PaneId(1) },
+        |answer| matches!(answer, PaneAnswer::Shell(shell) if shell.seq >= 2),
+    )?;
+
+    // Then it has seen the marks and sits at its prompt with nothing typed.
+    let shell = match answer {
+        Some(PaneAnswer::Shell(shell)) => Some((shell.marks_seen, shell.phase)),
+        _ => None,
+    };
+    assert_eq!(
+        shell,
+        Some((true, ShellPhase::AtPrompt { leftover: false })),
+        "the shell's prompt marks put it at a clean prompt"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_between_request_reads_the_lines_asked_for() -> io::Result<()> {
+    // Given attached pane 1 that printed `one`, `two` and `three` on its
+    // first three lines.
+    let mut test = loop_app(FakeZmx::listing(""), prints_three_lines)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks for lines 1 to 3.
+    let between = PaneRequest::Between {
+        pane: PaneId(1),
+        start: 1,
+        end: 3,
+    };
+    let answer = test.ask_until(
+        &between,
+        |answer| matches!(answer, PaneAnswer::Lines(lines) if lines.text.contains("three")),
+    )?;
+
+    // Then it gets the second and third lines, none cut off.
+    assert_eq!(
+        answer,
+        Some(PaneAnswer::Lines(PaneLines {
+            text: "two\nthree".into(),
+            truncated: false,
+        })),
+        "the request reads exactly the lines asked for"
+    );
+    Ok(())
+}
+
 #[rstest::rstest]
 fn agent_launch_into_a_pane_with_a_waiting_line_is_pane_busy() -> io::Result<()> {
     // Given attached pane 1, silent so far, with a run of `first` waiting to
@@ -2703,6 +2869,41 @@ fn agent_launch_into_a_pane_with_a_waiting_line_is_pane_busy() -> io::Result<()>
         answer.map_err(|error| error.code),
         Err(ErrorCode::PaneBusy),
         "a pane with a line waiting can't start an agent"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_launch_pane_busy_hint_says_to_wait_for_the_shell() -> io::Result<()> {
+    // Given attached pane 1, silent so far, with a run of `first` waiting to
+    // be typed.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "first".into(),
+    };
+    let (run_tx, _run_rx) = mpsc::channel();
+    test.app
+        .handle(LoopEvent::Control(run, run_tx), &mut io::sink())?;
+    let (tx, rx) = mpsc::channel();
+
+    // When an agent starts an agent in pane 1.
+    let launch = PaneRequest::Launch {
+        pane: PaneId(1),
+        line: "claude".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(launch, tx), &mut io::sink())?;
+
+    // Then the refusal says to wait for the shell.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        answer.err().and_then(|error| error.hint).as_deref(),
+        Some("wait for the pane's shell to start, then try again"),
+        "a pane with a line waiting says when to start again"
     );
     Ok(())
 }

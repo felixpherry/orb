@@ -213,6 +213,9 @@ where
     let made = result_of(orb(&ask(Op::PaneSplit {
         pane: Some(at),
         direction,
+        name: None,
+        run: None,
+        cwd: None,
     })))?;
     let PaneResult { pane } = serde_json::from_value(made).map_err(|error| error.to_string())?;
     let line = command
@@ -224,6 +227,10 @@ where
     result_of(orb(&ask(Op::PaneRun {
         pane,
         command: line,
+        wait: false,
+        timeout: None,
+        force: false,
+        tail: None,
     })))
     .map(|_| json!({}))
 }
@@ -309,7 +316,11 @@ mod tests {
 
     /// orb refusing every request because the session is settled.
     fn settled(_request: &Request) -> Reply {
-        Reply::err(ApiError::new(ErrorCode::Settled, "session is settled"))
+        Reply::err(ApiError::new(
+            ErrorCode::Settled,
+            "session is settled",
+            "orb session list shows open ones",
+        ))
     }
 
     /// Session 1 holding pane 1.
@@ -455,6 +466,9 @@ mod tests {
                 op: Op::PaneSplit {
                     pane: Some(PaneId(1)),
                     direction,
+                    name: None,
+                    run: None,
+                    cwd: None,
                 },
             }),
             "the split should ask for a pane beside pane 1"
@@ -477,6 +491,10 @@ mod tests {
                     pane: PaneId(9),
                     command: r"'/opt/tb/bin/terminal-browser' 'open' 'https://x.test/?q=it'\''s'"
                         .to_owned(),
+                    wait: false,
+                    timeout: None,
+                    force: false,
+                    tail: None,
                 },
             }),
             "the command should be typed, quoted, into the new pane"

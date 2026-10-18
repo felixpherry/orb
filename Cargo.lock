@@ -1398,6 +1398,7 @@ dependencies = [
  "orb-domain",
  "orb-tui",
  "rstest",
+ "tempfile",
  "tokio",
  "wherror",
 ]
@@ -1413,6 +1414,7 @@ dependencies = [
  "kameo",
  "notify-rust",
  "ratatui",
+ "regex",
  "rstest",
  "rusqlite",
  "serde",

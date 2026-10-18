@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::feat::layout::tree::Split;
 use crate::feat::plate::Verb;
@@ -16,6 +17,28 @@ pub const SOCKET_FILE: &str = "orb.sock";
 /// Where a running orb listens, given orb's folder.
 pub fn socket_path(orb_root: &Path) -> PathBuf {
     orb_root.join(SOCKET_FILE)
+}
+
+/// How many graphemes of a name go on the wire.
+const NAME_LIMIT: usize = 60;
+
+/// `name` cut to [`NAME_LIMIT`] graphemes, ending in `…` when cut.
+pub(crate) fn short_name(name: &str) -> String {
+    cut(name, NAME_LIMIT)
+}
+
+/// `text` cut to `limit` graphemes, ending in `…` when cut.
+pub(crate) fn cut(text: &str, limit: usize) -> String {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    if graphemes.len() <= limit {
+        return text.to_owned();
+    }
+    let mut kept: String = graphemes
+        .into_iter()
+        .take(limit.saturating_sub(1))
+        .collect();
+    kept.push('…');
+    kept
 }
 
 /// One request: who asks (the pane the command runs in, if any) and what for.
@@ -32,9 +55,16 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Op {
-    /// Every session, settled ones included.
+    /// Sessions: open ones, or every one with `all`.
     #[serde(rename = "session.list")]
-    SessionList,
+    SessionList {
+        /// Settled sessions too.
+        #[serde(default)]
+        all: bool,
+        /// Only this project's.
+        #[serde(default)]
+        project: Option<ProjectId>,
+    },
     /// A session's tabs and the panes in each.
     #[serde(rename = "tab.list")]
     TabList {
@@ -49,9 +79,26 @@ pub enum Op {
         #[serde(default)]
         session: Option<SessionId>,
     },
-    /// Every live agent in every session.
+    /// Agents in panes: live ones, every one with `all`, or those with
+    /// `status`.
     #[serde(rename = "agent.list")]
-    AgentList,
+    AgentList {
+        /// Stopped and gone agents too.
+        #[serde(default)]
+        all: bool,
+        /// Only this session's.
+        #[serde(default)]
+        session: Option<SessionId>,
+        /// Only these statuses; empty for the default.
+        #[serde(default)]
+        status: Vec<AgentStatus>,
+    },
+    /// Projects that aren't removed.
+    #[serde(rename = "project.list")]
+    ProjectList,
+    /// Where the caller is: its pane, tab and session.
+    #[serde(rename = "orb.here")]
+    Here,
     /// A new shell beside a pane (or its whole stack).
     #[serde(rename = "pane.split")]
     PaneSplit {
@@ -60,6 +107,15 @@ pub enum Op {
         pane: Option<PaneId>,
         /// Which side the new pane goes.
         direction: Direction,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new shell stacked right after a pane.
     #[serde(rename = "pane.stack")]
@@ -67,6 +123,15 @@ pub enum Op {
         /// The pane, else the caller's.
         #[serde(default)]
         pane: Option<PaneId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new floating shell in a session.
     #[serde(rename = "pane.float")]
@@ -74,6 +139,15 @@ pub enum Op {
         /// The session, else the caller's.
         #[serde(default)]
         session: Option<SessionId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new tab with one shell at the end of a session's tabs.
     #[serde(rename = "tab.create")]
@@ -81,6 +155,15 @@ pub enum Op {
         /// The session, else the caller's.
         #[serde(default)]
         session: Option<SessionId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new session.
     #[serde(rename = "session.create")]
@@ -136,10 +219,28 @@ pub enum Op {
     /// Presses named keys in a pane, in order.
     #[serde(rename = "pane.keys")]
     PaneKeys { pane: PaneId, keys: Vec<String> },
-    /// Types a command and Enter into a pane.
+    /// Types text into a pane: no paste, no Enter.
+    #[serde(rename = "pane.type")]
+    PaneType { pane: PaneId, text: String },
+    /// Types a command and Enter into a pane's shell.
     #[serde(rename = "pane.run")]
-    PaneRun { pane: PaneId, command: String },
-    /// A pane's screen, plus up to `lines` lines of history, as text.
+    PaneRun {
+        pane: PaneId,
+        command: String,
+        /// Wait for the command to end and reply with its output.
+        #[serde(default)]
+        wait: bool,
+        /// With `wait`, give up after this many milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// Type even while a program runs in the pane.
+        #[serde(default)]
+        force: bool,
+        /// With `wait`, keep the output's last `tail` lines (200 when left out).
+        #[serde(default)]
+        tail: Option<usize>,
+    },
+    /// A pane's screen, plus up to `lines` lines of history, as trimmed text.
     #[serde(rename = "pane.read")]
     PaneRead {
         /// The pane, else the caller's.
@@ -148,8 +249,32 @@ pub enum Op {
         /// How many lines of history to add above the screen.
         #[serde(default)]
         lines: usize,
+        /// Keep the first `head` lines of the trimmed text.
+        #[serde(default)]
+        head: Option<usize>,
+        /// Then keep the last `tail` lines.
+        #[serde(default)]
+        tail: Option<usize>,
     },
-    /// Starts an agent in a shell pane and waits until orb sees it.
+    /// Waits until a line of a pane's text holds `text` or matches `regex`.
+    #[serde(rename = "pane.wait")]
+    PaneWait {
+        pane: PaneId,
+        /// Text a line must hold.
+        #[serde(default)]
+        text: Option<String>,
+        /// A pattern a line must match.
+        #[serde(default)]
+        regex: Option<String>,
+        /// Give up after this many milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// Lines of history searched above the screen (200 when left out).
+        #[serde(default)]
+        lines: Option<usize>,
+    },
+    /// Starts an agent in a shell pane, or in a new one, and waits until orb
+    /// sees it.
     #[serde(rename = "agent.start")]
     AgentStart {
         /// The pane, else the caller's.
@@ -162,6 +287,16 @@ pub enum Op {
         /// Typed after the program, each quoted for the shell.
         #[serde(default)]
         args: Vec<String>,
+        /// Start in a new pane split off the caller's toward this side.
+        #[serde(default)]
+        split: Option<Direction>,
+        /// Start in a new tab of the caller's session.
+        #[serde(default)]
+        tab: bool,
+        /// Type the program into an existing pane even while another program
+        /// runs there.
+        #[serde(default)]
+        force: bool,
     },
     /// Pastes a prompt into an agent and presses Enter.
     #[serde(rename = "agent.prompt")]
@@ -184,7 +319,7 @@ pub enum Op {
         #[serde(default)]
         timeout: Option<u64>,
     },
-    /// A pane's agent, as `agent list` shows it.
+    /// A pane's agent in full.
     #[serde(rename = "agent.get")]
     AgentGet { pane: PaneId },
     /// The last reply in a pane's agent's transcript.
@@ -248,6 +383,16 @@ pub enum AgentKind {
     Pi,
 }
 
+impl AgentKind {
+    /// The program it runs, as `--kind` names it.
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Pi => "pi",
+        }
+    }
+}
+
 /// Which side of a pane `pane split` puts the new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -295,31 +440,102 @@ pub enum ErrorCode {
     Timeout,
     /// The agent didn't start working after the prompt.
     PromptStalled,
+    /// A program runs in the pane's shell.
+    Busy,
+    /// The shell didn't run the typed command.
+    NotRun,
+    /// The agent's turn ended in a failed model call.
+    TurnFailed,
     /// Something else went wrong; the message says what.
     Failed,
 }
 
-/// A failure as it goes on the wire: a code and a message for people.
+/// A failure as it goes on the wire: a code, a message for people and the
+/// step that fixes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     /// Why it failed.
     pub code: ErrorCode,
     /// What happened, in words.
     pub message: String,
+    /// The command or step that fixes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// The message as orb's log writes it, for a message that names panes,
+    /// agents or sessions by title; never sent to the client.
+    #[serde(skip)]
+    pub logged: Option<String>,
 }
 
 impl ApiError {
-    /// A failure with this code and message.
-    pub fn new<M>(code: ErrorCode, message: M) -> Self
+    /// A refusal with this code, message and hint.
+    pub fn new<M, H>(code: ErrorCode, message: M, hint: H) -> Self
     where
         M: Into<String>,
+        H: Into<String>,
     {
         Self {
             code,
             message: message.into(),
+            hint: Some(hint.into()),
+            logged: None,
+        }
+    }
+
+    /// A `failed` refusal for a failure inside orb, pointing at its log.
+    pub fn failed<M>(message: M) -> Self
+    where
+        M: Into<String>,
+    {
+        Self::new(ErrorCode::Failed, message, SEE_LOG)
+    }
+
+    /// A `bad_request` refusal for a request handed to code that serves
+    /// other kinds; `message` says which kind it expected.
+    pub fn wrong_kind<M>(message: M) -> Self
+    where
+        M: Into<String>,
+    {
+        Self::new(
+            ErrorCode::BadRequest,
+            message,
+            "orb help lists the commands",
+        )
+    }
+
+    /// The same refusal, written to orb's log as `logged` in place of its
+    /// message.
+    #[must_use]
+    pub fn logged_as<L>(self, logged: L) -> Self
+    where
+        L: Into<String>,
+    {
+        Self {
+            logged: Some(logged.into()),
+            ..self
+        }
+    }
+
+    /// The message as orb's log writes it.
+    pub fn log_message(&self) -> &str {
+        self.logged.as_deref().unwrap_or(&self.message)
+    }
+
+    /// The same refusal with `hint` in place of its own.
+    #[must_use]
+    pub fn with_hint<H>(self, hint: H) -> Self
+    where
+        H: Into<String>,
+    {
+        Self {
+            hint: Some(hint.into()),
+            ..self
         }
     }
 }
+
+/// The hint for a failure inside orb.
+pub const SEE_LOG: &str = "try again; orb's log at ~/.orb/orb.log may say why";
 
 /// One reply: `ok` with a result, or not `ok` with an error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,7 +563,7 @@ impl Reply {
                 result: Some(value),
                 error: None,
             },
-            Err(error) => Self::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+            Err(error) => Self::err(ApiError::failed(error.to_string())),
         }
     }
 
@@ -359,6 +575,30 @@ impl Reply {
             error: Some(error),
         }
     }
+
+    /// The reply's result (`null` when it carries none), or its refusal
+    /// (`failed` when a refused reply names no error).
+    ///
+    /// # Errors
+    ///
+    /// Returns the reply's error when it isn't `ok`.
+    pub fn into_result(self) -> Result<serde_json::Value, ApiError> {
+        if self.ok {
+            Ok(self.result.unwrap_or_default())
+        } else {
+            Err(self
+                .error
+                .unwrap_or_else(|| ApiError::failed("no error given")))
+        }
+    }
+
+    /// `result` as a reply: its value, or its refusal.
+    pub fn from_result<T>(result: Result<T, ApiError>) -> Self
+    where
+        T: Serialize,
+    {
+        result.map_or_else(Self::err, |ok| Self::ok(&ok))
+    }
 }
 
 /// One session in `session list`.
@@ -366,7 +606,7 @@ impl Reply {
 pub struct SessionRow {
     pub id: SessionId,
     pub project: ProjectId,
-    /// The name the sidebar shows.
+    /// The name the sidebar shows, cut to 60 graphemes.
     pub name: String,
     pub dir: String,
     pub branch: Option<String>,
@@ -377,6 +617,11 @@ pub struct SessionRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionsResult {
     pub sessions: Vec<SessionRow>,
+    /// Settled sessions the open-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// One tab in `tab list`: its place and its panes.
@@ -410,15 +655,44 @@ pub struct PaneRow {
     pub caller: bool,
 }
 
+/// `orb.here`'s result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HereResult {
+    pub pane: PaneId,
+    /// Its tab, counted from 1; none for a floating pane.
+    pub tab: Option<usize>,
+    pub session: SessionId,
+    /// The session's name, cut as list names are.
+    pub session_name: String,
+    /// The agent live in the pane, if any.
+    pub agent: Option<AgentId>,
+}
+
 /// `pane list`'s result.
 #[derive(Debug, Clone, Serialize)]
 pub struct PanesResult {
     pub panes: Vec<PaneRow>,
 }
 
-/// One agent in `agent list`.
+/// One agent in `agent list`: no cwd or branch, which its session's row
+/// already has.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRow {
+    pub id: AgentId,
+    pub pane: Option<PaneId>,
+    pub session: SessionId,
+    pub harness: String,
+    /// The name the sidebar shows, cut to 60 graphemes.
+    pub name: String,
+    /// The agent's own title when it differs from `name`, cut the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub status: AgentStatus,
+}
+
+/// One agent in full, as `agent get` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentDetail {
     pub id: AgentId,
     pub pane: Option<PaneId>,
     pub session: SessionId,
@@ -453,10 +727,51 @@ pub struct StartResult {
 )]
 pub struct Done {}
 
+/// One pane a close or settle ended: its own name, and the live agent's
+/// list name (cut to 60 graphemes), each null when there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EndedRow {
+    pub pane: PaneId,
+    pub name: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// `pane close`'s and `tab close`'s result: the panes they ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosedResult {
+    pub ended: Vec<EndedRow>,
+}
+
+/// `session settle`'s result: the session, its name (cut to 60 graphemes),
+/// and the panes it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SettledResult {
+    pub session: SessionId,
+    pub name: String,
+    pub ended: Vec<EndedRow>,
+}
+
 /// `pane read`'s result: the screen as text, empty when it shows nothing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub text: String,
+}
+
+/// `pane run --wait`'s result: the exit status (null without prompt marks),
+/// the output's last lines, how many lines it had, and whether its start was
+/// gone from the pane's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunResult {
+    pub exit: Option<i32>,
+    pub output: String,
+    pub lines: usize,
+    pub truncated: bool,
+}
+
+/// `pane wait`'s result: the first line that matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchResult {
+    pub line: String,
 }
 
 /// `agent start`'s result: the agent orb saw start in the pane.
@@ -484,10 +799,19 @@ pub enum WaitEnd {
     Blocked,
 }
 
-/// `agent wait`'s (and `agent prompt --wait`'s) result.
+/// `agent wait`'s result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WaitResult {
     pub status: WaitEnd,
+}
+
+/// `agent prompt --wait`'s result: the turn ended, with everything the
+/// agent wrote since the prompt and when, in unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnswerResult {
+    pub status: WaitEnd,
+    pub text: String,
+    pub at: Option<i64>,
 }
 
 /// `agent reply`'s result: the last reply's text and when it was written,
@@ -502,6 +826,27 @@ pub struct ReplyResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentsResult {
     pub agents: Vec<AgentRow>,
+    /// Stopped and gone agents the live-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// One project in `project list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectRow {
+    pub id: ProjectId,
+    pub name: String,
+    pub dir: String,
+    /// repo, folder, research, learn, incognito, shared_world or fresh_world.
+    pub kind: &'static str,
+}
+
+/// `project list`'s result.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectsResult {
+    pub projects: Vec<ProjectRow>,
 }
 
 /// What `plate add` replies: the new item.

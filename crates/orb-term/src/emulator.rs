@@ -23,6 +23,11 @@
 //! selection the mouse drags out and copies. Key presses and pastes bring the
 //! view back to the live screen and drop the selection. The screen and its
 //! history can also be read out as plain text.
+//!
+//! The shell's prompt marks (OSC 133) are followed: where its prompt and
+//! typing start, which command runs, and how the last one ended and which
+//! lines its output took. Lines are numbered from the pane's first line, so a
+//! command's output can be read back after more has scrolled past.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -46,15 +51,21 @@ use crate::encode::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::graphics::{GraphicsFrame, PaneGraphics};
 use crate::pane::{GraphicsSupport, PaneColors, PaneEvent, PaneSize};
 use crate::render::{cursor_style, render_term};
+use crate::shell::{Lines, ShellState, ShellTracker, Spot};
 use crate::splitter::{Piece, Splitter};
 
 /// Lines of output a pane keeps above its screen.
 const HISTORY: usize = 10_000;
-/// Lines a pane with main-screen images keeps free in its history. Their
-/// images move by the change in the history's size, which stops counting
-/// once the history is full; trimming it this far before each feed keeps the
-/// count, unless one feed scrolls more than this.
+/// Lines a pane with main-screen images, or whose shell sends prompt marks,
+/// keeps free in its history. Images and line numbers move by the change in
+/// the history's size, which stops counting once the history is full;
+/// trimming it this far before each feed keeps the count, unless one feed
+/// scrolls more than this.
 const TRACK_SLACK: usize = 512;
+/// Line feeds, or screen widths of bytes, fed to the parser at once while
+/// the line count must stay exact; either can scroll at most this many lines,
+/// so a run stays well inside [`TRACK_SLACK`] even with a full screen clear.
+const COUNT_LINES: usize = TRACK_SLACK / 4;
 /// Lines one wheel notch scrolls, or arrow keys it sends.
 const WHEEL_LINES: i32 = 3;
 /// Presses on one cell closer together than this are a double or triple
@@ -166,6 +177,11 @@ pub(crate) struct Emulator {
     /// The main screen's history size when last seen, to count the lines it
     /// scrolled since.
     main_history: usize,
+    /// What the child shell's prompt marks say it is doing.
+    shell: ShellTracker,
+    /// Lines the main screen has scrolled into its history since the pane
+    /// started; the screen's top row is this absolute line.
+    scrolled: i64,
     /// Whether the child turned pixel mouse reports (1016) on.
     pixel_mouse: bool,
     /// The cell of the last mouse event sent on to the child, so motion
@@ -249,6 +265,8 @@ impl Emulator {
             hold: None,
             graphics: PaneGraphics::new(graphics),
             main_history: 0,
+            shell: ShellTracker::default(),
+            scrolled: 0,
             pixel_mouse: false,
             last_cell: None,
         }
@@ -328,13 +346,39 @@ impl Emulator {
                 }
             }
             Piece::VersionQuery => self.write(VERSION_REPLY.as_bytes()),
+            Piece::PromptMark(mark) => {
+                let cursor = self.cursor_spot();
+                self.shell.mark(&mark, cursor);
+            }
         }
     }
 
-    /// Feeds `bytes` to the parser. A switch of screens frees the alternate
-    /// screen's images; on the main screen, placements move with the lines
-    /// the feed scrolled into the history.
+    /// Feeds `bytes` to the parser: whole, or once the shell sends prompt
+    /// marks, in runs short enough that the line count stays exact.
+    // ponytail: a resize that reflows to a new width, a resize while the
+    // alternate screen shows (the main screen's history changes unseen), and
+    // a single `CSI n S` or line feeds other than LF, VT and FF past the
+    // slack, can still shift the line count.
     fn advance(&mut self, bytes: &[u8]) {
+        if !self.shell.marks_seen() {
+            self.advance_run(bytes);
+            return;
+        }
+        let width = COUNT_LINES * self.term.columns().max(1);
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let (run, after) = rest
+                .split_at_checked(run_end(rest, width))
+                .unwrap_or((rest, &[]));
+            self.advance_run(run);
+            rest = after;
+        }
+    }
+
+    /// Feeds `bytes` to the parser in one go. A switch of screens frees the
+    /// alternate screen's images; on the main screen, placements and the line
+    /// count move with the lines the feed scrolled into the history.
+    fn advance_run(&mut self, bytes: &[u8]) {
         let alt = self.alt_screen();
         self.before_main_change();
         self.parser.advance(&mut self.term, bytes);
@@ -364,14 +408,16 @@ impl Emulator {
         self.advance(&bytes);
     }
 
-    /// Before the main screen changes: a pane with main-screen placements
-    /// trims its history to leave [`TRACK_SLACK`] lines free, and the
-    /// history's size is noted.
+    /// Before the main screen changes: a pane with main-screen placements, or
+    /// whose shell sends prompt marks, trims its history to leave
+    /// [`TRACK_SLACK`] lines free, and the history's size is noted.
     fn before_main_change(&mut self) {
         if self.alt_screen() {
             return;
         }
-        if self.graphics.has_main_placements() && self.term.history_size() > HISTORY - TRACK_SLACK {
+        if (self.graphics.has_main_placements() || self.shell.marks_seen())
+            && self.term.history_size() > HISTORY - TRACK_SLACK
+        {
             let grid = self.term.grid_mut();
             grid.update_history(HISTORY - TRACK_SLACK);
             grid.update_history(HISTORY);
@@ -379,14 +425,19 @@ impl Emulator {
         self.main_history = self.term.history_size();
     }
 
-    /// After the main screen changed: its placements move by the lines it
-    /// scrolled into its history, or are dropped when a full history lost
-    /// the count.
+    /// After the main screen changed: the line count and its placements move
+    /// by the lines it scrolled into its history, or the placements are
+    /// dropped when a full history lost the count.
     fn after_main_change(&mut self) {
         if self.alt_screen() {
             return;
         }
         let history = self.term.history_size();
+        // A history that shrank lost its oldest lines (`CSI 3 J`); the lines
+        // still there keep their numbers.
+        if history > self.main_history {
+            self.scrolled += i64::try_from(history - self.main_history).unwrap_or(0);
+        }
         // ponytail: only the history's size is counted, so lines scrolled
         // inside a scroll region (DECSTBM) and a resize that reflows to a new
         // width leave placements where they were; count region scrolls and
@@ -443,6 +494,12 @@ impl Emulator {
         *lock(&self.size) = size;
         self.before_main_change();
         self.term.resize(size);
+        // A taller main screen pulls its history's newest lines back onto
+        // the screen, so its top row is that many lines older.
+        let history = self.term.history_size();
+        if !self.alt_screen() && history < self.main_history {
+            self.scrolled -= i64::try_from(self.main_history - history).unwrap_or(0);
+        }
         self.after_main_change();
     }
 
@@ -499,11 +556,13 @@ impl Emulator {
     /// or Ctrl-U would drop what came before it and a newline would run the
     /// line early.
     pub(crate) fn type_line(&self, line: &str) {
-        let printable: String = line
-            .chars()
-            .filter(|character| !character.is_control())
-            .collect();
-        self.write(format!("{printable}\r").as_bytes());
+        self.write(format!("{}\r", printable(line)).as_bytes());
+    }
+
+    /// Types `text` into the child as raw input with no Enter and never as a
+    /// bracketed paste; control characters are left out, as `type_line` does.
+    pub(crate) fn type_text(&self, text: &str) {
+        self.write(printable(text).as_bytes());
     }
 
     /// Sends a mouse event over the pane drawn at `area` to the child;
@@ -652,9 +711,15 @@ impl Emulator {
     pub(crate) fn text(&self, history: usize) -> String {
         let above = i32::try_from(history.min(self.term.history_size())).unwrap_or(0);
         let bottom = i32::try_from(self.term.screen_lines()).unwrap_or(1) - 1;
+        self.rows_text(-above, bottom)
+    }
+
+    /// Grid rows `first..=last` as plain text: soft-wrapped rows joined into
+    /// one line, trailing blanks dropped from each line and from the end.
+    fn rows_text(&self, first: i32, last: i32) -> String {
         let text = self.term.bounds_to_string(
-            Point::new(Line(-above), Column(0)),
-            Point::new(Line(bottom), self.term.last_column()),
+            Point::new(Line(first), Column(0)),
+            Point::new(Line(last), self.term.last_column()),
         );
         text.lines()
             .map(str::trim_end)
@@ -662,6 +727,49 @@ impl Emulator {
             .join("\n")
             .trim_end()
             .to_owned()
+    }
+
+    /// What the child shell is doing, from its prompt marks, with the cursor
+    /// where it is now.
+    pub(crate) fn shell(&self) -> ShellState {
+        self.shell.snapshot(self.cursor_spot())
+    }
+
+    /// The text of absolute lines `start..end`, cut to what the history and
+    /// screen still hold, in the form [`Emulator::text`] gives. `truncated`
+    /// says the first lines asked for had already left the history.
+    /// The main screen's lines can't be read while the alternate screen
+    /// shows, so then the text is empty and `truncated` is set.
+    pub(crate) fn text_between(&self, start: i64, end: i64) -> Lines {
+        if self.alt_screen() {
+            return Lines {
+                text: String::new(),
+                truncated: true,
+            };
+        }
+        let top = self.scrolled;
+        let history = i64::try_from(self.term.history_size()).unwrap_or(0);
+        let screen = i64::try_from(self.term.screen_lines()).unwrap_or(0);
+        let oldest = top - history;
+        let truncated = start < oldest;
+        let (from, to) = (start.max(oldest), end.min(top + screen));
+        let rows = i32::try_from(from - top)
+            .ok()
+            .zip(i32::try_from(to - top - 1).ok());
+        let text = match rows {
+            Some((first, last)) if to > from => self.rows_text(first, last),
+            _ => String::new(),
+        };
+        Lines { text, truncated }
+    }
+
+    /// The cursor's cell by absolute line.
+    fn cursor_spot(&self) -> Spot {
+        let cursor = self.term.grid().cursor.point;
+        Spot {
+            line: self.scrolled + i64::from(cursor.line.0),
+            column: cursor.column.0,
+        }
     }
 
     /// The grid cell under `at` in the pane drawn at `area`, clamped into
@@ -733,6 +841,29 @@ fn write_to(writer: &SharedWriter, bytes: &[u8]) {
     let _ = writer.write_all(bytes).and_then(|()| writer.flush());
 }
 
+/// Where the first run of `bytes` the parser takes at once ends: after its
+/// [`COUNT_LINES`]th line feed (LF, VT or FF), or after `width` bytes.
+fn run_end(bytes: &[u8], width: usize) -> usize {
+    let mut feeds = 0;
+    for (at, byte) in bytes.iter().take(width).enumerate() {
+        if matches!(byte, b'\n' | 0x0b | 0x0c) {
+            feeds += 1;
+            if feeds == COUNT_LINES {
+                return at + 1;
+            }
+        }
+    }
+    bytes.len().min(width)
+}
+
+/// `text` without control characters (C0, DEL and C1), which act as keys in a
+/// prompt.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -748,6 +879,7 @@ mod tests {
 
     use super::{Emulator, lock};
     use crate::pane::{CellSize, GraphicsSupport, PaneColors, PaneEvent, PaneSize};
+    use crate::shell::{Lines, ShellPhase, Spot};
 
     /// An in-memory child input that tests can read back.
     #[derive(Clone, Default)]
@@ -979,6 +1111,48 @@ mod tests {
 
         // Then the line reaches the child unwrapped.
         assert_eq!(input.contents(), b"claude --resume aa\r", "unwrapped line");
+    }
+
+    #[rstest::rstest]
+    fn typed_text_reaches_the_child_with_no_enter() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing a vim command.
+        emulator.type_text(":wq");
+
+        // Then the child receives the text and nothing after it.
+        assert_eq!(input.contents(), b":wq", "typed text with no Enter");
+    }
+
+    #[rstest::rstest]
+    fn typed_text_leaves_out_control_characters() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing text holding Ctrl-C, a newline, a carriage return, DEL
+        // and a C1 character.
+        emulator.type_text("a\u{3}b\nc\rd\u{7f}e\u{9b}f");
+
+        // Then only the printable text reaches the child.
+        assert_eq!(
+            input.contents(),
+            b"abcdef",
+            "control characters shouldn't act on the program"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typed_text_ignores_bracketed_paste() {
+        // Given a child that turned bracketed paste on.
+        let (mut emulator, input, _) = emulator();
+        emulator.feed(b"\x1b[?2004h");
+
+        // When typing a vim command.
+        emulator.type_text(":wq");
+
+        // Then the text reaches the child unwrapped.
+        assert_eq!(input.contents(), b":wq", "unwrapped text");
     }
 
     #[rstest::rstest]
@@ -2329,6 +2503,253 @@ mod tests {
             reports,
             "motion reports in {:?}",
             String::from_utf8_lossy(&input.contents())
+        );
+    }
+
+    /// A `cols`×`rows` emulator whose input goes nowhere.
+    fn emulator_of(cols: u16, rows: u16) -> Emulator {
+        let size = PaneSize {
+            cols,
+            rows,
+            cell: CellSize::default(),
+        };
+        Emulator::new(
+            size,
+            Box::new(SharedBuf::default()),
+            Arc::new(|_| {}),
+            GraphicsSupport::None,
+            None,
+        )
+    }
+
+    /// fish's prompt, as fish 4.8.1 draws it: a prompt start, `~> ` and an
+    /// input start.
+    const FISH_PROMPT: &[u8] = b"\x1b[K\x1b]133;A;click_events=1\x1b\\~> \x1b]133;B\x1b\\";
+
+    /// What fish prints from the Enter that runs `command_line` (its
+    /// percent-encoded `url`) up to the command's output: a new line, the
+    /// command start mark, a title and a carriage return.
+    fn fish_start(command_line: &str, url: &str) -> Vec<u8> {
+        format!("{command_line}\r\n\x1b]133;C;cmdline_url={url}\x1b\\\x1b]0;{command_line}\x07\r")
+            .into_bytes()
+    }
+
+    /// `count` lines named `name` and their number, each ended by `\r\n`.
+    fn numbered(name: &str, count: usize) -> Vec<u8> {
+        (0..count)
+            .flat_map(|line| format!("{name}{line}\r\n").into_bytes())
+            .collect()
+    }
+
+    /// The lines [`numbered`] prints, as the screen's text gives them.
+    fn numbered_text(name: &str, count: usize) -> String {
+        (0..count)
+            .map(|line| format!("{name}{line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The text of the last command's output, and whether its start was
+    /// gone; `None` when no command ended.
+    fn last_output(emulator: &Emulator) -> Option<Lines> {
+        let last = emulator.shell().last?;
+        Some(emulator.text_between(last.start_line, last.end_line))
+    }
+
+    #[rstest::rstest]
+    fn fish_marks_track_a_command_and_its_output() {
+        // Given fish at its prompt.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(FISH_PROMPT);
+
+        // When it runs `echo hi; echo there`, as fish prints it.
+        let run = [
+            fish_start("echo hi; echo there", "echo%20hi%3B%20echo%20there").as_slice(),
+            b"hi\r\nthere\r\n\x1b]133;D;0\x1b\\",
+            FISH_PROMPT,
+        ]
+        .concat();
+        emulator.feed(&run);
+
+        // Then the command ended with 0, and its lines hold its output.
+        let exit = emulator.shell().last.and_then(|last| last.exit);
+        assert_eq!(
+            (exit, last_output(&emulator).map(|lines| lines.text)),
+            (Some(0), Some("hi\nthere".to_owned())),
+            "the marks give the exit and the output's lines"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cursor_line_counts_every_line_scrolled_off() {
+        // Given a 5-row screen whose shell sent a prompt mark.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(FISH_PROMPT);
+
+        // When 12 lines are printed.
+        emulator.feed(b"\r\n");
+        emulator.feed(&numbered("l", 11));
+
+        // Then the cursor is on absolute line 12, though the screen holds 5.
+        assert_eq!(
+            emulator.shell().cursor,
+            Spot {
+                line: 12,
+                column: 0
+            },
+            "lines count from the pane's first line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn line_count_holds_once_the_history_is_full() {
+        // Given fish at its prompt after 20,000 lines filled the history.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(FISH_PROMPT);
+        emulator.feed(&numbered("l", 20_000));
+        emulator.feed(FISH_PROMPT);
+
+        // When a command prints 600 lines in one read.
+        let run = [
+            fish_start("seq", "seq").as_slice(),
+            &numbered("o", 600),
+            b"\x1b]133;D;0\x1b\\",
+        ]
+        .concat();
+        emulator.feed(&run);
+
+        // Then its lines read back exactly its output.
+        assert_eq!(
+            last_output(&emulator),
+            Some(Lines {
+                text: numbered_text("o", 600),
+                truncated: false
+            }),
+            "the line count stays exact with a full history"
+        );
+    }
+
+    #[rstest::rstest]
+    fn output_longer_than_the_history_is_truncated() {
+        // Given fish at its prompt.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(FISH_PROMPT);
+
+        // When a command prints 20,000 lines in one read.
+        let run = [
+            fish_start("seq", "seq").as_slice(),
+            &numbered("o", 20_000),
+            b"\x1b]133;D;0\x1b\\",
+        ]
+        .concat();
+        emulator.feed(&run);
+
+        // Then its output's start is gone.
+        assert_eq!(
+            last_output(&emulator).map(|lines| lines.truncated),
+            Some(true),
+            "output past the history says it was cut"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typing_after_the_input_mark_moves_the_cursor() {
+        // Given fish at its prompt.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(FISH_PROMPT);
+
+        // When text is typed on its command line.
+        emulator.feed(b"ls");
+
+        // Then the cursor is no longer where typing started.
+        let shell = emulator.shell();
+        assert!(
+            matches!(shell.phase, ShellPhase::AtPrompt { input_at: Some(at) } if at != shell.cursor),
+            "typed text sits between the input mark and the cursor: {shell:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn lines_past_the_screen_are_cut_off() {
+        // Given three lines on the screen.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"a\r\nb\r\nc");
+
+        // When reading lines 1 to 100.
+        let lines = emulator.text_between(1, 100);
+
+        // Then only the lines there are come back.
+        assert_eq!(
+            lines,
+            Lines {
+                text: "b\nc".to_owned(),
+                truncated: false
+            },
+            "lines below the screen don't exist yet"
+        );
+    }
+
+    #[rstest::rstest]
+    fn lines_gone_from_the_history_are_truncated() {
+        // Given ten lines, the first six in the history, then the history
+        // cleared.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(&numbered("l", 10));
+        emulator.feed(b"\x1b[3J");
+
+        // When reading lines 0 to 10.
+        let lines = emulator.text_between(0, 10);
+
+        // Then the lines still on screen come back, marked truncated.
+        assert_eq!(
+            lines,
+            Lines {
+                text: "l6\nl7\nl8\nl9".to_owned(),
+                truncated: true
+            },
+            "cleared lines are gone, the rest keep their numbers"
+        );
+    }
+
+    #[rstest::rstest]
+    fn lines_on_the_alternate_screen_are_unreadable() {
+        // Given a line, then a switch to the alternate screen.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(b"a\r\n\x1b[?1049h");
+
+        // When reading line 0.
+        let lines = emulator.text_between(0, 1);
+
+        // Then nothing comes back, marked truncated.
+        assert_eq!(
+            lines,
+            Lines {
+                text: String::new(),
+                truncated: true
+            },
+            "the main screen can't be read while another shows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn growing_the_screen_keeps_line_numbers() {
+        // Given ten lines on a 5-row screen, six of them in the history.
+        let (mut emulator, _, _) = emulator();
+        emulator.feed(&numbered("l", 10));
+
+        // When the screen grows to 8 rows, pulling lines back from the
+        // history.
+        emulator.resize(PaneSize {
+            cols: 20,
+            rows: 8,
+            cell: CellSize::default(),
+        });
+
+        // Then line 3 still holds `l3`.
+        assert_eq!(
+            emulator.text_between(3, 4).text,
+            "l3",
+            "a resize doesn't renumber lines"
         );
     }
 }

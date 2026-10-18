@@ -131,8 +131,8 @@ pub fn exchanges(path: &Path) -> io::Result<(u64, Vec<Exchange>)> {
 }
 
 /// The exchanges after one message entry: a prompt opens one, an assistant
-/// message adds its tool calls and its last text to the latest. Other roles
-/// change nothing.
+/// message adds its tool calls and its last text to the latest, and marks it
+/// failed when its model call failed. Other roles change nothing.
 fn next_exchange(mut exchanges: Vec<Exchange>, entry: &Value) -> Vec<Exchange> {
     let time = timestamp(entry).map(SystemTime::from);
     match role(entry) {
@@ -151,11 +151,13 @@ fn next_exchange(mut exchanges: Vec<Exchange>, entry: &Value) -> Vec<Exchange> {
             let Some(exchange) = exchanges.last_mut() else {
                 return exchanges;
             };
+            let mut has_text = false;
             for block in blocks(entry) {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(text) = text_field(block, "text") {
                             exchange.reply = Some((text, time));
+                            has_text = true;
                         }
                     }
                     Some("toolCall") => {
@@ -169,14 +171,16 @@ fn next_exchange(mut exchanges: Vec<Exchange>, entry: &Value) -> Vec<Exchange> {
                     _ => {}
                 }
             }
+            exchange.end_entry(failure(entry), has_text);
         }
         _ => {}
     }
     exchanges
 }
 
-/// Reads the prompts and pi's text blocks added to the session file since
-/// `offset`, each with where its line sits and which prompt it answers.
+/// Reads the prompts, pi's text blocks and its failed model calls added to
+/// the session file since `offset`, each with where its line sits and which
+/// prompt it answers.
 ///
 /// `prompt_offset` is the prompt the previous read ended under. A replaced
 /// file is read from the start, and its prompt offset starts at 0.
@@ -219,12 +223,17 @@ pub fn messages(path: &Path, offset: u64, prompt_offset: u64) -> io::Result<Mess
                     });
                 }
             }
-            Some("assistant") => messages.extend(
-                blocks(&entry)
-                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|block| text_field(block, "text"))
-                    .map(|text| message(Role::Assistant, text)),
-            ),
+            Some("assistant") => {
+                messages.extend(
+                    blocks(&entry)
+                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                        .filter_map(|block| text_field(block, "text"))
+                        .map(|text| message(Role::Assistant, text)),
+                );
+                if let Some(error) = failure(&entry) {
+                    messages.push(message(Role::Failure, error));
+                }
+            }
             _ => {}
         }
     }
@@ -258,6 +267,16 @@ fn text_field(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+/// The error a failed assistant message holds: `errorMessage` when its
+/// `stopReason` is `error` (else "the model call failed"); `None` for any
+/// other entry.
+fn failure(entry: &Value) -> Option<String> {
+    let message = entry.get("message")?;
+    (message.get("stopReason").and_then(Value::as_str) == Some("error")).then(|| {
+        text_field(message, "errorMessage").unwrap_or_else(|| "the model call failed".to_owned())
+    })
 }
 
 /// The role of a message entry's message.
@@ -678,6 +697,83 @@ mod tests {
         assert!(
             read.restarted && found == [(prompt_at, prompt_at)],
             "a replaced file should be read from the start, got {found:?}"
+        );
+        Ok(())
+    }
+
+    /// An assistant message whose model call failed with `error`, holding
+    /// only a thinking block, as pi writes it.
+    fn errored(error: &str) -> String {
+        json!({
+            "type": "message",
+            "timestamp": "2026-10-04T01:24:25.463Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "Let me look"}],
+                "stopReason": "error",
+                "errorMessage": error,
+            },
+        })
+        .to_string()
+    }
+
+    #[rstest::rstest]
+    fn pi_error_stop_is_a_failure_message() -> io::Result<()> {
+        // Given a prompt answered by a failed model call.
+        let dir = tempdir()?;
+        let path = write_session(
+            dir.path(),
+            &[
+                HEADER.to_owned(),
+                prompt("Fix the parser"),
+                errored("402 insufficient_balance_error"),
+            ],
+        )?;
+
+        // When reading the messages.
+        let read = messages(&path, 0, 0)?;
+
+        // Then the failed call is one failure holding pi's error.
+        let found: Vec<_> = read
+            .messages
+            .iter()
+            .map(|message| (message.role, message.text.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Role::User, "Fix the parser"),
+                (Role::Failure, "402 insufficient_balance_error"),
+            ],
+            "a stopReason of error should read as a failure"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pi_exchange_ending_in_an_error_carries_the_failure() -> io::Result<()> {
+        // Given a prompt answered by a failed model call.
+        let dir = tempdir()?;
+        let path = write_session(
+            dir.path(),
+            &[
+                HEADER.to_owned(),
+                prompt("Fix the parser"),
+                errored("Codex error: The usage limit has been reached"),
+            ],
+        )?;
+
+        // When reading the exchanges.
+        let (_, exchanges) = exchanges(&path)?;
+
+        // Then the exchange carries pi's error.
+        assert_eq!(
+            exchanges
+                .iter()
+                .map(|exchange| exchange.failure.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Codex error: The usage limit has been reached")],
+            "the exchange should end in the failure"
         );
         Ok(())
     }

@@ -62,6 +62,19 @@ pub struct Exchange {
     pub tools: Vec<(String, usize)>,
     /// The reply's last text block in the exchange and when it was written.
     pub reply: Option<(String, Option<SystemTime>)>,
+    /// The error the exchange ended in, when its last assistant entry was a
+    /// failed model call; a later text block clears it.
+    pub failure: Option<String>,
+}
+
+impl Exchange {
+    /// Ends one assistant entry: a failed model call marks the exchange as
+    /// failed, and an entry that wrote text clears an earlier failure.
+    pub fn end_entry(&mut self, failed: Option<String>, wrote_text: bool) {
+        if failed.is_some() || wrote_text {
+            self.failure = failed;
+        }
+    }
 }
 
 /// Who wrote a message.
@@ -71,9 +84,12 @@ pub enum Role {
     User,
     /// A text block of the reply.
     Assistant,
+    /// A model call that failed, with the harness's error text.
+    Failure,
 }
 
-/// A prompt the user typed, or one text block of the reply.
+/// A prompt the user typed, one text block of the reply, or a failed model
+/// call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     /// Who wrote it.

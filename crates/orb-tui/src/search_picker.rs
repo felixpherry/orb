@@ -235,7 +235,7 @@ fn exchange_lines(
             }
             lines.push(match role {
                 Role::User => speaker("", "You", CYAN, None, now, width),
-                Role::Assistant => reply_speaker(info, None, now, width),
+                Role::Assistant | Role::Failure => reply_speaker(info, None, now, width),
             });
             last = Some(*role);
         }
