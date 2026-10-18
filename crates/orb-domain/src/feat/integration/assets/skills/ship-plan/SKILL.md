@@ -1,7 +1,7 @@
 ---
 name: ship-plan
 user-invocable: false
-description: Takes an approved plan from implementation to an open pull request with nobody watching. Runs the chosen task loop on autopilot, checks the work against the plan, simplifies it, reviews it from several angles, fixes what the checks find, opens a PR, gets its CI green, and reports back to whoever started it. Never merges. Use when approve-plan or hand-off hands over a plan to finish unattended, or when the user says "ship this plan".
+description: Takes an approved plan from implementation to an open pull request with nobody watching. Runs the chosen task loop on autopilot, checks the work against the plan, simplifies it, reviews it from several angles, has a falsifier argue against each finding, fixes what survives, opens a PR, gets its CI green, and reports back to whoever started it. Never merges. Use when approve-plan or hand-off hands over a plan to finish unattended, or when the user says "ship this plan".
 argument-hint: "<absolute path to .plans/task> <micro|simple|phased> [report-to <orb pane id>]"
 ---
 
@@ -35,20 +35,21 @@ Run the steps in order. Each step names the skill it uses, so changing this list
     - interrogate, so four reviewers check it from different angles;
     - check-blast-radius on the branch's diff.
 
-    Merge their reports and drop duplicates. Then one helper fixes every finding that is real and would block a PR: interrogate's **Act on**, a blast-radius risk it confirmed, a broken standard. Keep the rest for the PR.
-5.  **Verify.** A helper runs `check` and `test`, then lints and formats the files that changed, and fixes until everything passes.
-6.  **One more review round.** If step 4 led to fixes, run step 4 again on just those fixes, then step 5. After this round, stop fixing and carry what's left to the PR.
-7.  **Tidy the branch.** A helper runs make-pr-easy-to-review before anything is pushed: it squashes noise into clean commits and writes the PR description (see below) to a file.
-8.  **Open the PR.** A helper pushes the branch and opens the PR with that description, using the repo's own PR skill if it has one, else `gh pr create`. It returns the link.
-9.  **Babysit CI.** A helper runs babysit with `ci-only` on the new PR: it fixes failing checks and merge conflicts, then stops. It never waits for reviewers.
-10. **Report back.** You do this one.
+    Merge their reports and drop duplicates. The must-fix findings are interrogate's **Act on**, a blast-radius risk it confirmed, and a broken standard. Keep the rest for the PR.
+5.  **Falsify.** A helper runs falsify on the must-fix findings, with the plan folder and the branch's diff. Then one helper does what it ruled: cut, narrow, fix or revert. Its leave-open and dismissed lines go to the PR.
+6.  **Verify.** A helper runs `check` and `test`, then lints and formats the files that changed, and fixes until everything passes.
+7.  **One more round.** If step 5 changed code, run steps 3 to 6 again on just those changes. In this round falsify also rules on bugs the first round's changes caused. After this round, stop fixing and carry what's left to the PR.
+8.  **Tidy the branch.** A helper runs make-pr-easy-to-review before anything is pushed: it squashes noise into clean commits and writes the PR description (see below) to a file.
+9.  **Open the PR.** A helper pushes the branch and opens the PR with that description, using the repo's own PR skill if it has one, else `gh pr create`. It returns the link.
+10. **Babysit CI.** A helper runs babysit with `ci-only` on the new PR: it fixes failing checks and merge conflicts, then stops. It never waits for reviewers.
+11. **Report back.** You do this one.
 
 ## The PR description
 
 Put these at the top, before the repo's usual template:
 
 - **Divergences:** every place the build differs from the plan, and why, from the divergence notes in `plan.md`.
-- **Open findings:** review findings you didn't fix, one line each, with who raised them.
+- **Open findings:** review findings you didn't fix, one line each, with who raised them and falsify's reason for leaving them.
 - **How to try it:** the commands to run or the pages to open.
 
 ## Report back

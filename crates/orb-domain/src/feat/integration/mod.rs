@@ -643,8 +643,8 @@ mod tests {
         assert_eq!(
             skill_lines,
             [
-                "wrote 18 skills to ~/.claude/skills",
-                "wrote 18 skills to ~/.agents/skills"
+                "wrote 19 skills to ~/.claude/skills",
+                "wrote 19 skills to ~/.agents/skills"
             ],
             "the output should have one line per skills folder"
         );

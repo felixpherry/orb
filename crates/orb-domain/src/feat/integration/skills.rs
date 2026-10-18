@@ -38,6 +38,10 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         include_str!("assets/skills/deslop/SKILL.md"),
     ),
     (
+        "falsify/SKILL.md",
+        include_str!("assets/skills/falsify/SKILL.md"),
+    ),
+    (
         "fix-ci/SKILL.md",
         include_str!("assets/skills/fix-ci/SKILL.md"),
     ),
