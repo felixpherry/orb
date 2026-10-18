@@ -94,8 +94,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `orb agent prompt` reaches a Claude agent whose last turn failed, instead of saying there is no agent.
 - `orb agent start --pane` refuses with `busy` while a program such as vim runs in the pane, unless `--force`.
 - orb's log no longer writes agent names from a refused settle.
-- `orb pane wait --text` no longer matches the command line orb typed, only what the pane printed. In fish the prompt marks show which lines are command lines. Everywhere, a line that is one of the pane's last five typed lines, alone or after a prompt, is skipped too, so a line typed into python doesn't match. The shell's current prompt still matches, so `--text '~>'` waits for fish to be back.
-- `orb pane run --wait` on a line fish took but didn't run, a rejected line it kept or an unfinished one it waits on, fails with `not_run` naming why, and presses ctrl+c to clear it, so the next run starts clean. Only a prompt still being drawn, or a shell never seen marking a command start, keeps "it may still run"; orb checks once more just before the ctrl+c and waits on the command instead if it started.
+- `orb pane wait --text` in fish no longer matches the command line, only what the pane printed: the prompt marks show which lines are command lines. The shell's current prompt still matches, so `--text '~>'` waits for fish to be back. In other shells and in programs like python nothing is skipped, so wait for text only the output prints, or use `orb pane type --enter --read`.
+- `orb pane run --wait` on a line fish took but didn't run, a rejected line it kept or an unfinished one it waits on, fails with `not_run` naming why. orb presses nothing; the hint says to clear the line with `orb pane keys <pane> ctrl+c`. A prompt still being drawn, or a shell never seen marking a command start, keeps "it may still run", and its hint says to read the pane and press ctrl+c only if the line still sits at the prompt.
 - `orb agent wait` after a turn that failed on a model call fails with `turn_failed` and the error text, instead of `idle`.
 
 ## [0.1.0] - 2026-10-16

@@ -30,7 +30,6 @@ use crate::feat::control::protocol::{
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::turns::{self, Prompts, Turns};
-use crate::feat::control::typed_lines::TypedLines;
 use crate::feat::control::validator;
 use crate::feat::control::{agent_ops, pane_ops};
 use crate::feat::harness::Harnesses;
@@ -66,9 +65,6 @@ pub struct ControlDeps {
     /// What orb last pasted into each pane's agent; only the control server
     /// reads or writes it.
     pub prompts: Prompts,
-    /// The command lines orb last typed into each pane; only the control
-    /// server reads or writes it.
-    pub typed: TypedLines,
 }
 
 impl ControlDeps {
@@ -322,8 +318,7 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             }));
         }
         Ok(Action::PaneWait(ask)) => {
-            let typed = deps.typed.recent(ask.pane);
-            return pane_ops::wait_for(&deps.panes, &ask, &typed, gone, PaneTiming::REAL);
+            return pane_ops::wait_for(&deps.panes, &ask, gone, PaneTiming::REAL);
         }
         Ok(Action::Get { pane, detail }) => return agent_ops::get(deps.turns(), pane, detail),
         Ok(Action::Wait { pane, timeout }) => {
@@ -341,18 +336,9 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
             Ok(_) => ended.reply(),
             Err(error) => Reply::err(error),
         },
-        Ok(Action::Pane(request)) => {
-            remember_typed(deps, &request);
-            pane_ops::typed(deps, request)
-        }
-        Ok(Action::TypeRead(ask)) => {
-            remember_typed(deps, &ask.request);
-            pane_ops::type_read(&deps.panes, ask, gone, PaneTiming::REAL)
-        }
-        Ok(Action::Run(ask)) => {
-            deps.typed.remember(ask.pane, &ask.command);
-            pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL)
-        }
+        Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
+        Ok(Action::TypeRead(ask)) => pane_ops::type_read(&deps.panes, ask, gone, PaneTiming::REAL),
+        Ok(Action::Run(ask)) => pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL),
         Ok(Action::StartAgent {
             at,
             kind,
@@ -368,19 +354,6 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     };
     deps.log.line("api", &log_text(request, &reply));
     reply
-}
-
-/// Remembers the line `request` types with Enter, so `pane wait` can tell
-/// its echo from output.
-fn remember_typed(deps: &ControlDeps, request: &PaneRequest) {
-    if let PaneRequest::Type {
-        pane,
-        text,
-        enter: true,
-    } = request
-    {
-        deps.typed.remember(*pane, text);
-    }
 }
 
 /// `<op> caller=<id> item=<id> pane=<id> session=<id> project=<id> ->
