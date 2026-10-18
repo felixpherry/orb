@@ -1,6 +1,6 @@
-//! The command lines orb last typed into each pane, so `pane wait` in a shell
-//! that sends no prompt marks can tell the echoed command line from the
-//! output printed after it.
+//! The command lines orb last typed into each pane, so `pane wait` can tell
+//! a line echoed back, by a shell that sends no prompt marks or by a program
+//! such as a REPL, from the output printed after it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -42,14 +42,21 @@ impl TypedLines {
     }
 }
 
-/// Whether `line` is the echo of one of the command lines in `typed`: it
-/// ends with one, after other text such as the prompt. A line that is only
-/// the command may be real output, so it isn't one.
+/// The characters a prompt may end with, before the typed command.
+const PROMPT_ENDS: &[char] = &['>', '$', '#', '%', ':', ')', ']'];
+
+/// Whether `line` is the echo of one of the command lines in `typed`: it is
+/// the command, or ends with it after a prompt, text that ends with a blank
+/// or one of [`PROMPT_ENDS`]. A line ending with the command in the middle
+/// of a word (`Ready` after typing `y`) is output.
 pub(crate) fn echoed(line: &str, typed: &[String]) -> bool {
-    let line = line.trim_end();
-    typed
-        .iter()
-        .any(|command| line.len() > command.len() && line.ends_with(command.as_str()))
+    let line = line.trim();
+    typed.iter().any(|command| {
+        line.strip_suffix(command.as_str()).is_some_and(|before| {
+            before.is_empty()
+                || before.ends_with(|end: char| end.is_whitespace() || PROMPT_ENDS.contains(&end))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -79,19 +86,34 @@ mod tests {
     #[rstest::rstest]
     #[case::after_a_prompt("$ sleep 3; echo ZEBRA42", true)]
     #[case::output_alone("ZEBRA42", false)]
-    #[case::command_alone("sleep 3; echo ZEBRA42", false)]
+    #[case::command_alone("sleep 3; echo ZEBRA42", true)]
     #[case::trailing_spaces("~> sleep 3; echo ZEBRA42   ", true)]
-    fn echoed_lines_end_with_a_typed_command_after_other_text(
-        #[case] line: &str,
-        #[case] expected: bool,
-    ) {
+    #[case::prompt_without_a_blank("~>sleep 3; echo ZEBRA42", true)]
+    #[case::after_other_words("ran sleep 3; echo ZEBRA42", true)]
+    fn echoed_lines_are_a_typed_command_after_a_prompt(#[case] line: &str, #[case] expected: bool) {
         // Given orb typed `sleep 3; echo ZEBRA42`.
         let typed = vec!["sleep 3; echo ZEBRA42".to_owned()];
 
         // When checking whether the line is its echo.
         let echo = echoed(line, &typed);
 
-        // Then only a line ending with it after other text is.
+        // Then only the command, or a line ending with it after a prompt,
+        // is.
         assert_eq!(echo, expected, "{line:?} echoed: {expected}");
+    }
+
+    #[rstest::rstest]
+    #[case::word_ending_in_a_typed_letter("Ready", "y")]
+    #[case::word_ending_in_a_typed_command("tools", "ls")]
+    fn a_word_ending_with_a_typed_command_is_output(#[case] line: &str, #[case] command: &str) {
+        // Given orb typed `command`.
+        let typed = vec![command.to_owned()];
+
+        // When checking whether a line whose last word ends with it is its
+        // echo.
+        let echo = echoed(line, &typed);
+
+        // Then it isn't: the command ends mid-word.
+        assert!(!echo, "{line:?} isn't the echo of {command:?}");
     }
 }

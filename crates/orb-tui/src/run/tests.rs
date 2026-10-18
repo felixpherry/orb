@@ -2835,14 +2835,15 @@ fn agent_output_request_leaves_out_the_command_lines() -> io::Result<()> {
         |answer| matches!(answer, PaneAnswer::Output(output) if output.text.contains("hi")),
     )?;
 
-    // Then it holds the printed lines, not the command line or the prompt.
+    // Then it holds the printed lines and the new prompt, not the command
+    // line.
     let text = match answer {
         Some(PaneAnswer::Output(output)) => Some(output.text),
         _ => None,
     };
     assert_eq!(
         text.as_deref(),
-        Some("before\nhi"),
+        Some("before\nhi\n$"),
         "the command line's rows are left out"
     );
     Ok(())

@@ -124,8 +124,9 @@ const FULL_FLAG: Param = word(
 /// `--read` on `pane type` and `pane keys`.
 const READ_FLAG: Param = word(
     "--read",
-    "then print the screen's last lines once it stays the same for 300 ms; a screen that \
-     keeps changing (top, a spinner) is printed at the timeout",
+    "then print the screen's last lines once it has changed and stays the same for 300 ms; \
+     a screen that keeps changing (top, a spinner) or shows nothing new is printed at the \
+     timeout",
 );
 
 /// `--tail <n>` with `--read`.
@@ -496,7 +497,8 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         verb: "keys",
         usage: "orb pane keys <pane> <key>... [--read [--tail <n>] [--timeout <ms>]] [--json]",
         summary: "Press named keys in a pane, in order; an unknown name sends nothing. With \
-                  --read, print the screen's last lines once it has stayed the same for 300 ms.",
+                  --read, print the screen's last lines once it has changed and stayed the same \
+                  for 300 ms.",
         params: &[
             PANE,
             Param {
@@ -527,8 +529,8 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         usage: "orb pane type <pane> <text> [--enter] [--read [--tail <n>] [--timeout <ms>]] [--json]",
         summary: "Type text into a pane key by key: no paste, and no Enter unless --enter; \
                   control characters are left out. With --read, print the screen's last lines \
-                  once it has stayed the same for 300 ms, so one call types a line into a REPL \
-                  and shows its answer.",
+                  once it has changed and stayed the same for 300 ms, so one call types a line \
+                  into a REPL and shows its answer.",
         params: &[
             PANE,
             word(
@@ -642,8 +644,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         usage: "orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]",
         summary: "Wait until a line of a pane's screen or recent history holds the text or matches \
                   the pattern, and print that line. Text already on screen counts, so wait for \
-                  text only the new output prints. A command line the shell echoed never \
-                  matches, only what was printed around it.",
+                  text only the new output prints. A command line the shell echoed, or a line orb \
+                  typed into a REPL, doesn't match; the shell's current prompt does, so --text \
+                  '~>' waits for fish to be back at its prompt.",
         params: &[
             PANE,
             flag("--text", "<text>", None, "text a line must hold"),

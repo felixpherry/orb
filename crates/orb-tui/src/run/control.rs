@@ -59,7 +59,6 @@ impl App {
             PaneRequest::Output { pane, lines } => self.live_pane(pane).map(|live| {
                 PaneAnswer::Output(PaneOutput {
                     text: live.output_text(lines),
-                    marked: live.shell().marks_seen,
                 })
             }),
             PaneRequest::Shell { pane } => {
@@ -146,6 +145,7 @@ fn shell_view(shell: orb_term::ShellState, held: bool) -> ShellView {
     };
     ShellView {
         marks_seen: shell.marks_seen,
+        starts_seen: shell.starts_seen,
         phase,
         last: shell.last.map(|last| Finished {
             program: last.program,

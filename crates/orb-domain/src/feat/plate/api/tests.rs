@@ -279,6 +279,44 @@ fn change_of_an_unknown_item_is_not_found(#[case] op: Op) {
 }
 
 #[rstest::rstest]
+fn change_of_an_unknown_item_points_at_the_list_with_done_items() {
+    // Given a plate holding only item 1.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::YourMove)]);
+
+    // When planning an update of item 9.
+    let hint = plan(&app, &update_op(9), None)
+        .err()
+        .and_then(|error| error.hint);
+
+    // Then the hint names the list that shows done items too.
+    assert!(
+        hint.as_deref()
+            .is_some_and(|hint| hint.contains("orb plate list --all")),
+        "a plain list hides done items, so the hint names --all, got {hint:?}"
+    );
+}
+
+#[rstest::rstest]
+fn update_of_a_done_item_points_at_the_list_with_done_items() {
+    // Given item 1, done.
+    let mut app = one_session();
+    app.plate = Plate::from_saved(vec![test_item(1, ItemState::Done)]);
+
+    // When planning an update of item 1.
+    let hint = plan(&app, &update_op(1), None)
+        .err()
+        .and_then(|error| error.hint);
+
+    // Then the hint names the list that shows it.
+    assert!(
+        hint.as_deref()
+            .is_some_and(|hint| hint.contains("orb plate list --all")),
+        "a done item shows only with --all, got {hint:?}"
+    );
+}
+
+#[rstest::rstest]
 fn update_of_a_done_item_is_a_bad_request() {
     // Given item 1, done.
     let mut app = one_session();

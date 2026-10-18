@@ -518,6 +518,7 @@ mod tests {
             let answer = match request {
                 PaneRequest::Shell { .. } => PaneAnswer::Shell(ShellView {
                     marks_seen: true,
+                    starts_seen: true,
                     phase: ShellPhase::Running {
                         program: Some(program.to_owned()),
                         started: 3,

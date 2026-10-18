@@ -51,7 +51,7 @@ use crate::encode::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::graphics::{GraphicsFrame, PaneGraphics};
 use crate::pane::{GraphicsSupport, PaneColors, PaneEvent, PaneSize};
 use crate::render::{cursor_style, render_term};
-use crate::shell::{Lines, ShellState, ShellTracker, Spot};
+use crate::shell::{Lines, ShellPhase, ShellState, ShellTracker, Spot};
 use crate::splitter::{Piece, Splitter};
 
 /// Lines of output a pane keeps above its screen.
@@ -716,9 +716,9 @@ impl Emulator {
 
     /// The screen's text as [`Emulator::text`] gives it, without the lines
     /// that hold the shell's command lines (see [`ShellTracker::command_lines`]),
-    /// so only what was printed around them is left. While the alternate
-    /// screen shows, or before the shell sent prompt marks, it is the whole
-    /// text.
+    /// so only what was printed around them is left. The current prompt's
+    /// text, left of where typing starts, stays. While the alternate screen
+    /// shows, or before the shell sent prompt marks, it is the whole text.
     pub(crate) fn output_text(&self, history: usize) -> String {
         if self.alt_screen() || !self.shell.marks_seen() {
             return self.text(history);
@@ -726,7 +726,12 @@ impl Emulator {
         let top = self.scrolled;
         let above = i64::try_from(history.min(self.term.history_size())).unwrap_or(0);
         let end = top + i64::try_from(self.term.screen_lines()).unwrap_or(1);
-        let mut skip = self.shell.command_lines(self.cursor_spot());
+        let shell = self.shell();
+        let prompt = match shell.phase {
+            ShellPhase::AtPrompt { input_at } => input_at,
+            _ => None,
+        };
+        let mut skip = self.shell.command_lines(shell.cursor);
         skip.sort_by_key(|lines| lines.start);
         let mut pieces = Vec::new();
         let mut from = top - above;
@@ -735,9 +740,35 @@ impl Emulator {
             if to > from {
                 pieces.push(self.text_between(from, to).text);
             }
+            let typing = prompt.filter(|at| at.line == lines.start && at.line >= from);
+            if let Some(text) = typing.map(|at| self.prompt_text(at))
+                && !text.is_empty()
+            {
+                pieces.push(text);
+            }
             from = from.max(lines.end);
         }
         pieces.join("\n").trim_end().to_owned()
+    }
+
+    /// The text of absolute line `at.line` left of column `at.column`, the
+    /// prompt before where typing starts, trailing blanks dropped; empty once
+    /// the line has left the history or lies below the screen.
+    fn prompt_text(&self, at: Spot) -> String {
+        let history = i64::try_from(self.term.history_size()).unwrap_or(0);
+        let screen = i64::try_from(self.term.screen_lines()).unwrap_or(0);
+        let row = at.line - self.scrolled;
+        match (i32::try_from(row), at.column.checked_sub(1)) {
+            (Ok(row), Some(last)) if (-history..screen).contains(&i64::from(row)) => self
+                .term
+                .bounds_to_string(
+                    Point::new(Line(row), Column(0)),
+                    Point::new(Line(row), Column(last)),
+                )
+                .trim_end()
+                .to_owned(),
+            _ => String::new(),
+        }
     }
 
     /// Grid rows `first..=last` as plain text: soft-wrapped rows joined into
@@ -2697,7 +2728,7 @@ mod tests {
         // not the command line.
         assert_eq!(
             emulator.output_text(0),
-            "ZEBRA",
+            "ZEBRA\n~>",
             "the echoed command line isn't output"
         );
     }
@@ -2712,12 +2743,64 @@ mod tests {
         // When `echo ZEBRA` is typed but not yet run.
         emulator.feed(b"echo ZEBRA");
 
-        // Then the output text holds only the line above the prompt.
+        // Then the output text holds the line above and the prompt, not
+        // the typed text.
         assert_eq!(
             emulator.output_text(0),
-            "before",
+            "before\n~>",
             "an unrun command line isn't output"
         );
+    }
+
+    #[rstest::rstest]
+    fn output_text_keeps_the_current_prompt() {
+        // Given a pane whose shell printed a line.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(b"before\r\n");
+
+        // When fish draws its prompt.
+        emulator.feed(FISH_PROMPT);
+
+        // Then the output text holds the prompt, so a wait for it matches.
+        assert_eq!(
+            emulator.output_text(0),
+            "before\n~>",
+            "the prompt left of where typing starts is output"
+        );
+    }
+
+    #[rstest::rstest]
+    fn output_text_leaves_out_an_old_prompt() {
+        // Given fish at its prompt.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(FISH_PROMPT);
+
+        // When it starts `sleep 9`, which prints nothing yet.
+        emulator.feed(&fish_start("sleep 9", "sleep%209"));
+
+        // Then the output text is empty: the prompt the command was typed at
+        // is part of its command line.
+        assert_eq!(
+            emulator.output_text(0),
+            "",
+            "only the current prompt counts as output"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_text_below_the_screen_is_empty() {
+        // Given a pane ten lines tall showing a prompt.
+        let mut emulator = emulator_of(40, 10);
+        emulator.feed(FISH_PROMPT);
+
+        // When the prompt's text is read at a line past the screen's bottom.
+        let text = emulator.prompt_text(Spot {
+            line: emulator.scrolled + 10,
+            column: 3,
+        });
+
+        // Then it is empty rather than a read off the grid.
+        assert_eq!(text, "", "a line below the screen has no prompt text");
     }
 
     #[rstest::rstest]

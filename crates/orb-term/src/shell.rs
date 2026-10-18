@@ -56,6 +56,9 @@ pub struct Finished {
 pub struct ShellState {
     /// Whether the shell sent any prompt mark.
     pub marks_seen: bool,
+    /// Whether the shell sent any command start mark: until it has, a
+    /// command it runs may look like text left on the command line.
+    pub starts_seen: bool,
     pub phase: ShellPhase,
     /// The last command that ended.
     pub last: Option<Finished>,
@@ -79,6 +82,8 @@ pub(crate) struct ShellTracker {
     phase: ShellPhase,
     last: Option<Finished>,
     seq: u64,
+    /// Whether a command start mark arrived.
+    starts_seen: bool,
     /// The absolute lines of the newest command lines the shell ran, oldest
     /// first: from the line typing started on to the line its output starts.
     commands: VecDeque<Range<i64>>,
@@ -101,6 +106,7 @@ impl ShellTracker {
                 input_at: Some(cursor),
             },
             Mark::CommandStart { program } => {
+                self.starts_seen = true;
                 let start_line = line_from(cursor);
                 if let ShellPhase::AtPrompt {
                     input_at: Some(input),
@@ -161,6 +167,7 @@ impl ShellTracker {
     pub(crate) fn snapshot(&self, cursor: Spot) -> ShellState {
         ShellState {
             marks_seen: self.marks_seen(),
+            starts_seen: self.starts_seen,
             phase: self.phase.clone(),
             last: self.last.clone(),
             seq: self.seq,
@@ -379,6 +386,38 @@ mod tests {
             (lines.len(), lines.first().cloned()),
             (16, Some(8..9)),
             "older command lines drop out"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_marks_alone_leave_starts_unseen() {
+        // Given a shell that sent nothing yet.
+        let mut shell = ShellTracker::default();
+
+        // When it sends a prompt start and an input start.
+        shell.mark(&Mark::PromptStart, spot(0, 0));
+        shell.mark(&Mark::InputStart, spot(0, 2));
+
+        // Then no command start was seen.
+        assert!(
+            !shell.snapshot(spot(0, 2)).starts_seen,
+            "a shell that only marks its prompt hasn't shown a command start"
+        );
+    }
+
+    #[rstest::rstest]
+    fn command_start_marks_starts_as_seen() {
+        // Given a shell at its prompt.
+        let mut shell = ShellTracker::default();
+        shell.mark(&Mark::InputStart, spot(0, 2));
+
+        // When a command starts.
+        shell.mark(&start("ls"), spot(1, 0));
+
+        // Then a command start was seen.
+        assert!(
+            shell.snapshot(spot(1, 0)).starts_seen,
+            "a command start mark shows the shell sends them"
         );
     }
 

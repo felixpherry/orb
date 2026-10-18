@@ -78,6 +78,9 @@ pub enum PaneRequest {
 pub struct ShellView {
     /// Whether the shell sent any prompt mark.
     pub marks_seen: bool,
+    /// Whether the shell sent any command start mark: until it has, a
+    /// running command may look like text left on the command line.
+    pub starts_seen: bool,
     pub phase: ShellPhase,
     /// The last command that ended.
     pub last: Option<Finished>,
@@ -127,12 +130,11 @@ pub struct PaneLines {
     pub truncated: bool,
 }
 
-/// A pane's screen text without its command lines, and whether its shell
-/// sent prompt marks, so the command lines were known.
+/// A pane's screen text without the command lines its shell's prompt marks
+/// showed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneOutput {
     pub text: String,
-    pub marked: bool,
 }
 
 /// The loop's answer to one request.

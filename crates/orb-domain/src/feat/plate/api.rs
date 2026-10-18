@@ -14,7 +14,7 @@ use crate::feat::control::protocol::{
 };
 use crate::feat::control::server::ControlDeps;
 use crate::feat::control::target::{self, Target};
-use crate::feat::plate::validator;
+use crate::feat::plate::validator::{self, DONE_ITEM_HINT, UNKNOWN_ITEM_HINT};
 use crate::feat::plate::{ItemState, NewPlateItem, PlateChange, PlateItem, Verb};
 use crate::feat::sessions::sessions_actor::{
     ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError,
@@ -172,8 +172,8 @@ fn refused<M>(error: SendError<M, Report<PlateApiError>>) -> ApiError {
         return ApiError::failed(error.to_string());
     };
     let (code, hint) = match report.current_context() {
-        PlateApiError::NotFound => (ErrorCode::NotFound, "orb plate list shows the items"),
-        PlateApiError::Done => (ErrorCode::BadRequest, "orb plate list shows the open items"),
+        PlateApiError::NotFound => (ErrorCode::NotFound, UNKNOWN_ITEM_HINT),
+        PlateApiError::Done => (ErrorCode::BadRequest, DONE_ITEM_HINT),
         PlateApiError::Unsaved => (ErrorCode::Failed, SEE_LOG),
     };
     let reason = report
