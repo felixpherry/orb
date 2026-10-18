@@ -1,24 +1,27 @@
 ---
 name: orb
-description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply; start a new session, or colonists from a colony. Use when the user mentions orb, asks to split a pane or run something in another pane, asks you to start, prompt, wait on or collect work from another agent, or asks you to spawn colonists, or to add, update or close an item on the user's plate (`orb plate`). Works only inside an orb pane (ORB_PANE_ID set).
+description: Drive orb, the terminal multiplexer you run in. List sessions, panes and agents; split or stack a pane; run a command in a pane and read its screen, wait for a command to finish, type into programs like vim; start another Claude or pi agent in a pane, prompt it, wait for it and read its reply; start a new session, or colonists from a colony. Use when the user mentions orb, asks to split a pane or run something in another pane, asks you to start, prompt, wait on or collect work from another agent, or asks you to spawn colonists, or to add, update or close an item on the user's plate (`orb plate`). Works only inside an orb pane (ORB_PANE_ID set).
 ---
 
 # orb
 
 - **You run in a pane of orb,** a terminal multiplexer for coding agents.
-- **The `orb` command talks to the running orb.** One command sends one request and prints one JSON reply.
+- **The `orb` command talks to the running orb.** One command sends one request and prints one reply.
+- **`orb help` is the command reference.** This skill gives the rules and the recipes.
 
 ## First, check you're inside orb
 
 - **Run `echo "$ORB_PANE_ID"`.** If it prints nothing, tell the user you're not running inside an orb pane, so you can't control orb, and stop.
 - **Any command that fails with `not_running`** ("orb is not running") means no orb answers. Say so and stop.
+- **Bare `orb` prints where you are:** your pane, tab and session.
 
 ## How commands answer
 
-- **Success:** exit 0, the result as JSON on stdout. A change with nothing to report prints `{}`.
-- **Refused:** exit 1, `{"code": "...", "message": "..."}` on stderr. Read the code (see "When orb says no").
-- **Typed wrong:** exit 2 and the usage on stderr. Check your command against "Commands" below.
-- **IDs are numbers,** plate item IDs too. A `[<pane>]` or `[<session>]` left out means your own pane or session.
+- **Exit 0: done.** Data comes as JSON on stdout. `pane read`, `pane run --wait`, `pane wait`, `agent prompt --wait` and `agent reply` print plain text; add `--json` to get JSON. A change with nothing to report prints `{}`.
+- **Exit 1: refused.** `{"code", "message", "hint"}` on stderr. **Do what the hint says;** it names the command that fixes it.
+- **Exit 2: typed wrong.** One line names the bad word, then come the command's usage line and its help command. Run that help.
+- **IDs are numbers,** plate item IDs too. A `[<pane>]` or `[<session>]` left out means your own.
+- **Lists show open sessions and live agents.** `hidden` says how many they left out; `--all` shows them.
 
 ## Rules
 
@@ -28,74 +31,95 @@ description: Drive orb, the terminal multiplexer you run in. List sessions, pane
 - **Don't close the last pane of the session the user is looking at.** orb opens a fresh shell there and moves the user's keys into it.
 - **Settled sessions are read-only.** The lists, `agent get` and `agent reply` still work; everything else is refused. Don't try to un-settle one; that's the user's call.
 - **There is no delete or quit.** orb can't delete a session or worktree, remove a project or quit through these commands. Don't look for a way.
+- **Wait, don't poll.** Use `--wait`, `orb pane wait` or `orb agent wait`. Never loop on sleep and read.
+- **Don't `--force` into a program you didn't start.** `busy` means a program runs in that pane; quit it with `orb pane keys` or ask the user.
 
-## Look around
-
-```sh
-orb pane list               # {"panes": [...]}, your session
-orb tab list                # {"session": 3, "tabs": [{"index": 1, "panes": [10, 11]}]}
-orb session list            # {"sessions": [...]}, all of orb
-orb agent list              # {"agents": [...]}, all of orb
-orb agent get <pane>        # one agent row
-```
-
-- **`pane list` and `tab list` cover one session,** yours unless you add `--session <id>`. `session list` and `agent list` cover all of orb, settled sessions included.
-- **A pane row has** `id, session, tab, float, name, cwd, agent, caller`. Your own pane has `"caller": true`. `agent` is the agent ID live in it, or null.
-- **Tabs count from 1,** as the tab bar does. A floating pane has `"tab": null` and `"float": true`.
-- **An agent row has** `id, pane, session, harness, name, title, status, cwd, branch`. `title` is the agent's own title once it has one. `status` is one of `unknown, working, needs_approval, needs_input, idle, failed, stopped, gone`.
-- **A session row has** `id, project, name, dir, branch, settled`.
-
-## Run a command in another pane
+## Run a command and get its result
 
 ```sh
-orb pane split --direction right        # {"pane": 12}
-orb pane run 12 "just test"
-orb pane read 12 --lines 200            # {"text": "..."}
+orb pane split --direction right --name tests   # {"pane": 12}
+orb pane run 12 "just test" --wait              # its output, then [exit 0]
 ```
 
-- **`split` puts a new shell beside a pane** (yours by default), `right` or `down`. `orb pane stack [<pane>]` stacks one with it, `orb pane float` adds a floating one, `orb tab create` adds a tab. All reply `{"pane": N}` and leave the user's keys alone.
-- **`run` types the line and Enter.** A pane that hasn't drawn yet gets it once it does, so no sleep is needed after `split`.
-- **`read` is a snapshot.** `--lines 0` (the default) is the screen only; `--lines N` adds up to N lines of history above it. There's no "wait until output": poll `read` a few seconds apart.
-- **`send` pastes text without Enter; `keys` presses named keys,** e.g. `orb pane keys 12 ctrl+c`. Key names: `enter esc tab backspace up down left right home end pageup pagedown`, `ctrl+<a-z>`, `alt+<a-z>`, `shift+tab`, any case. An unknown name sends nothing.
-- **Text for `send` and `run` is one quoted argument,** taken as is even when it starts with `-`. Don't put `--` before it: only `agent start` and `agent prompt` accept `--`.
+- **`--wait` prints the output's last 200 lines, then `[exit n]`.** `--tail <n>` keeps a different number. `--timeout <ms>` caps the call.
+- **`busy`: a program already runs in the pane,** named in the message. **`not_run`: the shell didn't run the line,** for example a syntax error; fix it.
+- **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen is quiet for 1 s and prints `[exit ?]`, and `busy` is never checked.
+- **Without `--wait`, `run` types the line and Enter and replies `{}`.** A pane not drawn yet gets it once it draws, so no sleep is needed after `split`.
+- **The command is one quoted word,** with `--` before it if it starts with `--`.
 
-## Start another agent
+## A server in a named tab
 
 ```sh
-orb pane split --direction right                          # {"pane": 12}
-orb agent start --kind claude --pane 12 --name reviewer   # {"pane": 12, "agent": 40, "harness": "claude", "status": "idle"}
-orb agent start --kind pi --pane 13 -- --model sonnet     # words after -- go to pi
+orb tab create --name server --run "just run"            # {"pane": 14}
+orb pane wait 14 --text "listening on" --timeout 60000   # the first matching line
+orb pane read 14 --tail 40                               # the screen's last 40 lines
 ```
 
-- **It types `claude` or `pi` into a shell pane** and replies once orb sees the agent running (up to 30 s). Words after `--` are typed after the program, each quoted. `--name` names the pane. Always pass `--pane`: left out, it means your own pane, where you already run.
-- **`pane_busy`:** an agent already runs there. Split a new pane.
-- **`timeout`:** orb never saw it start. Either `orb integration install` hasn't run, or Claude is asking whether to trust a new folder. `orb pane read` the pane to see which, and tell the user.
+- **`--name`, `--run` and `--cwd` work on `tab create`, `pane split`, `pane stack` and `pane float`.** None of them moves the user's keys.
+- **`pane wait` counts text already on screen.** So wait for text only the new output prints. `--regex` takes a pattern instead.
+- **`pane read` is a snapshot.** `--lines <n>` adds history above the screen; `--head <n>` and `--tail <n>` keep the first or last lines.
+
+## A helper agent
+
+```sh
+orb agent start --kind claude --split right --name reviewer   # {"pane": 15, "agent": 41, "harness": "claude", "status": "idle"}
+orb agent prompt 15 "Review the diff on this branch and list bugs." --wait   # the answer
+orb agent start --kind pi --split down -- --model sonnet      # words after -- go to pi
+```
+
+- **`--split right|down` or `--tab` makes its pane.** `--pane <id>` uses a shell pane you already have. Leave all three out and it means your own pane, where you already run.
+- **`prompt --wait` prints what the agent wrote since your prompt.** `--timeout <ms>` caps the call. `agent_blocked`: it stopped to ask the user; tell them. `turn_failed`: its model call failed and the message is the error; tell the user.
+- **Prompt an agent that is idle.** Sent mid-turn, your prompt may be folded into the turn already running, so `--wait` ends with that turn. `orb agent reply` still gives everything written since your prompt. If the answer doesn't cover your prompt, `orb agent wait` and read the reply again.
+- **The prompt is one quoted word.** If it starts with `-`, put the flags first and `--` before it: `orb agent prompt 15 --wait -- "--force is broken"`.
+- **`timeout` on start:** orb never saw it start: either `orb integration install` hasn't run, or Claude is asking whether to trust a new folder. `orb pane read` the pane to see which, and tell the user.
 - **The agent is named by its pane.** Use the pane ID for every `agent` command.
 
-## Give it work and collect the answer
+## Fan out
 
 ```sh
-orb agent prompt 12 "Review the diff on this branch and list bugs." --wait   # {"status": "idle"}
-orb agent reply 12                                                           # {"text": "...", "at": 1760000000000}
+orb agent prompt 15 "Check the API docs."   # {"submitted": true}
+orb agent prompt 16 "Check the tests."
+orb agent wait 15 --timeout 600000          # {"status": "idle"}
+orb agent reply 15
 ```
 
-- **`--wait` returns when the turn ends** (`"idle"`) or the agent stops to ask the user (`"blocked"`). Add `--timeout <ms>` (only with `--wait`) to cap the whole call. No timeout waits as long as work goes on.
-- **The reply comes from the transcript:** the last text the agent wrote in its last finished turn. It's not cut or wrapped like the screen. `at` is unix milliseconds, or null.
-- **The prompt is one quoted argument.** If it starts with `-`, put the flags first and `--` before it: `orb agent prompt 12 --wait -- "--force is broken"`.
-- **Prompting a busy agent queues the text.** `--wait` then returns at the end of the turn already running, so `orb agent wait 12` again before reading the reply.
-- **Fan out:** start several agents, prompt each without `--wait` (replies `{"submitted": true}`), then `orb agent wait <pane> [--timeout <ms>]` and `orb agent reply <pane>` for each.
-- **`orb agent get <pane>`** shows the agent's status and title any time.
+- **They work at the same time.** Wait on each in turn, then read its reply.
+- **A prompt orb sent under 5 s ago counts as work,** so `agent wait` right after it waits for the turn to start.
+
+## Programs like vim
+
+```sh
+orb pane keys 12 esc
+orb pane type 12 ":wq"
+orb pane keys 12 enter
+```
+
+- **`type` presses each character, with no paste and no Enter.** `send` pastes, which a program like vim inserts as text. Both take one quoted word, as is.
+- **`keys` presses key names and single characters,** like `ctrl+c`, `alt+x`, `f5`, `space` or `q`. `orb pane keys --help` lists the names. An unknown name sends nothing.
+
+## Find things
+
+```sh
+orb agent list --status needs_approval,needs_input
+orb session list --all
+orb project list
+orb pane list --session 7
+orb agent get 15
+```
+
+- **`pane list` and `tab list` cover one session,** yours unless you add `--session <id>`. Your own pane row has `"caller": true`; tabs count from 1.
+- **`agent get` has the full name, `cwd` and `branch`,** which list rows leave out. Names in lists are cut to 60 characters.
 
 ## A whole new session
 
 ```sh
+orb project list                                   # {"projects": [{"id": 4, "name": "orb", "dir": "...", "kind": "repo"}]}
 orb session create --worktree --name "fix login"   # {"session": 7, "pane": 30}
-orb agent start --kind claude --pane 30             # its pane is a shell; start the agent there
+orb agent start --kind claude --pane 30            # its pane is a shell; start the agent there
 orb agent prompt 30 "Fix the login bug."
 ```
 
-- **It defaults to your session's project and its checkout.** `--worktree` makes a new worktree from the default branch (can take ~15 s). `--project <id>` picks another project.
-- **Find a project ID in `orb session list`:** the `project` of a session whose `dir` is in that repo. There is no project list; if no session ever ran there, ask the user.
+- **It defaults to your session's project and its checkout.** `--worktree` makes a new worktree from the default branch (can take ~15 s). `--project <id>` picks another project. **Find a project ID with `orb project list`.**
 - **It shows in the sidebar but doesn't open,** so the user's view stays put.
 - **One start at a time.** `starting` means another session is being made. Try again in a few seconds.
 
@@ -157,59 +181,21 @@ orb plate list                       # {"items": [...]}
 
 ## When orb says no
 
-| Code | What it means | What to do |
-| --- | --- | --- |
-| `not_running` | No orb answers. | Tell the user and stop. |
-| `no_target` | You left the target out and aren't in an orb pane. | Name the pane or session. |
-| `not_found` | That pane, session, agent or plate item doesn't exist. | `orb pane list`, `orb agent list` or `orb plate list` and pick a real one. |
-| `settled` | The session is settled. | Leave it alone; the user can un-settle it. |
-| `colonist` | You're a colonist; colonists don't add plate items. | Put it in your report to your chief. |
-| `starting` | Another session is being made. | Try again in a few seconds. |
-| `pane_busy` | An agent already runs in that pane. | Split a new pane and start there. |
-| `no_agent` | No live agent in that pane (or it stopped). | `orb agent get <pane>` to check; start one if you meant to. |
-| `agent_blocked` | The agent waits for an approval or an answer. Nothing was typed. | Tell the user. Only if they asked you to handle it, `orb pane read` the dialog and answer with `orb pane keys`. |
-| `prompt_stalled` | The prompt was typed but no work showed within 5 s. | `orb pane read` to see why before trying again. Don't paste the prompt twice. |
-| `no_reply` | The agent hasn't finished a turn yet. | `orb agent wait <pane>`, then ask again. |
-| `timeout` | Your `--timeout` ran out, `agent start` waited 30 s, or `session create` waited 3 min. | Check with `orb session list`, `orb agent get` or `orb pane read` before trying again; a session may already be there. |
-| `bad_request` | The request makes no sense, e.g. splitting a floating pane or an unknown key name. | Read the message and fix the command. |
-| `failed` | orb tried and something broke. | Read the message and tell the user. |
+- **Every refusal carries a hint; follow it.** These codes need your judgement:
+
+| Code | What to do |
+| --- | --- |
+| `not_running` | Tell the user and stop. |
+| `settled` | Leave it; un-settling is the user's call. |
+| `colonist` | Put it in your report to your chief. |
+| `agent_blocked` | Tell the user. Only if they asked, `orb pane read` the dialog and answer with `orb pane keys`. |
+| `prompt_stalled` | `orb pane read` to see why. Don't paste the prompt twice. |
+| `turn_failed` | The model call failed (quota, API error). Tell the user. |
+| `busy` | Quit the program or ask; `--force` only into your own. |
+| `timeout` | Check with `orb agent get` or `orb pane read` before trying again; a session may already be there. |
 
 ## Commands
 
-```
-orb session list [--all] [--project <id>]
-orb tab list [--session <id>]
-orb pane list [--session <id>]
-orb agent list [--all] [--session <id>] [--status <status>[,<status>...]]
-orb project list
-orb session create [--project <id>] [--worktree] [--name <text>]
-orb tab create [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]
-orb pane split [<pane>] --direction right|down [--name <text>] [--run <command>] [--cwd <dir>]
-orb pane stack [<pane>] [--name <text>] [--run <command>] [--cwd <dir>]
-orb pane float [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]
-orb pane close <pane>
-orb pane rename <pane> <name>
-orb pane focus <pane>
-orb tab close [--pane <id>]
-orb session rename [<session>] <name>
-orb session settle [<session>]
-orb session focus <session>
-orb pane send <pane> <text>
-orb pane keys <pane> <key>...
-orb pane type <pane> <text>
-orb pane run <pane> <command> [--wait] [--timeout <ms>] [--force] [--tail <n>] [--json]
-orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]
-orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]
-orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]
-orb agent prompt <pane> <text> [--wait [--timeout <ms>]] [--json]
-orb agent wait <pane> [--timeout <ms>]
-orb agent get <pane>
-orb agent reply <pane> [--json]
-orb plate add <title> --verb <verb> [--what <text>] [--link <url>]... [--urgent] [--waiting] [--pane <id>]
-orb plate update <item> [--title <text>] [--verb <verb>] [--what <text>] [--link <url>]... [--urgent|--not-urgent] [--waiting|--your-move]
-orb plate done <item>
-orb plate list
-```
-
+- **Ask orb itself.** `orb help` lists the nouns and the common jobs, `orb <noun> --help` a noun's verbs, and `orb <noun> <verb> --help` the flags, defaults, examples and the reply.
 - **An empty name in `rename`** goes back to the usual name.
 - **Splitting, stacking or closing the tab of a floating pane** is refused.

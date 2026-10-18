@@ -34,6 +34,9 @@ pub(crate) struct Timing {
     pub start_limit: Duration,
     /// How long `agent prompt --wait` waits to see work start.
     pub stall_gate: Duration,
+    /// How long `agent prompt --wait` keeps reading the transcript for an
+    /// answer after the turn ended with none yet.
+    pub reply_grace: Duration,
 }
 
 impl Timing {
@@ -43,6 +46,7 @@ impl Timing {
         poke_every: Duration::from_secs(1),
         start_limit: Duration::from_secs(30),
         stall_gate: Duration::from_secs(5),
+        reply_grace: Duration::from_secs(2),
     };
 }
 
@@ -485,6 +489,7 @@ mod tests {
         poke_every: Duration::from_millis(1),
         start_limit: Duration::from_millis(50),
         stall_gate: Duration::from_millis(50),
+        reply_grace: Duration::from_millis(50),
     };
 
     /// A prompt pasted at `at`, the whole stall gate left.

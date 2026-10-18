@@ -3,6 +3,7 @@
 //! loop, waiting on the agent after.
 
 use std::fs;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::AppState;
@@ -13,7 +14,7 @@ use crate::feat::control::lists::agent_detail;
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
 use crate::feat::control::protocol::{
     AgentDetail, AgentKind, AnswerResult, ApiError, Direction, ErrorCode, Op, PromptResult, Reply,
-    WaitEnd, WaitResult,
+    ReplyResult, WaitEnd, WaitResult,
 };
 use crate::feat::control::server::{
     Action, ControlDeps, StartIn, added, changing, changing_session, tiled,
@@ -181,9 +182,10 @@ pub(super) struct PromptAsk {
 /// Enter, remembering when and how long the agent's transcript was then;
 /// with `wait`, waits for the turn to end, with the timeout over the whole
 /// call, until `gone` says the caller hung up, and replies with everything
-/// the agent wrote since the paste. An agent that stops to ask the user is
-/// `agent_blocked`; a turn that ends in a failed model call is
-/// `turn_failed`, with the transcript's error text when it holds one.
+/// the agent wrote since the paste, reading the transcript again for up to
+/// 2 s when the turn ended with nothing written yet. An agent that stops to
+/// ask the user is `agent_blocked`; a turn that ends in a failed model call
+/// is `turn_failed`, with the transcript's error text when it holds one.
 pub(super) fn prompt_agent(
     panes: &PaneControl,
     turns: Turns<'_>,
@@ -227,7 +229,7 @@ pub(super) fn prompt_agent(
     match agent::wait_prompted(turns.state, ask.pane, poke, gone, timing, deadline, sent) {
         Ok(WaitResult {
             status: WaitEnd::Idle,
-        }) => match turns.reply(ask.pane) {
+        }) => match answer_after_idle(turns, ask.pane, gone, timing, deadline) {
             Ok(reply) => Reply::ok(&AnswerResult {
                 status: WaitEnd::Idle,
                 text: reply.text,
@@ -239,6 +241,29 @@ pub(super) fn prompt_agent(
             status: WaitEnd::Blocked,
         }) => Reply::err(agent::asked_user(ask.pane)),
         Err(error) => Reply::err(turns.failure(ask.pane, error)),
+    }
+}
+
+/// What `pane`'s agent wrote since orb's prompt, once its turn ended.
+/// Claude can write its last text a moment after its status reads idle, so
+/// a `no_reply` is read again every tick for up to `timing.reply_grace`,
+/// stopping early at `deadline` or once `gone` says the caller hung up.
+fn answer_after_idle(
+    turns: Turns<'_>,
+    pane: PaneId,
+    gone: &dyn Fn() -> bool,
+    timing: Timing,
+    deadline: Option<Instant>,
+) -> Result<ReplyResult, ApiError> {
+    let grace = Instant::now() + timing.reply_grace;
+    let until = deadline.map_or(grace, |deadline| deadline.min(grace));
+    loop {
+        match turns.reply(pane) {
+            Err(error) if error.code == ErrorCode::NoReply && Instant::now() < until && !gone() => {
+                thread::sleep(timing.tick);
+            }
+            read => return read,
+        }
     }
 }
 
@@ -355,6 +380,7 @@ mod tests {
         poke_every: Duration::from_millis(1),
         start_limit: Duration::from_millis(50),
         stall_gate: Duration::from_millis(50),
+        reply_grace: Duration::from_millis(50),
     };
 
     /// Waits paced for tests, with a stall gate long enough that a wait
@@ -509,6 +535,87 @@ mod tests {
                 "at": 1_000,
             })),
             "prompt --wait should reply with the answer, got {replied:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn prompt_wait_reads_an_answer_written_just_after_idle() -> io::Result<()> {
+        // Given idle agent 1 in pane 1 over a 100-byte transcript, which works
+        // on the prompt and goes idle before its answer reaches the
+        // transcript.
+        let dir = tempdir()?;
+        let transcript = dir.path().join("t.jsonl");
+        fs::write(&transcript, "x".repeat(100))?;
+        let state = idle_pane(transcript);
+        let harnesses = Harnesses::new(vec![Arc::new(
+            FakeHarness::new("claude", Vec::new())
+                .with_messages(vec![answer("the late answer", 150)])
+                .answering_after(2),
+        )]);
+        let prompts = Prompts::default();
+        let polls = AtomicUsize::new(0);
+        let poke = || match polls.fetch_add(1, Ordering::SeqCst) + 1 {
+            1 => set_status(&state, AgentStatus::Working),
+            3 => set_status(&state, AgentStatus::Idle),
+            _ => {}
+        };
+
+        // When prompting it and waiting.
+        let replied = prompt_wait(
+            Turns {
+                state: &state,
+                harnesses: &harnesses,
+                prompts: &prompts,
+            },
+            &poke,
+        );
+
+        // Then the reply is the answer written just after the turn ended.
+        assert_eq!(
+            replied.result,
+            Some(serde_json::json!({
+                "status": "idle",
+                "text": "the late answer",
+                "at": 1_000,
+            })),
+            "prompt --wait should read the answer written after idle, got {replied:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn prompt_wait_with_nothing_written_is_no_reply() -> io::Result<()> {
+        // Given idle agent 1 in pane 1 over a 100-byte transcript, which works
+        // on the prompt and goes idle without writing an answer.
+        let dir = tempdir()?;
+        let transcript = dir.path().join("t.jsonl");
+        fs::write(&transcript, "x".repeat(100))?;
+        let state = idle_pane(transcript);
+        let harnesses = claude(Vec::new());
+        let prompts = Prompts::default();
+        let polls = AtomicUsize::new(0);
+        let poke = || match polls.fetch_add(1, Ordering::SeqCst) + 1 {
+            1 => set_status(&state, AgentStatus::Working),
+            3 => set_status(&state, AgentStatus::Idle),
+            _ => {}
+        };
+
+        // When prompting it and waiting.
+        let replied = prompt_wait(
+            Turns {
+                state: &state,
+                harnesses: &harnesses,
+                prompts: &prompts,
+            },
+            &poke,
+        );
+
+        // Then the call is refused as no_reply once the grace runs out.
+        assert_eq!(
+            replied.error.map(|error| error.code),
+            Some(ErrorCode::NoReply),
+            "prompt --wait with nothing written should be no_reply"
         );
         Ok(())
     }

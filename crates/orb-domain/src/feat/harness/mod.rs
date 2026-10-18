@@ -193,6 +193,7 @@ impl fmt::Debug for Harnesses {
 pub(crate) mod fake {
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, PoisonError};
 
     use async_trait::async_trait;
@@ -215,6 +216,9 @@ pub(crate) mod fake {
         running: Mutex<Result<Vec<RunningAgent>, String>>,
         /// What [`Harness::reports_status`] answers.
         reports: bool,
+        /// How many more [`TranscriptFormat::messages`] reads see nothing,
+        /// as if the agent hadn't written yet.
+        unwritten_reads: AtomicUsize,
     }
 
     impl FakeHarness {
@@ -226,6 +230,7 @@ pub(crate) mod fake {
                 messages: Vec::new(),
                 running: Mutex::new(Ok(running)),
                 reports: false,
+                unwritten_reads: AtomicUsize::new(0),
             }
         }
 
@@ -238,6 +243,14 @@ pub(crate) mod fake {
         /// past the offset asked for.
         pub(crate) fn with_messages(self, messages: Vec<Message>) -> Self {
             Self { messages, ..self }
+        }
+
+        /// This harness, whose first `reads` message reads see nothing.
+        pub(crate) fn answering_after(self, reads: usize) -> Self {
+            Self {
+                unwritten_reads: AtomicUsize::new(reads),
+                ..self
+            }
         }
 
         /// A harness like pi, whose status comes from its pane reports.
@@ -274,11 +287,17 @@ pub(crate) mod fake {
             offset: u64,
             prompt_offset: u64,
         ) -> io::Result<MessageRead> {
+            let unwritten = self
+                .unwritten_reads
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
             Ok(MessageRead {
                 messages: self
                     .messages
                     .iter()
-                    .filter(|message| message.offset >= offset)
+                    .filter(|message| !unwritten && message.offset >= offset)
                     .cloned()
                     .collect(),
                 offset,

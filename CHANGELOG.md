@@ -28,6 +28,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The mode line reads `PLATE` while the plate has the keys, and counts its Your move items in orange.
 - The orb skill teaches agents the plate. plan-with-me adds an item to approve the plan, and ship-plan one to review the PR. docs/keys.md has a line to add to your global agent instructions.
 
+#### Control API
+
+- `orb help` lists the nouns and common jobs; `orb <noun> --help` lists its verbs; `orb <noun> <verb> --help` shows the flags, their defaults, examples and the reply. Help needs no running orb and exits 0.
+- A wrongly typed command names the bad word, suggests the closest match, and prints that command's one usage line, then exits 2.
+- Every refusal carries a hint that names the command that fixes it.
+- `orb` with no words inside an orb pane says which pane, tab and session you're in and where help is. Outside a pane it still starts orb.
+- `orb project list` lists projects with their IDs, the ID `orb session create --project` takes.
+- `orb pane type <pane> <text>` types text as keystrokes, with no paste and no Enter, so vim takes `:wq`.
+- `orb pane keys` takes single characters, `space`, `delete`, `insert`, `f1`–`f12` and `alt+<char>`, and key names in any case.
+- `orb tab create`, `pane split`, `pane stack` and `pane float` take `--name`, `--run` and `--cwd`, so one call makes a named pane running a command in a chosen folder.
+- `orb agent start --split right|down` and `--tab` start the agent in a new pane or tab.
+- `orb pane run --wait` prints the command's output and exit code. In fish it reads the shell's prompt marks; elsewhere it waits for the screen to go quiet. `--timeout`, `--tail` and `--json` go with it.
+- `orb pane wait --text|--regex` returns once the text shows on the pane, or times out.
+- `orb agent prompt --wait` prints the agent's answer.
+- `orb pane read --head N` and `--tail N` read the first or last lines of the screen.
+
 ### Changed
 
 - `⏎` in the search picker (`<C-g> /`) opens the found agent's own pane instead of its session, and resumes its chat in a new tab if it ended.
@@ -40,9 +56,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A pane that can't start shows its reason in the message box instead of under the start screen.
 - Plate items are saved, so they survive a restart. This upgrades orb's saved data, and orb keeps a copy of the old file first. Done items are cleared at the first start after midnight.
 
+#### Control API
+
+- `orb session list` shows open sessions and `orb agent list` live agents by default. Each reply says how many rows it hid and how to see them; `--all`, `--project`, `--session` and `--status` filter.
+- Session and agent names in lists are cut to 60 graphemes, and agent list rows no longer carry the folder and branch. `orb agent get` still shows them in full.
+- `orb pane read` and `orb agent reply` print plain text. Scripts that parse their JSON need `--json`.
+- `orb agent reply` returns every answer since orb's last prompt, so a prompt sent mid-turn no longer hides the earlier answer.
+- Right after `orb agent prompt`, `orb agent wait` waits for the turn to start and finish, and `orb agent get` reads `working`.
+- `orb pane run` in a fish pane refuses with `busy` while a program runs there, naming it, unless `--force` is given. It clears text left on the prompt before typing.
+- `orb pane close`, `tab close` and `session settle` reply with the panes and agents they ended.
+- The settle refusal names the panes and agents still working.
+- Unknown first words, such as `orb sessions`, and `orb --help` print help or a usage error instead of starting orb.
+- The orb skill is a short set of rules and recipes that points to `orb help`, instead of a copy of every command.
+
 ### Fixed
 
 - On macOS, `orb agent wait` and `orb agent prompt --wait` stop once the caller hangs up, even when it hangs up right after asking. Before, such a wait ran to its timeout.
+
+#### Control API
+
+- A turn that ended in a failed model call refuses with `turn_failed` and the error text, for Claude and pi. Before, Claude's error read as its answer and pi's as no reply.
+- `orb agent wait` on a failed agent ends with `turn_failed` instead of `no_agent`.
+- Global search no longer indexes model-call error lines.
+- `orb agent prompt --wait` catches an answer Claude writes just after its status goes idle.
 
 ## [0.1.0] - 2026-10-16
 

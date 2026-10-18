@@ -24,7 +24,7 @@ Reference specs, plans, commits and tickets by path or link instead of copying t
 
 - **Code work in a repo:** `orb session create --worktree --name "<short name>"`. It branches a new worktree from the default branch (takes ~15 s).
 - **Anything else:** `orb session create --name "<short name>"`.
-- **Called from a colony:** the new session becomes a colonist on its own. There `--worktree` alone is refused (`bad_request`): find the repo's project id in `orb session list`, then run `orb session create --project <id> --worktree --name "<short name>"`.
+- **Called from a colony:** the new session becomes a colonist on its own. There `--worktree` alone is refused (`bad_request`): find the repo's project id with `orb project list`, then run `orb session create --project <id> --worktree --name "<short name>"`.
 
 The reply names the new session's shell pane: `{"session": 7, "pane": 30}`. The session doesn't open in the user's view. Never focus it.
 

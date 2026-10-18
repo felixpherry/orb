@@ -37,7 +37,7 @@ pub(crate) struct Param {
 pub(crate) struct CommandHelp {
     pub noun: &'static str,
     pub verb: &'static str,
-    /// The usage line, as the orb skill lists it.
+    /// The usage line, as usage errors and help print it.
     pub usage: &'static str,
     pub summary: &'static str,
     pub params: &'static [Param],
@@ -685,7 +685,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             "orb agent prompt 12 \"Summarise the plan.\" --wait --json",
             "orb agent prompt 12 --wait --timeout 600000 -- \"--force is broken\"",
         ],
-        reply: "{\"submitted\": true}; with --wait the answer as plain text, or with --json {\"status\": \"idle\", \"text\": \"…\", \"at\": unix milliseconds|null}; agent_blocked when the agent stops to ask the user, turn_failed when its model call fails",
+        reply: "{\"submitted\": true}; with --wait the answer as plain text, or with --json {\"status\": \"idle\", \"text\": \"…\", \"at\": unix milliseconds|null}; agent_blocked when the agent stops to ask the user, turn_failed when its model call fails; no_reply when it wrote nothing within 2 s of the turn ending",
     },
     CommandHelp {
         noun: "agent",
@@ -838,12 +838,6 @@ pub(crate) fn command(noun: &str, verb: &str) -> Option<&'static CommandHelp> {
     COMMANDS
         .iter()
         .find(|command| command.noun == noun && command.verb == verb)
-}
-
-/// Every usage line, in table order.
-#[cfg(test)]
-pub(crate) fn usage_lines() -> impl Iterator<Item = &'static str> {
-    COMMANDS.iter().map(|command| command.usage)
 }
 
 /// The common jobs `orb help` shows: what each is for, then its commands.
@@ -1042,7 +1036,7 @@ mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
 
-    use super::{COMMANDS, STATUSES, command, suggest, usage_lines, verbs};
+    use super::{COMMANDS, STATUSES, command, suggest, verbs};
     use crate::feat::control::client::parse;
     use crate::feat::control::protocol::Op;
     use crate::feat::plate::Verb;
@@ -1151,22 +1145,50 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn the_orb_skill_lists_every_command() {
-        // Given the orb skill's Commands block.
+    fn every_command_in_the_orb_skill_parses() {
+        // Given every `orb` line in the orb skill's code blocks, without its
+        // `#` comment, leaving out help, which never goes through `parse`.
         let skill = include_str!("../integration/assets/skills/orb/SKILL.md");
-        let block: Vec<&str> = skill
-            .split_once("## Commands\n\n```\n")
-            .and_then(|(_, rest)| rest.split_once("```"))
-            .map(|(block, _)| block.lines().collect())
-            .unwrap_or_default();
+        let mut fenced = false;
+        let lines: Vec<&str> = skill
+            .lines()
+            .filter(|line| {
+                if line.starts_with("```") {
+                    fenced = !fenced;
+                    return false;
+                }
+                fenced
+            })
+            .filter(|line| line.starts_with("orb "))
+            .map(|line| {
+                line.split_once("  #")
+                    .map_or(line, |(command, _)| command)
+                    .trim_end()
+            })
+            .filter(|line| !line.starts_with("orb help") && !line.contains(" --help"))
+            .collect();
 
-        // When reading the command table's usage lines.
-        let usage: Vec<&str> = usage_lines().collect();
+        // When parsing each one's words after `orb`.
+        let wrong: Vec<String> = lines
+            .iter()
+            .filter_map(|line| {
+                let words = shell_words(line.strip_prefix("orb ").unwrap_or(line));
+                parse(&words)
+                    .err()
+                    .map(|error| format!("{line} -> {error:?}"))
+            })
+            .collect();
 
-        // Then the skill lists the same commands in the same order.
+        // Then there are commands to check, and none fails to parse.
+        assert!(
+            lines.len() >= 20,
+            "the orb skill's code blocks should show at least 20 commands, got {}",
+            lines.len()
+        );
         assert_eq!(
-            block, usage,
-            "the orb skill's Commands block should match the command table"
+            wrong,
+            Vec::<String>::new(),
+            "every orb command the skill shows should parse"
         );
     }
 
