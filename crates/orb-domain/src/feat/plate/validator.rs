@@ -21,7 +21,11 @@ pub(crate) fn adding_session(app: &AppState, caller: Option<PaneId>) -> Result<R
         .session(resolved.session)
         .is_some_and(|session| session.parent.is_some())
     {
-        return Err(ApiError::new(ErrorCode::Colonist, COLONIST_REFUSED));
+        return Err(ApiError::new(
+            ErrorCode::Colonist,
+            COLONIST_REFUSED,
+            "put it in your report to your chief",
+        ));
     }
     not_settled(app, resolved.session)?;
     Ok(resolved)
@@ -35,6 +39,7 @@ pub(crate) fn verb(text: &str) -> Result<Verb, ApiError> {
         ApiError::new(
             ErrorCode::BadRequest,
             format!("unknown verb {text}; use one of {}", names.join(", ")),
+            "orb plate add --help lists the verbs",
         )
     })
 }
@@ -46,15 +51,23 @@ pub(crate) fn open_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, A
     if item.state.is_open() {
         Ok(item)
     } else {
-        Err(ApiError::new(ErrorCode::BadRequest, ITEM_DONE))
+        Err(ApiError::new(
+            ErrorCode::BadRequest,
+            ITEM_DONE,
+            "orb plate list shows the open items",
+        ))
     }
 }
 
 /// Item `id`, open or done; `not_found` when there's none.
 pub(crate) fn known_item(app: &AppState, id: PlateItemId) -> Result<&PlateItem, ApiError> {
-    app.plate
-        .item(id)
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, no_item(id)))
+    app.plate.item(id).ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::NotFound,
+            no_item(id),
+            "orb plate list shows the items",
+        )
+    })
 }
 
 /// `links`, each free of control characters (C0, DEL and C1);
@@ -69,6 +82,7 @@ pub(crate) fn links(links: &[String]) -> Result<(), ApiError> {
         Some(at) => Err(ApiError::new(
             ErrorCode::BadRequest,
             format!("link {} holds a control character", at + 1),
+            "take the control characters out of the link",
         )),
         None => Ok(()),
     }
@@ -123,7 +137,7 @@ pub(crate) fn go_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{GoError, GoTarget, go_target, known_item, verb};
+    use super::{GoError, GoTarget, adding_session, go_target, known_item, verb};
     use crate::AppState;
     use crate::feat::control::protocol::ErrorCode;
     use crate::feat::layout::state::test_entry;
@@ -132,7 +146,7 @@ mod tests {
     use crate::feat::plate::{ItemState, Plate, PlateItem, RowKey};
     use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, PlateItemId, SessionId};
-    use crate::intent_handler::test_support::{agent, settle, state_with};
+    use crate::intent_handler::test_support::{agent, colony_with_colonists, settle, state_with};
 
     /// Session 1 running agent 1 in pane 1, with item 1 from session
     /// `session`'s pane `pane`.
@@ -264,6 +278,27 @@ mod tests {
                     .to_owned()
             )),
             "an unknown verb should say which ones orb takes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn colonist_refusal_tells_it_to_report_to_its_chief() {
+        // Given session 2, a colonist, running agent 2 in pane 2.
+        let app = colony_with_colonists([AgentStatus::Idle; 3]);
+
+        // When pane 2 adds a plate item.
+        let refused = adding_session(&app, Some(PaneId(2)))
+            .err()
+            .map(|error| (error.code, error.hint));
+
+        // Then it's refused with a hint to report to the chief.
+        assert_eq!(
+            refused,
+            Some((
+                ErrorCode::Colonist,
+                Some("put it in your report to your chief".to_owned())
+            )),
+            "a colonist is told where its item goes instead"
         );
     }
 

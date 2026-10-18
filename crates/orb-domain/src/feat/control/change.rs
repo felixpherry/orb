@@ -4,11 +4,12 @@
 //! shown session alone, except `Focus`, settling the shown session, and
 //! closing the last pane of the shown session, whose new shell takes the keys.
 
-use crate::feat::control::protocol::{ApiError, ErrorCode};
+use crate::feat::control::protocol::{ApiError, ErrorCode, short_name};
+use crate::feat::control::target::{no_pane, no_session};
 use crate::feat::picker::intent::pick;
 use crate::feat::sessions::intent::settle_now;
 use crate::feat::sessions::state::SidebarItem;
-use crate::feat::sessions::validator::{SETTLE_IN_PROGRESS, session_working};
+use crate::feat::sessions::validator::session_working;
 use crate::ids::{PaneId, SessionId};
 use crate::{AppState, Command, Focus, SessionsCommand};
 
@@ -61,6 +62,7 @@ pub fn apply(state: &mut AppState, change: &Change) -> Result<Vec<Command>, ApiE
                 return Err(ApiError::new(
                     ErrorCode::BadRequest,
                     "a float isn't in a tab",
+                    format!("close a float with orb pane close {}", pane.0),
                 ));
             }
             Ok(closed(state, session))
@@ -88,20 +90,14 @@ pub fn apply(state: &mut AppState, change: &Change) -> Result<Vec<Command>, ApiE
 
 /// The session holding `pane`; `not_found` when none does.
 fn owner(state: &AppState, pane: PaneId) -> Result<SessionId, ApiError> {
-    state
-        .layouts
-        .owner_of(pane)
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, format!("no pane {}", pane.0)))
+    state.layouts.owner_of(pane).ok_or_else(|| no_pane(pane))
 }
 
 /// `not_found` unless session `session` exists.
 fn exists(state: &AppState, session: SessionId) -> Result<(), ApiError> {
     match state.sessions.session(session) {
         Some(_) => Ok(()),
-        None => Err(ApiError::new(
-            ErrorCode::NotFound,
-            format!("no session {}", session.0),
-        )),
+        None => Err(no_session(session)),
     }
 }
 
@@ -136,9 +132,69 @@ fn closed(state: &mut AppState, session: SessionId) -> Vec<Command> {
 fn settle(state: &mut AppState, session: SessionId) -> Result<Vec<Command>, ApiError> {
     exists(state, session)?;
     if session_working(state, session) {
-        return Err(ApiError::new(ErrorCode::Failed, SETTLE_IN_PROGRESS));
+        return Err(working(state, session));
     }
     Ok(settle_now(state, session, false))
+}
+
+/// Why session `session` can't settle: each agent with a turn underway, by
+/// pane and name (cut to 60 graphemes), and the wait that clears it.
+fn working(state: &AppState, session: SessionId) -> ApiError {
+    let busy: Vec<(PaneId, String)> = state
+        .sessions
+        .agents(session)
+        .into_iter()
+        .filter(|agent| agent.status.in_progress())
+        .filter_map(|agent| {
+            let pane = agent.pane.as_ref()?.pane;
+            Some((
+                pane,
+                short_name(state.layouts.agent_name(pane, Some(agent))),
+            ))
+        })
+        .collect();
+    let named: Vec<String> = busy
+        .iter()
+        .map(|(pane, name)| format!("{} ({name})", pane.0))
+        .collect();
+    let waits: Vec<String> = busy
+        .iter()
+        .map(|(pane, _)| format!("orb agent wait {}", pane.0))
+        .collect();
+    let (message, hint) = match named.as_slice() {
+        [] => (
+            format!(
+                "can't settle session {} while an agent has a turn underway",
+                session.0
+            ),
+            "orb agent list shows who is working; settle again once they finish".to_owned(),
+        ),
+        [one] => (
+            format!(
+                "can't settle session {} while pane {one} has a turn underway",
+                session.0
+            ),
+            format!("{}, then settle again", joined(&waits)),
+        ),
+        many => (
+            format!(
+                "can't settle session {} while panes {} have turns underway",
+                session.0,
+                joined(many)
+            ),
+            format!("{}, then settle again", joined(&waits)),
+        ),
+    };
+    ApiError::new(ErrorCode::Failed, message, hint)
+}
+
+/// `items` as a list in words: `a`, `a and b`, `a, b and c`.
+fn joined(items: &[String]) -> String {
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Shows `pane` of `session` (else its focused pane) in its tab, makes the
@@ -157,6 +213,7 @@ fn focus(
             ApiError::new(
                 ErrorCode::NotFound,
                 format!("no pane to focus in session {}", session.0),
+                format!("orb pane list --session {} shows its panes", session.0),
             )
         })?;
     let keys = state.focus;
@@ -201,6 +258,46 @@ mod tests {
             result.map_err(|error| error.code),
             Err(ErrorCode::Failed),
             "a session with a turn underway can't be settled"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_refusal_names_the_working_pane() {
+        // Given session 1's agent working in pane 1.
+        let mut state = state_with(
+            vec![agent(1, AgentStatus::Working), agent(2, AgentStatus::Idle)],
+            2,
+        );
+
+        // When an agent asks to settle session 1.
+        let result = apply(&mut state, &Change::SettleSession(SessionId(1)));
+
+        // Then the refusal names pane 1.
+        let message = result.err().map(|error| error.message);
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|message| message.contains("pane 1 ")),
+            "the refusal says who is working, got {message:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_refusal_hint_names_agent_wait() {
+        // Given session 1's agent working in pane 1.
+        let mut state = state_with(
+            vec![agent(1, AgentStatus::Working), agent(2, AgentStatus::Idle)],
+            2,
+        );
+
+        // When an agent asks to settle session 1.
+        let result = apply(&mut state, &Change::SettleSession(SessionId(1)));
+
+        // Then the hint waits on pane 1 before settling again.
+        assert_eq!(
+            result.err().and_then(|error| error.hint).as_deref(),
+            Some("orb agent wait 1, then settle again"),
+            "the hint is the wait that clears the refusal"
         );
     }
 

@@ -21,9 +21,9 @@ use crate::feat::control::agent::{self, Timing};
 use crate::feat::control::change::Change;
 use crate::feat::control::pane_control::{PaneControl, PaneRequest, key_event};
 use crate::feat::control::protocol::{
-    AgentRow, AgentsResult, ApiError, Done, ErrorCode, Op, PaneResult, PaneRow, PanesResult,
-    PromptResult, ReadResult, Reply, Request, SessionRow, SessionsResult, StartResult, TabRow,
-    TabsResult,
+    self, AgentRow, AgentsResult, ApiError, Done, ErrorCode, HereResult, Op, PaneResult, PaneRow,
+    PanesResult, PromptResult, ReadResult, Reply, Request, SEE_LOG, SessionRow, SessionsResult,
+    StartResult, TabRow, TabsResult,
 };
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
@@ -182,7 +182,11 @@ where
 {
     let reply = match serde_json::from_str::<Request>(line) {
         Ok(request) => answer(&request),
-        Err(error) => Reply::err(ApiError::new(ErrorCode::BadRequest, error.to_string())),
+        Err(error) => Reply::err(ApiError::new(
+            ErrorCode::BadRequest,
+            error.to_string(),
+            "send one JSON request per line, as the orb command does",
+        )),
     };
     serde_json::to_string(&reply).unwrap_or_default()
 }
@@ -221,7 +225,12 @@ enum Action {
         timeout: Option<Duration>,
     },
     /// The last reply in an agent's transcript.
-    Transcript { harness: HarnessId, path: PathBuf },
+    Transcript {
+        harness: HarnessId,
+        path: PathBuf,
+        /// The agent's pane, for the refusals' hints.
+        pane: PaneId,
+    },
     /// A plate add, update or close the sessions actor answers.
     Plate(PlateAsk),
 }
@@ -250,8 +259,12 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
                 Err(error) => Reply::err(error),
             };
         }
-        Ok(Action::Transcript { harness, path }) => {
-            return match agent::last_reply(&deps.harnesses, &harness, &path) {
+        Ok(Action::Transcript {
+            harness,
+            path,
+            pane,
+        }) => {
+            return match agent::last_reply(&deps.harnesses, &harness, &path, pane) {
                 Ok(reply) => Reply::ok(&reply),
                 Err(error) => Reply::err(error),
             };
@@ -311,7 +324,7 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
     let caller = request.caller;
     let add = |session, place| Ok(Action::Add(ApiAdd { session, place }));
     match &request.op {
-        Op::SessionList | Op::TabList { .. } | Op::PaneList { .. } | Op::AgentList => {
+        Op::SessionList | Op::TabList { .. } | Op::PaneList { .. } | Op::AgentList | Op::Here => {
             Ok(Action::Answered(route(app, request)))
         }
         Op::PaneSplit { pane, direction } => {
@@ -401,9 +414,16 @@ fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, A
             args,
         } => {
             let Some(pane) = changing(app, pane.map(Target::Pane), caller)?.pane else {
-                return Err(ApiError::new(ErrorCode::BadRequest, "no pane to start in"));
+                return Err(ApiError::new(
+                    ErrorCode::BadRequest,
+                    "no pane to start in",
+                    format!(
+                        "name the pane: orb agent start --kind {} --pane <id>",
+                        kind.program()
+                    ),
+                ));
             };
-            validator::pane_free(app, pane)?;
+            validator::pane_free(app, pane, *kind)?;
             Ok(Action::StartAgent {
                 pane,
                 line: agent::shell_line(*kind, args),
@@ -416,7 +436,7 @@ fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, A
             wait,
             timeout,
         } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
+            changing(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
             validator::agent_ready(app, *pane)?;
             Ok(Action::Prompt {
                 pane: *pane,
@@ -426,32 +446,52 @@ fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, A
             })
         }
         Op::AgentWait { pane, timeout } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
+            changing(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
             Ok(Action::Wait {
                 pane: *pane,
                 timeout: timeout.map(Duration::from_millis),
             })
         }
         Op::AgentGet { pane } => {
-            let session = target::resolve(app, Some(Target::Pane(*pane)), caller)?.session;
+            let session = target::resolve(app, Some(Target::Pane(*pane)), caller)
+                .map_err(agent_pane)?
+                .session;
             let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
             Ok(Action::Answered(Reply::ok(&agent_row(
                 app, session, agent, *pane,
             ))))
         }
         Op::AgentReply { pane } => {
-            target::resolve(app, Some(Target::Pane(*pane)), caller)?;
+            target::resolve(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
             let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
-            let path = agent
-                .transcript
-                .clone()
-                .ok_or_else(|| ApiError::new(ErrorCode::NoReply, "no transcript yet"))?;
+            let path = agent.transcript.clone().ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::NoReply,
+                    "no transcript yet",
+                    format!("orb agent wait {0}, then orb agent reply {0}", pane.0),
+                )
+            })?;
             Ok(Action::Transcript {
                 harness: agent.harness.clone(),
                 path,
+                pane: *pane,
             })
         }
-        _ => Err(ApiError::new(ErrorCode::BadRequest, "not an agent request")),
+        _ => Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "not an agent request",
+            "orb help lists the commands",
+        )),
+    }
+}
+
+/// `error`, pointing a missing pane at the agent list, which shows where
+/// each agent runs.
+fn agent_pane(error: ApiError) -> ApiError {
+    if error.code == ErrorCode::NotFound {
+        error.with_hint("orb agent list shows each agent's pane")
+    } else {
+        error
     }
 }
 
@@ -537,7 +577,11 @@ fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, Ap
                 .iter()
                 .map(|name| {
                     key_event(name).ok_or_else(|| {
-                        ApiError::new(ErrorCode::BadRequest, format!("unknown key {name}"))
+                        ApiError::new(
+                            ErrorCode::BadRequest,
+                            format!("unknown key {name}"),
+                            KEY_NAMES,
+                        )
                     })
                 })
                 .collect::<Result<_, _>>()?;
@@ -557,16 +601,23 @@ fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, Ap
                 pane,
                 lines: *lines,
             })),
-            Resolved { pane: None, .. } => {
-                Err(ApiError::new(ErrorCode::BadRequest, "no pane to read"))
-            }
+            Resolved { pane: None, .. } => Err(ApiError::new(
+                ErrorCode::BadRequest,
+                "no pane to read",
+                "name the pane: orb pane read <pane>",
+            )),
         },
         _ => Err(ApiError::new(
             ErrorCode::BadRequest,
             "not pane input or output",
+            "orb help lists the commands",
         )),
     }
 }
+
+/// The hint for an unknown key name: the names `pane keys` knows.
+const KEY_NAMES: &str = "key names: enter esc tab backspace up down left right home end \
+     pageup pagedown shift+tab ctrl+<a-z> alt+<a-z>; for text use orb pane send <pane> <text>";
 
 /// Asks the screen loop for `request` and replies `{}` once it's done.
 fn typed(deps: &ControlDeps, request: PaneRequest) -> Reply {
@@ -614,7 +665,13 @@ fn project_for(
     id.and_then(|id| app.sessions.project(id))
         .filter(|project| !project.removed)
         .map(|project| project.id)
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such project"))
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                "no such project",
+                "orb session list shows each session's project",
+            )
+        })
 }
 
 /// A new session of `project` (else the caller's session's). Without
@@ -647,6 +704,7 @@ fn session_create(
                     "can't start a session in fresh world {}; make its colonies with <C-g> c",
                     world.title
                 ),
+                "run orb session create without --project from a pane of the world's colony",
             ));
         }
         Some(world) if worktree => {
@@ -656,13 +714,16 @@ fn session_create(
                     "fresh world {}'s folders aren't git repositories; for a worktree, name a project with --project",
                     world.title
                 ),
+                "name a git project with --project <id>; orb session list shows each session's project",
             ));
         }
-        Some(_) => Some(
-            asking
-                .map(|session| session.dir.clone())
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such session"))?,
-        ),
+        Some(_) => Some(asking.map(|session| session.dir.clone()).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                "no such session",
+                "run orb session create from inside an orb pane",
+            )
+        })?),
     };
     let parent = asking
         .filter(|session| session.kind == SessionKind::Colony || session.parent.is_some())
@@ -695,7 +756,11 @@ fn tiled(
         {
             Ok((session, at))
         }
-        _ => Err(ApiError::new(ErrorCode::BadRequest, why)),
+        _ => Err(ApiError::new(
+            ErrorCode::BadRequest,
+            why,
+            r#"orb pane list marks floating panes with "float": true"#,
+        )),
     }
 }
 
@@ -709,7 +774,7 @@ fn add_pane(deps: &ControlDeps, add: ApiAdd) -> Reply {
         .block_on(async { deps.sessions.ask(add).await })
     {
         Ok(pane) => Reply::ok(&PaneResult { pane }),
-        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)),
     }
 }
 
@@ -733,8 +798,9 @@ fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
         Err(SendError::HandlerError(ApiStartError::Starting)) => Reply::err(ApiError::new(
             ErrorCode::Starting,
             ApiStartError::Starting.to_string(),
+            "try again in a few seconds",
         )),
-        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+        Err(error) => Reply::err(ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)),
     }
 }
 
@@ -751,8 +817,56 @@ fn route(app: &AppState, request: &Request) -> Reply {
             Err(error) => Reply::err(error),
         },
         Op::AgentList => Reply::ok(&agents(app)),
-        _ => Reply::err(ApiError::new(ErrorCode::BadRequest, "not a list")),
+        Op::Here => match here(app, request.caller) {
+            Ok(here) => Reply::ok(&here),
+            Err(error) => Reply::err(error),
+        },
+        _ => Reply::err(ApiError::new(
+            ErrorCode::BadRequest,
+            "not a list",
+            "orb help lists the commands",
+        )),
     }
+}
+
+/// Where `caller` is: its pane, tab, session and agent; `no_target` outside orb.
+fn here(app: &AppState, caller: Option<PaneId>) -> Result<HereResult, ApiError> {
+    let Resolved {
+        session,
+        pane: Some(pane),
+    } = target::resolve(app, None, caller)?
+    else {
+        return Err(ApiError::new(
+            ErrorCode::NoTarget,
+            "not inside an orb pane",
+            "run orb from inside an orb pane",
+        ));
+    };
+    let tab = app.layouts.get(session).and_then(|layout| {
+        layout
+            .tabs()
+            .iter()
+            .position(|tab| tab.pane_ids().contains(&pane))
+            .map(|index| index + 1)
+    });
+    let session_name = app
+        .sessions
+        .session(session)
+        .map(|found| protocol::short_name(&app.sessions.title(found)))
+        .unwrap_or_default();
+    let agent = app
+        .sessions
+        .agent_rows(session, &app.layouts)
+        .into_iter()
+        .find(|&(_, shown)| shown == pane)
+        .map(|(agent, _)| agent.id);
+    Ok(HereResult {
+        pane,
+        tab,
+        session,
+        session_name,
+        agent,
+    })
 }
 
 /// The session named, else the caller's.
@@ -898,7 +1012,7 @@ mod tests {
     };
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
-        AgentKind, ApiError, Direction, Done, ErrorCode, ItemResult, Op, Reply, Request,
+        AgentKind, ApiError, Direction, Done, ErrorCode, ItemResult, Op, Reply, Request, SEE_LOG,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind};
@@ -1042,7 +1156,11 @@ mod tests {
                 name: "secret plan".into(),
             },
         };
-        let reply = Reply::err(ApiError::new(ErrorCode::Settled, "session is settled"));
+        let reply = Reply::err(ApiError::new(
+            ErrorCode::Settled,
+            "session is settled",
+            "orb session list shows open ones",
+        ));
 
         // When writing its log line.
         let text = log_text(&request, &reply);
@@ -1140,6 +1258,7 @@ mod tests {
         let reply = Reply::err(ApiError::new(
             ErrorCode::Failed,
             "orb's screen didn't answer",
+            SEE_LOG,
         ));
 
         // When writing its log line.
@@ -1515,5 +1634,152 @@ mod tests {
         );
         drop(client);
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn home_names_the_callers_pane_tab_and_session() -> Result<(), Report<ControlServerError>> {
+        // Given orb listening with session 1, pane 1 in tab 1, agent 1.
+        let (_dir, socket) = listening(state_with(vec![agent(1, AgentStatus::Idle)], 1))?;
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        // When bare orb runs in pane 1.
+        let shown = client::home(PaneId(1), &socket, &mut out, &mut err);
+
+        // Then it exits 0 naming the pane, tab and session, then where help is.
+        let out = String::from_utf8_lossy(&out);
+        assert!(
+            shown == Some(0)
+                && out.starts_with("orb: you're in pane 1 (tab 1) of session 1 ")
+                && out.ends_with("help: orb help · orb pane --help · orb agent --help\n"),
+            "the home view says where the caller is, got {shown:?}: {out} err: {}",
+            String::from_utf8_lossy(&err)
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn here_outside_a_pane_is_no_target() {
+        // Given session 1 with agent 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `orb.here` from outside orb.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::Here,
+            },
+        );
+
+        // Then the reply refuses it with no_target.
+        let code = match &planned {
+            Ok(Action::Answered(reply)) => reply.error.as_ref().map(|error| error.code),
+            _ => None,
+        };
+        assert_eq!(
+            code,
+            Some(ErrorCode::NoTarget),
+            "outside a pane there's no place to name, got {planned:?}"
+        );
+    }
+
+    /// Session 1 with idle agent 1 in pane 1, and float pane 2.
+    fn with_float() -> AppState {
+        let mut app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        app.layouts.add_float_hidden(SessionId(1), test_entry(2));
+        app
+    }
+
+    #[rstest::rstest]
+    #[case::settled(
+        settle(state_with(vec![stopped(1)], 1), &[1]),
+        Some(PaneId(1)),
+        Op::PaneClose { pane: PaneId(1) },
+        ErrorCode::Settled,
+    )]
+    #[case::not_found(
+        state_with(vec![agent(1, AgentStatus::Idle)], 1),
+        None,
+        Op::PaneClose { pane: PaneId(99) },
+        ErrorCode::NotFound,
+    )]
+    #[case::no_target(
+        state_with(vec![agent(1, AgentStatus::Idle)], 1),
+        None,
+        Op::PaneSplit { pane: None, direction: Direction::Right },
+        ErrorCode::NoTarget,
+    )]
+    #[case::bad_request(
+        with_float(),
+        None,
+        Op::PaneSplit { pane: Some(PaneId(2)), direction: Direction::Right },
+        ErrorCode::BadRequest,
+    )]
+    #[case::pane_busy(
+        state_with(vec![agent(1, AgentStatus::Idle)], 1),
+        None,
+        Op::AgentStart { pane: Some(PaneId(1)), kind: AgentKind::Claude, name: None, args: vec![] },
+        ErrorCode::PaneBusy,
+    )]
+    #[case::no_agent(
+        state_with(vec![stopped(1)], 1),
+        None,
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        ErrorCode::NoAgent,
+    )]
+    #[case::agent_blocked(
+        state_with(vec![agent(1, AgentStatus::NeedsInput)], 1),
+        None,
+        Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None },
+        ErrorCode::AgentBlocked,
+    )]
+    #[case::no_reply(
+        state_with(vec![agent(1, AgentStatus::Idle)], 1),
+        None,
+        Op::AgentReply { pane: PaneId(1) },
+        ErrorCode::NoReply,
+    )]
+    fn refusals_carry_a_hint_naming_a_command(
+        #[case] app: AppState,
+        #[case] caller: Option<PaneId>,
+        #[case] op: Op,
+        #[case] expected: ErrorCode,
+    ) {
+        // Given / When planning a request orb refuses.
+        let planned = plan(&app, &Request { caller, op });
+
+        // Then the refusal's hint names an orb command.
+        let refused = planned
+            .err()
+            .map(|error| (error.code, error.hint.unwrap_or_default()));
+        assert!(
+            refused
+                .as_ref()
+                .is_some_and(|(code, hint)| *code == expected && hint.contains("orb ")),
+            "a {expected:?} refusal says which command fixes it, got {refused:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_not_found_hint_points_at_agent_list() {
+        // Given session 1 with agent 1 in pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `agent get 99`.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::AgentGet { pane: PaneId(99) },
+            },
+        );
+
+        // Then the hint points at the agent list.
+        let hint = planned.err().and_then(|error| error.hint);
+        assert!(
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("orb agent list")),
+            "a missing agent pane points at orb agent list, got {hint:?}"
+        );
     }
 }

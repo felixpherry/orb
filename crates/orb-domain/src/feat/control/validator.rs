@@ -2,26 +2,35 @@
 
 use crate::AppState;
 use crate::feat::control::agent;
-use crate::feat::control::protocol::{ApiError, ErrorCode};
+use crate::feat::control::protocol::{AgentKind, ApiError, ErrorCode};
 use crate::feat::sessions::state::{Agent, AgentStatus};
 use crate::ids::{PaneId, SessionId};
 
 /// Refuses a change to settled session `session` with `settled`.
 pub(crate) fn not_settled(app: &AppState, session: SessionId) -> Result<(), ApiError> {
     match app.sessions.session(session) {
-        Some(found) if found.settled_at.is_some() => {
-            Err(ApiError::new(ErrorCode::Settled, "session is settled"))
-        }
+        Some(found) if found.settled_at.is_some() => Err(ApiError::new(
+            ErrorCode::Settled,
+            "session is settled",
+            "settled sessions are read-only; orb session list shows open ones",
+        )),
         _ => Ok(()),
     }
 }
 
-/// Refuses `pane` with `pane_busy` while an agent bound to it may be running.
-pub(crate) fn pane_free(app: &AppState, pane: PaneId) -> Result<(), ApiError> {
+/// Refuses `pane` with `pane_busy` while an agent bound to it may be running;
+/// the hint starts a `kind` agent in a new pane beside it.
+pub(crate) fn pane_free(app: &AppState, pane: PaneId, kind: AgentKind) -> Result<(), ApiError> {
     match agent::pane_agent(app, pane) {
         Some(found) if agent::live(found.status) => Err(ApiError::new(
             ErrorCode::PaneBusy,
             format!("an agent is already live in pane {}", pane.0),
+            format!(
+                "start it in a new pane: orb pane split {} --direction right, \
+                 then orb agent start --kind {} --pane <new pane>",
+                pane.0,
+                kind.program()
+            ),
         )),
         _ => Ok(()),
     }
@@ -34,7 +43,7 @@ pub(crate) fn agent_ready(app: &AppState, pane: PaneId) -> Result<&Agent, ApiErr
         .filter(|found| agent::live(found.status))
         .ok_or_else(|| agent::no_agent(pane))?;
     match found.status {
-        AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Err(agent::blocked()),
+        AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Err(agent::blocked(pane)),
         AgentStatus::Idle
         | AgentStatus::Working
         | AgentStatus::Unknown
@@ -47,7 +56,7 @@ pub(crate) fn agent_ready(app: &AppState, pane: PaneId) -> Result<&Agent, ApiErr
 #[cfg(test)]
 mod tests {
     use super::{agent_ready, not_settled, pane_free};
-    use crate::feat::control::protocol::ErrorCode;
+    use crate::feat::control::protocol::{AgentKind, ErrorCode};
     use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
@@ -108,7 +117,7 @@ mod tests {
         let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When checking a start in pane 1.
-        let checked = pane_free(&app, PaneId(1));
+        let checked = pane_free(&app, PaneId(1), AgentKind::Claude);
 
         // Then the pane is busy.
         assert_eq!(
@@ -119,12 +128,33 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn pane_busy_hint_starts_the_agent_in_a_new_pane() {
+        // Given idle agent 1 in pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When checking a pi start in pane 1.
+        let hint = pane_free(&app, PaneId(1), AgentKind::Pi)
+            .err()
+            .and_then(|error| error.hint);
+
+        // Then the hint splits pane 1 and starts pi in the new pane.
+        assert_eq!(
+            hint.as_deref(),
+            Some(
+                "start it in a new pane: orb pane split 1 --direction right, \
+                 then orb agent start --kind pi --pane <new pane>"
+            ),
+            "a busy pane points at a new pane beside it"
+        );
+    }
+
+    #[rstest::rstest]
     fn start_in_a_pane_whose_agent_stopped_is_allowed() {
         // Given pane 1 whose agent stopped.
         let app = state_with(vec![stopped(1)], 1);
 
         // When checking a start in pane 1.
-        let checked = pane_free(&app, PaneId(1));
+        let checked = pane_free(&app, PaneId(1), AgentKind::Claude);
 
         // Then the start may go ahead.
         assert_eq!(

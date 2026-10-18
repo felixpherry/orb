@@ -9,7 +9,7 @@ use std::time::Duration;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::feat::control::change::Change;
-use crate::feat::control::protocol::{ApiError, ErrorCode};
+use crate::feat::control::protocol::{ApiError, ErrorCode, SEE_LOG};
 use crate::ids::PaneId;
 
 /// What an agent asks the screen loop to do.
@@ -123,6 +123,7 @@ impl PaneControl {
             Err(ApiError::new(
                 ErrorCode::Failed,
                 "orb's screen didn't answer",
+                SEE_LOG,
             ))
         })
     }

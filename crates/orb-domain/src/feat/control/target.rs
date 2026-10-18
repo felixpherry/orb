@@ -30,13 +30,14 @@ pub(crate) fn resolve(
         None => Err(ApiError::new(
             ErrorCode::NoTarget,
             "no target given and not inside an orb pane",
+            "name the pane or session: orb pane list",
         )),
         Some(Target::Pane(pane)) => {
             let session = app
                 .layouts
                 .owner_of(pane)
                 .filter(|&session| live(app, session))
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, format!("no pane {}", pane.0)))?;
+                .ok_or_else(|| no_pane(pane))?;
             Ok(Resolved {
                 session,
                 pane: Some(pane),
@@ -46,11 +47,27 @@ pub(crate) fn resolve(
             session,
             pane: None,
         }),
-        Some(Target::Session(session)) => Err(ApiError::new(
-            ErrorCode::NotFound,
-            format!("no session {}", session.0),
-        )),
+        Some(Target::Session(session)) => Err(no_session(session)),
     }
+}
+
+/// `not_found` for pane `pane`, pointing at the pane lists.
+pub(crate) fn no_pane(pane: PaneId) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotFound,
+        format!("no pane {}", pane.0),
+        "orb pane list shows your session's panes; \
+         orb pane list --session <id> another session's",
+    )
+}
+
+/// `not_found` for session `session`, pointing at the session list.
+pub(crate) fn no_session(session: SessionId) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotFound,
+        format!("no session {}", session.0),
+        "orb session list shows the sessions",
+    )
 }
 
 /// Whether session `id` exists and isn't being deleted.

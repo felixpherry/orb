@@ -63,7 +63,13 @@ impl App {
         self.panes
             .get(&id)
             .filter(|pane| !pane.has_exited())
-            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no live pane"))
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::NotFound,
+                    "no live pane",
+                    "orb pane list shows the live panes",
+                )
+            })
     }
 
     /// Types `line`, an agent's start line, as a run does, unless a line
@@ -75,6 +81,7 @@ impl App {
             return Err(ApiError::new(
                 ErrorCode::PaneBusy,
                 "a command waits to be typed in this pane",
+                "wait for the pane's shell to start, then try again",
             ));
         }
         self.run_line(id, line)

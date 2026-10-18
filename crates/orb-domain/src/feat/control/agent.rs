@@ -59,11 +59,7 @@ pub(crate) fn pane_agent(app: &AppState, pane: PaneId) -> Option<&Agent> {
 /// `kind`'s program and `args` as one shell line, each arg quoted by
 /// [`quoted`].
 pub(crate) fn shell_line(kind: AgentKind, args: &[String]) -> String {
-    let program = match kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Pi => "pi",
-    };
-    args.iter().fold(program.to_owned(), |line, arg| {
+    args.iter().fold(kind.program().to_owned(), |line, arg| {
         format!("{line} {}", quoted(arg))
     })
 }
@@ -131,11 +127,15 @@ fn pane_open(app: &AppState, pane: PaneId) -> Result<(), ApiError> {
     validator::not_settled(app, resolved.session)
 }
 
-/// Why a prompt can't go to an agent that waits on the user.
-pub(crate) fn blocked() -> ApiError {
+/// Why a prompt can't go to `pane`'s agent, which waits on the user.
+pub(crate) fn blocked(pane: PaneId) -> ApiError {
     ApiError::new(
         ErrorCode::AgentBlocked,
         "the agent waits for approval or input",
+        format!(
+            "orb pane read {} to see the question, then tell the user",
+            pane.0
+        ),
     )
 }
 
@@ -144,12 +144,17 @@ pub(crate) fn no_agent(pane: PaneId) -> ApiError {
     ApiError::new(
         ErrorCode::NoAgent,
         format!("no live agent in pane {}", pane.0),
+        format!("orb agent start --kind claude --pane {}", pane.0),
     )
 }
 
 /// Why a wait ended without an answer: nobody is listening any more.
 fn caller_left() -> ApiError {
-    ApiError::new(ErrorCode::Timeout, "the caller hung up")
+    ApiError::new(
+        ErrorCode::Timeout,
+        "the caller hung up",
+        "keep the command running until orb replies",
+    )
 }
 
 /// Why a wait on `pane`'s agent gave up.
@@ -158,6 +163,10 @@ fn ran_out(pane: PaneId) -> ApiError {
         ErrorCode::Timeout,
         format!(
             "the agent in pane {} was still working at the timeout",
+            pane.0
+        ),
+        format!(
+            "orb agent get {0} shows its status; orb agent wait {0} waits again",
             pane.0
         ),
     )
@@ -250,6 +259,10 @@ pub(crate) fn wait_prompted(
                     pane.0,
                     timing.stall_gate.as_secs()
                 ),
+                format!(
+                    "orb pane read {} to see why; don't send the prompt twice",
+                    pane.0
+                ),
             ));
         }
         Some(Ok(())) | None => {}
@@ -279,7 +292,7 @@ pub(crate) fn wait_started(
                 harness: agent.harness.to_string(),
                 status: agent.status,
             })),
-            AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Some(Err(blocked())),
+            AgentStatus::NeedsApproval | AgentStatus::NeedsInput => Some(Err(blocked(pane))),
             AgentStatus::Unknown
             | AgentStatus::Stopped
             | AgentStatus::Gone
@@ -294,19 +307,27 @@ pub(crate) fn wait_started(
                 pane.0,
                 timing.start_limit.as_secs()
             ),
+            format!("orb pane read {} shows what the shell printed", pane.0),
         ))
     })
 }
 
 /// The reply of the last exchange that has one, in `transcript` as `harness`
-/// reads it; `no_reply` when there is none or orb doesn't know the harness,
-/// `failed` when the file can't be read.
+/// reads it, for the agent in `pane`; `no_reply` when there is none or orb
+/// doesn't know the harness, `failed` when the file can't be read.
 pub(crate) fn last_reply(
     harnesses: &Harnesses,
     harness: &HarnessId,
     transcript: &Path,
+    pane: PaneId,
 ) -> Result<ReplyResult, ApiError> {
-    let no_reply = |why: &str| ApiError::new(ErrorCode::NoReply, why);
+    let no_reply = |why: &str| {
+        ApiError::new(
+            ErrorCode::NoReply,
+            why,
+            format!("orb agent wait {0}, then orb agent reply {0}", pane.0),
+        )
+    };
     let reader = harnesses
         .get(harness)
         .ok_or_else(|| no_reply(&format!("orb can't read {harness} transcripts")))?;
@@ -314,6 +335,7 @@ pub(crate) fn last_reply(
         ApiError::new(
             ErrorCode::Failed,
             format!("couldn't read {}: {error}", transcript.display()),
+            format!("orb pane read {} shows the agent's screen", pane.0),
         )
     })?;
     let (text, written) = exchanges
@@ -338,7 +360,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use super::{Timing, last_reply, shell_line, wait_done, wait_prompted, wait_started};
     use crate::State;
@@ -395,9 +417,14 @@ mod tests {
         let harnesses = Harnesses::new(vec![Arc::new(
             FakeHarness::new("claude", Vec::new()).with_exchanges(exchanges),
         )]);
-        last_reply(&harnesses, &HarnessId::new("claude"), Path::new("/t"))
-            .map(|reply| reply.text)
-            .map_err(|error| error.code)
+        last_reply(
+            &harnesses,
+            &HarnessId::new("claude"),
+            Path::new("/t"),
+            PaneId(1),
+        )
+        .map(|reply| reply.text)
+        .map_err(|error| error.code)
     }
 
     #[rstest::rstest]
@@ -659,5 +686,55 @@ mod tests {
             "a transcript written since the paste means the turn ran"
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn wait_timeout_hint_names_agent_get() {
+        // Given working agent 1 in pane 1 that never finishes.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Working)], 1));
+
+        // When waiting on pane 1 past a deadline that has come.
+        let waited = wait_done(
+            &state,
+            PaneId(1),
+            &|| {},
+            &|| false,
+            FAST,
+            Some(Instant::now()),
+        );
+
+        // Then the timeout points at the agent's status.
+        let hint = waited.err().and_then(|error| error.hint);
+        assert!(
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("orb agent get 1")),
+            "a wait that ran out points at orb agent get, got {hint:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stalled_prompt_hint_says_to_read_the_pane() {
+        // Given idle agent 1 in pane 1 with no transcript, which never starts
+        // working.
+        let state = State::new(state_with(vec![agent(1, AgentStatus::Idle)], 1));
+
+        // When waiting on a prompt with no deadline.
+        let waited = wait_prompted(
+            &state,
+            PaneId(1),
+            &|| {},
+            &|| false,
+            FAST,
+            None,
+            SystemTime::now(),
+        );
+
+        // Then the stall points at the pane's screen.
+        let hint = waited.err().and_then(|error| error.hint);
+        assert!(
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("orb pane read 1")),
+            "a stalled prompt says to read the pane, got {hint:?}"
+        );
     }
 }

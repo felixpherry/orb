@@ -309,7 +309,11 @@ mod tests {
 
     /// orb refusing every request because the session is settled.
     fn settled(_request: &Request) -> Reply {
-        Reply::err(ApiError::new(ErrorCode::Settled, "session is settled"))
+        Reply::err(ApiError::new(
+            ErrorCode::Settled,
+            "session is settled",
+            "orb session list shows open ones",
+        ))
     }
 
     /// Session 1 holding pane 1.

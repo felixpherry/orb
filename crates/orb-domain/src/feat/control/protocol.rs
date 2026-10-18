@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::feat::layout::tree::Split;
 use crate::feat::plate::Verb;
@@ -16,6 +17,20 @@ pub const SOCKET_FILE: &str = "orb.sock";
 /// Where a running orb listens, given orb's folder.
 pub fn socket_path(orb_root: &Path) -> PathBuf {
     orb_root.join(SOCKET_FILE)
+}
+
+/// How many graphemes of a name go on the wire.
+pub(crate) const NAME_LIMIT: usize = 60;
+
+/// `name` cut to [`NAME_LIMIT`] graphemes, ending in `…` when cut.
+pub(crate) fn short_name(name: &str) -> String {
+    let graphemes: Vec<&str> = name.graphemes(true).collect();
+    if graphemes.len() <= NAME_LIMIT {
+        return name.to_owned();
+    }
+    let mut cut: String = graphemes.into_iter().take(NAME_LIMIT - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// One request: who asks (the pane the command runs in, if any) and what for.
@@ -52,6 +67,9 @@ pub enum Op {
     /// Every live agent in every session.
     #[serde(rename = "agent.list")]
     AgentList,
+    /// Where the caller is: its pane, tab and session.
+    #[serde(rename = "orb.here")]
+    Here,
     /// A new shell beside a pane (or its whole stack).
     #[serde(rename = "pane.split")]
     PaneSplit {
@@ -248,6 +266,16 @@ pub enum AgentKind {
     Pi,
 }
 
+impl AgentKind {
+    /// The program it runs, as `--kind` names it.
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Pi => "pi",
+        }
+    }
+}
+
 /// Which side of a pane `pane split` puts the new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -299,27 +327,48 @@ pub enum ErrorCode {
     Failed,
 }
 
-/// A failure as it goes on the wire: a code and a message for people.
+/// A failure as it goes on the wire: a code, a message for people and the
+/// step that fixes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     /// Why it failed.
     pub code: ErrorCode,
     /// What happened, in words.
     pub message: String,
+    /// The command or step that fixes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl ApiError {
-    /// A failure with this code and message.
-    pub fn new<M>(code: ErrorCode, message: M) -> Self
+    /// A refusal with this code, message and hint.
+    pub fn new<M, H>(code: ErrorCode, message: M, hint: H) -> Self
     where
         M: Into<String>,
+        H: Into<String>,
     {
         Self {
             code,
             message: message.into(),
+            hint: Some(hint.into()),
+        }
+    }
+
+    /// The same refusal with `hint` in place of its own.
+    #[must_use]
+    pub fn with_hint<H>(self, hint: H) -> Self
+    where
+        H: Into<String>,
+    {
+        Self {
+            hint: Some(hint.into()),
+            ..self
         }
     }
 }
+
+/// The hint for a failure inside orb.
+pub const SEE_LOG: &str = "try again; orb's log at ~/.orb/orb.log may say why";
 
 /// One reply: `ok` with a result, or not `ok` with an error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,7 +396,7 @@ impl Reply {
                 result: Some(value),
                 error: None,
             },
-            Err(error) => Self::err(ApiError::new(ErrorCode::Failed, error.to_string())),
+            Err(error) => Self::err(ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG)),
         }
     }
 
@@ -408,6 +457,19 @@ pub struct PaneRow {
     pub agent: Option<AgentId>,
     /// Whether it is the pane the command ran from.
     pub caller: bool,
+}
+
+/// `orb.here`'s result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HereResult {
+    pub pane: PaneId,
+    /// Its tab, counted from 1; none for a floating pane.
+    pub tab: Option<usize>,
+    pub session: SessionId,
+    /// The session's name, cut as list names are.
+    pub session_name: String,
+    /// The agent live in the pane, if any.
+    pub agent: Option<AgentId>,
 }
 
 /// `pane list`'s result.

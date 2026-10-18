@@ -2707,6 +2707,41 @@ fn agent_launch_into_a_pane_with_a_waiting_line_is_pane_busy() -> io::Result<()>
     Ok(())
 }
 
+#[rstest::rstest]
+fn agent_launch_pane_busy_hint_says_to_wait_for_the_shell() -> io::Result<()> {
+    // Given attached pane 1, silent so far, with a run of `first` waiting to
+    // be typed.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "first".into(),
+    };
+    let (run_tx, _run_rx) = mpsc::channel();
+    test.app
+        .handle(LoopEvent::Control(run, run_tx), &mut io::sink())?;
+    let (tx, rx) = mpsc::channel();
+
+    // When an agent starts an agent in pane 1.
+    let launch = PaneRequest::Launch {
+        pane: PaneId(1),
+        line: "claude".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(launch, tx), &mut io::sink())?;
+
+    // Then the refusal says to wait for the shell.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        answer.err().and_then(|error| error.hint).as_deref(),
+        Some("wait for the pane's shell to start, then try again"),
+        "a pane with a line waiting says when to start again"
+    );
+    Ok(())
+}
+
 /// A client that asks for kitty flags 3 (disambiguate, event types), then
 /// writes the raw bytes typed into it to `typed`.
 fn records_raw_with_event_types(_: &ZmxSession) -> Vec<OsString> {

@@ -36,6 +36,7 @@ wherror = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+tempfile = { workspace = true }
 
 [workspace.dependencies]
 orb-term = { path = "crates/orb-term" }
