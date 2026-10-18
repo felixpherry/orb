@@ -177,10 +177,11 @@ orb plate list                       # {"items": [...]}
 ## Commands
 
 ```
-orb session list
+orb session list [--all] [--project <id>]
 orb tab list [--session <id>]
 orb pane list [--session <id>]
-orb agent list
+orb agent list [--all] [--session <id>] [--status <status>[,<status>...]]
+orb project list
 orb session create [--project <id>] [--worktree] [--name <text>]
 orb tab create [--session <id>]
 orb pane split [<pane>] --direction right|down
@@ -196,12 +197,12 @@ orb session focus <session>
 orb pane send <pane> <text>
 orb pane keys <pane> <key>...
 orb pane run <pane> <command>
-orb pane read [<pane>] [--lines <n>]
+orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]
 orb agent start --kind claude|pi [--pane <id>] [--name <text>] [-- <args>...]
 orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
 orb agent wait <pane> [--timeout <ms>]
 orb agent get <pane>
-orb agent reply <pane>
+orb agent reply <pane> [--json]
 orb plate add <title> --verb <verb> [--what <text>] [--link <url>]... [--urgent] [--waiting] [--pane <id>]
 orb plate update <item> [--title <text>] [--verb <verb>] [--what <text>] [--link <url>]... [--urgent|--not-urgent] [--waiting|--your-move]
 orb plate done <item>

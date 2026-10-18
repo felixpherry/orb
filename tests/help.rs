@@ -32,6 +32,7 @@ fn orb(words: &[&str], home: &Path) -> io::Result<Option<Output>> {
 #[case::help_flag(&["--help"], "orb: drive the running orb")]
 #[case::short_help(&["-h"], "orb: drive the running orb")]
 #[case::noun_help(&["pane", "--help"], "orb pane: ")]
+#[case::project_help(&["project", "--help"], "orb project: ")]
 #[case::command_help(&["pane", "split", "--help"], "usage: orb pane split")]
 fn help_words_print_help_and_exit_0(
     #[case] words: &[&str],

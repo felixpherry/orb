@@ -19,12 +19,13 @@ use wherror::Error;
 use crate::command::SessionsCommand;
 use crate::feat::control::agent::{self, Timing};
 use crate::feat::control::change::Change;
+use crate::feat::control::lists::{agent_detail, route};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest, key_event};
 use crate::feat::control::protocol::{
-    self, AgentRow, AgentsResult, ApiError, Done, ErrorCode, HereResult, Op, PaneResult, PaneRow,
-    PanesResult, PromptResult, ReadResult, Reply, Request, SEE_LOG, SessionRow, SessionsResult,
-    StartResult, TabRow, TabsResult,
+    ApiError, Done, ErrorCode, Op, PaneResult, PromptResult, ReadResult, Reply, Request, SEE_LOG,
+    StartResult,
 };
+use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
 use crate::feat::harness::{HarnessId, Harnesses};
@@ -32,7 +33,7 @@ use crate::feat::plate::api::{self as plate, PlateAsk};
 use crate::feat::sessions::sessions_actor::{
     ApiAdd, ApiPlace, ApiStart, ApiStartError, SessionsActor,
 };
-use crate::feat::sessions::state::{Agent, SessionKind};
+use crate::feat::sessions::state::SessionKind;
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
 
@@ -204,8 +205,13 @@ enum Action {
     Change(Change),
     /// Typing the screen loop does into a pane: a send, keys or a run.
     Pane(PaneRequest),
-    /// A pane's text the screen loop reads.
-    Read(PaneRequest),
+    /// A pane's text the screen loop reads, then cut to its first `head` and
+    /// last `tail` lines.
+    Read {
+        request: PaneRequest,
+        head: Option<usize>,
+        tail: Option<usize>,
+    },
     /// An agent the screen loop types into a pane, then waits for.
     StartAgent {
         pane: PaneId,
@@ -243,10 +249,18 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
-        Ok(Action::Read(read)) => {
-            return match deps.panes.ask(read) {
+        Ok(Action::Read {
+            request,
+            head,
+            tail,
+        }) => {
+            return match deps.panes.ask(request) {
                 Ok(text) => Reply::ok(&ReadResult {
-                    text: text.unwrap_or_default(),
+                    text: screen_text::cut(
+                        &screen_text::trim(&text.unwrap_or_default()),
+                        head,
+                        tail,
+                    ),
                 }),
                 Err(error) => Reply::err(error),
             };
@@ -324,9 +338,12 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
     let caller = request.caller;
     let add = |session, place| Ok(Action::Add(ApiAdd { session, place }));
     match &request.op {
-        Op::SessionList | Op::TabList { .. } | Op::PaneList { .. } | Op::AgentList | Op::Here => {
-            Ok(Action::Answered(route(app, request)))
-        }
+        Op::SessionList { .. }
+        | Op::TabList { .. }
+        | Op::PaneList { .. }
+        | Op::AgentList { .. }
+        | Op::ProjectList
+        | Op::Here => Ok(Action::Answered(route(app, request))),
         Op::PaneSplit { pane, direction } => {
             let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
             add(
@@ -457,7 +474,7 @@ fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, A
                 .map_err(agent_pane)?
                 .session;
             let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
-            Ok(Action::Answered(Reply::ok(&agent_row(
+            Ok(Action::Answered(Reply::ok(&agent_detail(
                 app, session, agent, *pane,
             ))))
         }
@@ -594,13 +611,22 @@ fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, Ap
                 line: command.clone(),
             }))
         }
-        Op::PaneRead { pane, lines } => match changing(app, pane.map(Target::Pane), caller)? {
+        Op::PaneRead {
+            pane,
+            lines,
+            head,
+            tail,
+        } => match changing(app, pane.map(Target::Pane), caller)? {
             Resolved {
                 pane: Some(pane), ..
-            } => Ok(Action::Read(PaneRequest::Read {
-                pane,
-                lines: *lines,
-            })),
+            } => Ok(Action::Read {
+                request: PaneRequest::Read {
+                    pane,
+                    lines: *lines,
+                },
+                head: *head,
+                tail: *tail,
+            }),
             Resolved { pane: None, .. } => Err(ApiError::new(
                 ErrorCode::BadRequest,
                 "no pane to read",
@@ -669,7 +695,7 @@ fn project_for(
             ApiError::new(
                 ErrorCode::NotFound,
                 "no such project",
-                "orb session list shows each session's project",
+                "orb project list shows the projects",
             )
         })
 }
@@ -714,7 +740,7 @@ fn session_create(
                     "fresh world {}'s folders aren't git repositories; for a worktree, name a project with --project",
                     world.title
                 ),
-                "name a git project with --project <id>; orb session list shows each session's project",
+                "name a git project with --project <id>; orb project list shows the projects",
             ));
         }
         Some(_) => Some(asking.map(|session| session.dir.clone()).ok_or_else(|| {
@@ -804,191 +830,6 @@ fn start_session(deps: &ControlDeps, start: ApiStart) -> Reply {
     }
 }
 
-/// The reply to a list `request`, read from `app`.
-fn route(app: &AppState, request: &Request) -> Reply {
-    match request.op {
-        Op::SessionList => Reply::ok(&sessions(app)),
-        Op::TabList { session } => match in_session(app, session, request.caller) {
-            Ok(resolved) => Reply::ok(&tabs(app, resolved.session)),
-            Err(error) => Reply::err(error),
-        },
-        Op::PaneList { session } => match in_session(app, session, request.caller) {
-            Ok(resolved) => Reply::ok(&panes(app, resolved.session, request.caller)),
-            Err(error) => Reply::err(error),
-        },
-        Op::AgentList => Reply::ok(&agents(app)),
-        Op::Here => match here(app, request.caller) {
-            Ok(here) => Reply::ok(&here),
-            Err(error) => Reply::err(error),
-        },
-        _ => Reply::err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not a list",
-            "orb help lists the commands",
-        )),
-    }
-}
-
-/// Where `caller` is: its pane, tab, session and agent; `no_target` outside orb.
-fn here(app: &AppState, caller: Option<PaneId>) -> Result<HereResult, ApiError> {
-    let Resolved {
-        session,
-        pane: Some(pane),
-    } = target::resolve(app, None, caller)?
-    else {
-        return Err(ApiError::new(
-            ErrorCode::NoTarget,
-            "not inside an orb pane",
-            "run orb from inside an orb pane",
-        ));
-    };
-    let tab = app.layouts.get(session).and_then(|layout| {
-        layout
-            .tabs()
-            .iter()
-            .position(|tab| tab.pane_ids().contains(&pane))
-            .map(|index| index + 1)
-    });
-    let session_name = app
-        .sessions
-        .session(session)
-        .map(|found| protocol::short_name(&app.sessions.title(found)))
-        .unwrap_or_default();
-    let agent = app
-        .sessions
-        .agent_rows(session, &app.layouts)
-        .into_iter()
-        .find(|&(_, shown)| shown == pane)
-        .map(|(agent, _)| agent.id);
-    Ok(HereResult {
-        pane,
-        tab,
-        session,
-        session_name,
-        agent,
-    })
-}
-
-/// The session named, else the caller's.
-fn in_session(
-    app: &AppState,
-    session: Option<SessionId>,
-    caller: Option<PaneId>,
-) -> Result<Resolved, ApiError> {
-    target::resolve(app, session.map(Target::Session), caller)
-}
-
-/// Every session not being deleted, settled ones included.
-fn sessions(app: &AppState) -> SessionsResult {
-    let sessions = app
-        .sessions
-        .sessions
-        .iter()
-        .filter(|session| !app.sessions.deleting.contains(&session.id))
-        .map(|session| SessionRow {
-            id: session.id,
-            project: session.project,
-            name: app.sessions.title(session),
-            dir: session.dir.to_string_lossy().into_owned(),
-            branch: session.branch.clone(),
-            settled: session.settled_at.is_some(),
-        })
-        .collect();
-    SessionsResult { sessions }
-}
-
-/// Session `session`'s tabs, numbered from 1 as the tab bar shows them, with
-/// their panes; none without a layout.
-fn tabs(app: &AppState, session: SessionId) -> TabsResult {
-    let tabs = app
-        .layouts
-        .get(session)
-        .map(|layout| {
-            layout
-                .tabs()
-                .iter()
-                .enumerate()
-                .map(|(index, tab)| TabRow {
-                    index: index + 1,
-                    panes: tab.pane_ids(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    TabsResult { session, tabs }
-}
-
-/// Session `session`'s panes: each tab's, then the floats, with `caller`'s
-/// marked.
-fn panes(app: &AppState, session: SessionId, caller: Option<PaneId>) -> PanesResult {
-    let Some(layout) = app.layouts.get(session) else {
-        return PanesResult { panes: Vec::new() };
-    };
-    let agents = app.sessions.agent_rows(session, &app.layouts);
-    let placed = layout
-        .tabs()
-        .iter()
-        .enumerate()
-        .flat_map(|(index, tab)| {
-            tab.pane_ids()
-                .into_iter()
-                .map(move |pane| (pane, Some(index + 1)))
-        })
-        .chain(layout.floats().pane_ids().map(|pane| (pane, None)));
-    let panes = placed
-        .map(|(pane, tab)| {
-            let entry = app.layouts.entry(pane);
-            PaneRow {
-                id: pane,
-                session,
-                tab,
-                float: tab.is_none(),
-                name: entry.and_then(|entry| entry.name.clone()),
-                cwd: entry
-                    .map(|entry| entry.cwd.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                agent: agents
-                    .iter()
-                    .find(|&&(_, shown)| shown == pane)
-                    .map(|(agent, _)| agent.id),
-                caller: Some(pane) == caller,
-            }
-        })
-        .collect();
-    PanesResult { panes }
-}
-
-/// Every live agent in every session not being deleted.
-fn agents(app: &AppState) -> AgentsResult {
-    let agents = app
-        .sessions
-        .sessions
-        .iter()
-        .flat_map(|session| {
-            app.sessions
-                .agent_rows(session.id, &app.layouts)
-                .into_iter()
-                .map(move |(agent, pane)| agent_row(app, session.id, agent, pane))
-        })
-        .collect();
-    AgentsResult { agents }
-}
-
-/// `agent`'s row in `agent list`, running in `pane` of `session`.
-fn agent_row(app: &AppState, session: SessionId, agent: &Agent, pane: PaneId) -> AgentRow {
-    AgentRow {
-        id: agent.id,
-        pane: Some(pane),
-        session,
-        harness: agent.harness.to_string(),
-        name: app.layouts.agent_name(pane, Some(agent)).to_owned(),
-        title: agent.title.clone(),
-        status: agent.status,
-        cwd: agent.cwd.to_string_lossy().into_owned(),
-        branch: agent.branch.clone(),
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,
@@ -1007,17 +848,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Action, ControlServerError, hung_up, log_text, open, plan, reply_line, route, serve,
+        Action, ControlServerError, hung_up, log_text, open, plan, reply_line, serve,
         watch_for_hang_up,
     };
     use crate::feat::control::client;
+    use crate::feat::control::lists::route;
+    use crate::feat::control::pane_control::PaneRequest;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, Direction, Done, ErrorCode, ItemResult, Op, Reply, Request, SEE_LOG,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::sessions::state::{AgentStatus, ProjectKind, SessionKind};
     use crate::ids::{PaneId, PlateItemId, SessionId};
-    use crate::intent_handler::test_support::{agent, settle, state_with, stopped};
+    use crate::intent_handler::test_support::{agent, named, settle, state_with, stopped};
     use crate::{AppState, Log, State};
 
     /// Listens on a socket in a fresh temp dir, answering from `app`.
@@ -1121,7 +964,12 @@ mod tests {
     #[case::pane_send(Op::PaneSend { pane: PaneId(1), text: "x".into() })]
     #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
     #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into() })]
-    #[case::pane_read(Op::PaneRead { pane: None, lines: 0 })]
+    #[case::pane_read(Op::PaneRead {
+        pane: None,
+        lines: 0,
+        head: None,
+        tail: None,
+    })]
     #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![] })]
     #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None })]
     #[case::agent_wait(Op::AgentWait { pane: PaneId(1), timeout: None })]
@@ -1780,6 +1628,79 @@ mod tests {
             hint.as_deref()
                 .is_some_and(|hint| hint.contains("orb agent list")),
             "a missing agent pane points at orb agent list, got {hint:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_get_keeps_the_full_name_cwd_and_branch() {
+        // Given agent 1 in pane 1 with a 700-grapheme title, on branch "fix".
+        let long = "e\u{301}".repeat(700);
+        let mut agent_1 = named(agent(1, AgentStatus::Idle), &long);
+        agent_1.branch = Some("fix".to_owned());
+        let app = state_with(vec![agent_1], 1);
+
+        // When planning `agent get 1`.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::AgentGet { pane: PaneId(1) },
+            },
+        );
+
+        // Then the answer has the whole title as name and title, its cwd and
+        // its branch.
+        let row = match &planned {
+            Ok(Action::Answered(reply)) => reply.result.clone(),
+            _ => None,
+        };
+        let field = |key: &str| row.as_ref()?.get(key)?.as_str().map(str::to_owned);
+        assert_eq!(
+            (field("name"), field("title"), field("cwd"), field("branch")),
+            (
+                Some(long.clone()),
+                Some(long.clone()),
+                Some("/work/1".to_owned()),
+                Some("fix".to_owned())
+            ),
+            "agent get shows the agent in full, got {planned:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_read_plans_its_head_and_tail() {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning `pane read 1 --lines 50 --head 10 --tail 5`.
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::PaneRead {
+                    pane: Some(PaneId(1)),
+                    lines: 50,
+                    head: Some(10),
+                    tail: Some(5),
+                },
+            },
+        );
+
+        // Then the screen loop reads 50 lines of history, and the cut keeps
+        // the head and tail asked for.
+        assert!(
+            matches!(
+                &planned,
+                Ok(Action::Read {
+                    request: PaneRequest::Read {
+                        pane: PaneId(1),
+                        lines: 50
+                    },
+                    head: Some(10),
+                    tail: Some(5),
+                })
+            ),
+            "the read carries its lines, head and tail, got {planned:?}"
         );
     }
 }

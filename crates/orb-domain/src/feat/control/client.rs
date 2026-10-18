@@ -1,5 +1,6 @@
-//! The `orb session|tab|pane|agent|plate …` commands: turn the words typed into one
-//! request, send it to the running orb, print its reply and pick the exit code
+//! The `orb session|tab|pane|agent|plate|project …` commands: turn the words typed into one
+//! request, send it to the running orb, print its reply (JSON for data, plain
+//! text for a pane's screen and an agent's answer) and pick the exit code
 //! (0 done, 1 refused or orb not running, 2 typed wrong). `orb help` and
 //! `--help` print help instead, with no orb needed. Bare `orb` in an orb pane
 //! says which pane, tab and session it is.
@@ -19,6 +20,7 @@ use crate::feat::control::help::{self, CommandHelp};
 use crate::feat::control::protocol::{
     AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, SEE_LOG,
 };
+use crate::feat::sessions::state::AgentStatus;
 use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
 
 /// What `orb` does with the words it was started with.
@@ -49,8 +51,9 @@ pub fn entry(args: &[OsString], in_pane: bool) -> Entry {
 }
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
-/// pane `caller` when it runs inside orb. The reply's result or the help asked
-/// for goes to `out`, an error or a usage error to `err`; returns the exit code.
+/// pane `caller` when it runs inside orb. The reply's result (plain text for a
+/// pane's screen and an agent's answer unless `--json` is given, else JSON) or
+/// the help asked for goes to `out`, an error or a usage error to `err`; returns the exit code.
 pub fn run<O, E>(
     args: &[OsString],
     caller: Option<PaneId>,
@@ -82,12 +85,24 @@ where
         }
     };
     let limit = reply_limit(&op);
+    let as_text = prints_text(&op) && !words.as_deref().is_some_and(asked_json);
     match ask(socket, &Request { caller, op }, limit) {
         Ok(Reply {
             ok: true, result, ..
         }) => {
             let result = result.unwrap_or(serde_json::Value::Null);
-            let _ = writeln!(out, "{result}");
+            match result
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .filter(|_| as_text)
+            {
+                Some(text) => {
+                    let _ = writeln!(out, "{}", text.trim_end_matches('\n'));
+                }
+                None => {
+                    let _ = writeln!(out, "{result}");
+                }
+            }
             0
         }
         Ok(Reply { error, .. }) => {
@@ -101,6 +116,20 @@ where
             1
         }
     }
+}
+
+/// Whether `op`'s reply prints as plain text unless `--json` is given.
+fn prints_text(op: &Op) -> bool {
+    matches!(op, Op::PaneRead { .. } | Op::AgentReply { .. })
+}
+
+/// Whether `--json` is among `words` before `--`.
+fn asked_json(words: &[&str]) -> bool {
+    words
+        .split(|word| *word == "--")
+        .next()
+        .unwrap_or_default()
+        .contains(&"--json")
 }
 
 /// Bare `orb` in pane `caller`: asks the orb on `socket` where the caller
@@ -446,20 +475,7 @@ pub(super) fn parse(args: &[OsString]) -> Result<Op, UsageError> {
 fn build(command: &'static CommandHelp, rest: &[&str]) -> Result<Op, UsageProblem> {
     let words = || Words::split(rest, command);
     Ok(match (command.noun, command.verb) {
-        ("session", "list") => {
-            words()?.no_positional()?;
-            Op::SessionList
-        }
-        ("agent", "list") => {
-            words()?.no_positional()?;
-            Op::AgentList
-        }
-        ("tab", "list") => Op::TabList {
-            session: session_only(&words()?)?,
-        },
-        ("pane", "list") => Op::PaneList {
-            session: session_only(&words()?)?,
-        },
+        (noun, "list") if noun != "plate" => list_words(command, noun, rest)?,
         ("pane", "float") => Op::PaneFloat {
             session: session_only(&words()?)?,
         },
@@ -537,6 +553,43 @@ fn build(command: &'static CommandHelp, rest: &[&str]) -> Result<Op, UsageProble
         ("agent", verb) => agent_words(command, verb, rest)?,
         ("plate", verb) => plate_words(command, verb, rest)?,
         (_, verb) => return Err(unknown_verb(verb)),
+    })
+}
+
+/// The list request of `noun` its words ask for.
+fn list_words(
+    command: &'static CommandHelp,
+    noun: &str,
+    rest: &[&str],
+) -> Result<Op, UsageProblem> {
+    let words = Words::split(rest, command)?;
+    Ok(match noun {
+        "session" => {
+            words.no_positional()?;
+            Op::SessionList {
+                all: words.switch("--all"),
+                project: words.number("--project")?.map(ProjectId),
+            }
+        }
+        "agent" => {
+            words.no_positional()?;
+            Op::AgentList {
+                all: words.switch("--all"),
+                session: words.number("--session")?.map(SessionId),
+                status: statuses(words.value("--status"))?,
+            }
+        }
+        "project" => {
+            words.no_positional()?;
+            Op::ProjectList
+        }
+        "tab" => Op::TabList {
+            session: session_only(&words)?,
+        },
+        "pane" => Op::PaneList {
+            session: session_only(&words)?,
+        },
+        _ => return Err(unknown_verb("list")),
     })
 }
 
@@ -701,6 +754,8 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
             Op::PaneRead {
                 pane: words.target("<pane>")?.map(PaneId),
                 lines: words.number("--lines")?.unwrap_or(0),
+                head: words.number("--head")?,
+                tail: words.number("--tail")?,
             }
         }
         _ => return Err(unknown_verb(verb)),
@@ -860,6 +915,24 @@ impl<'a> Words<'a> {
     }
 }
 
+/// `--status`'s comma-separated names as statuses, none when it wasn't
+/// given; `NotInSet` naming the first name that is no status.
+fn statuses(names: Option<&str>) -> Result<Vec<AgentStatus>, UsageProblem> {
+    names.map_or(Ok(Vec::new()), |names| {
+        names
+            .split(',')
+            .map(|name| {
+                serde_json::from_value(serde_json::Value::from(name))
+                    .ok()
+                    .ok_or_else(|| UsageProblem::NotInSet {
+                        flag: "--status",
+                        got: name.to_owned(),
+                    })
+            })
+            .collect()
+    })
+}
+
 /// `word`, the value of `what`, as a number; `NotANumber` when it isn't one.
 fn number<T>(what: &'static str, word: &str) -> Result<T, UsageProblem>
 where
@@ -988,8 +1061,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{Entry, UsageProblem, entry, home, parse, reply_limit, run, timeout_hint};
+    use crate::Log;
     use crate::feat::control::protocol::{AgentKind, Direction, Op};
-    use crate::ids::{PaneId, PlateItemId, SessionId};
+    use crate::feat::control::server;
+    use crate::feat::sessions::state::AgentStatus;
+    use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
 
     /// `words` as command-line arguments.
     fn args(words: &[&str]) -> Vec<OsString> {
@@ -1075,8 +1151,18 @@ mod tests {
         &["pane", "run", "3", "just test"],
         Op::PaneRun { pane: PaneId(3), command: "just test".into() },
     )]
-    #[case::read_own(&["pane", "read", "--lines", "5"], Op::PaneRead { pane: None, lines: 5 })]
-    #[case::read_named(&["pane", "read", "3"], Op::PaneRead { pane: Some(PaneId(3)), lines: 0 })]
+    #[case::read_own(&["pane", "read", "--lines", "5"], Op::PaneRead {
+        pane: None,
+        lines: 5,
+        head: None,
+        tail: None,
+    })]
+    #[case::read_named(&["pane", "read", "3"], Op::PaneRead {
+        pane: Some(PaneId(3)),
+        lines: 0,
+        head: None,
+        tail: None,
+    })]
     fn pane_io_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
         // Given / When parsing the words.
         let op = parse(&args(words));
@@ -1271,7 +1357,10 @@ mod tests {
         Op::SessionCreate { project: None, worktree: true, name: None },
         Some(Duration::from_secs(180)),
     )]
-    #[case::list(Op::SessionList, Some(Duration::from_secs(60)))]
+    #[case::list(
+        Op::SessionList { all: false, project: None },
+        Some(Duration::from_secs(60))
+    )]
     fn reply_limit_outlasts_the_asked_timeout(#[case] op: Op, #[case] expected: Option<Duration>) {
         // Given / When working out how long to wait for the reply.
         let limit = reply_limit(&op);
@@ -1471,7 +1560,7 @@ mod tests {
         let (code, out, _) = ran(&["help"])?;
 
         // Then it exits 0 naming every noun and how to get a noun's help.
-        let nouns = ["session", "tab", "pane", "agent", "plate"];
+        let nouns = ["session", "tab", "pane", "agent", "plate", "project"];
         assert!(
             code == 0
                 && nouns.iter().all(|noun| out.contains(noun))
@@ -1622,5 +1711,151 @@ mod tests {
 
         // Then it points at the agent or pane named, else the sessions.
         assert_eq!(hint, expected, "{op:?} times out with that hint");
+    }
+
+    #[rstest::rstest]
+    #[case::session_list(
+        &["session", "list", "--all", "--project", "4"],
+        Op::SessionList { all: true, project: Some(ProjectId(4)) },
+    )]
+    #[case::agent_list_status(
+        &["agent", "list", "--status", "needs_approval,needs_input", "--session", "7"],
+        Op::AgentList {
+            all: false,
+            session: Some(SessionId(7)),
+            status: vec![AgentStatus::NeedsApproval, AgentStatus::NeedsInput],
+        },
+    )]
+    #[case::agent_list_all(
+        &["agent", "list", "--all"],
+        Op::AgentList { all: true, session: None, status: vec![] },
+    )]
+    #[case::project_list(&["project", "list"], Op::ProjectList)]
+    #[case::pane_read_cut(
+        &["pane", "read", "3", "--lines", "50", "--head", "10", "--tail", "5"],
+        Op::PaneRead { pane: Some(PaneId(3)), lines: 50, head: Some(10), tail: Some(5) },
+    )]
+    #[case::pane_read_json(
+        &["pane", "read", "3", "--json"],
+        Op::PaneRead { pane: Some(PaneId(3)), lines: 0, head: None, tail: None },
+    )]
+    #[case::agent_reply_json(&["agent", "reply", "3", "--json"], Op::AgentReply { pane: PaneId(3) })]
+    fn list_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing the words.
+        let op = parse(&args(words));
+
+        // Then they make the request they spell.
+        assert_eq!(op, Ok(expected), "{words:?} parse to their request");
+    }
+
+    #[rstest::rstest]
+    fn unknown_status_is_named() {
+        // Given / When parsing `agent list --status idle,bogus`.
+        let problem = problem(&["agent", "list", "--status", "idle,bogus"]);
+
+        // Then the name that is no status is named.
+        assert_eq!(
+            problem,
+            Some(UsageProblem::NotInSet {
+                flag: "--status",
+                got: "bogus".into(),
+            }),
+            "bogus is no agent status"
+        );
+    }
+
+    #[rstest::rstest]
+    fn json_flag_is_refused_where_nothing_prints_text() {
+        // Given / When parsing `session list --json`.
+        let problem = problem(&["session", "list", "--json"]);
+
+        // Then --json is an unknown flag there.
+        assert!(
+            matches!(&problem, Some(UsageProblem::UnknownFlag { flag, .. }) if flag == "--json"),
+            "session list always prints JSON, so it takes no --json, got {problem:?}"
+        );
+    }
+
+    /// The exit code and stdout of running `words` against an orb that
+    /// answers every request with `reply`.
+    fn answered(
+        words: &[&str],
+        reply: &'static str,
+    ) -> Result<(u8, String), Box<dyn Error + Send + Sync>> {
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("orb.sock");
+        server::open(&socket, Log::default(), move |_, _| reply.to_owned())
+            .map_err(|report| format!("{report:?}"))?;
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(&args(words), None, &socket, &mut out, &mut err);
+        Ok((code, String::from_utf8(out)?))
+    }
+
+    /// An orb answer to `pane read`.
+    const SCREEN: &str = r#"{"ok":true,"result":{"text":"a\nb"}}"#;
+
+    /// An orb answer to `agent reply`.
+    const ANSWER: &str = r#"{"ok":true,"result":{"text":"done","at":5}}"#;
+
+    #[rstest::rstest]
+    fn read_prints_plain_text_by_default() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose pane 1 shows "a" and "b".
+        // When running `pane read 1`.
+        let printed = answered(&["pane", "read", "1"], SCREEN)?;
+
+        // Then the screen prints as plain lines.
+        assert_eq!(
+            printed,
+            (0, "a\nb\n".to_owned()),
+            "pane read prints the screen as text"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_with_json_prints_the_json_shape() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose pane 1 shows "a" and "b".
+        // When running `pane read 1 --json`.
+        let (code, out) = answered(&["pane", "read", "1", "--json"], SCREEN)?;
+
+        // Then one JSON line carries the screen as its text.
+        let printed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            (code, out.lines().count(), printed),
+            (0, 1, serde_json::json!({ "text": "a\nb" })),
+            "--json prints the reply's JSON, got {out}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reply_prints_plain_text_by_default() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose agent in pane 1 last answered "done".
+        // When running `agent reply 1`.
+        let printed = answered(&["agent", "reply", "1"], ANSWER)?;
+
+        // Then the answer prints as plain text.
+        assert_eq!(
+            printed,
+            (0, "done\n".to_owned()),
+            "agent reply prints the answer as text"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reply_with_json_prints_text_and_at() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose agent in pane 1 last answered "done" at 5.
+        // When running `agent reply 1 --json`.
+        let (code, out) = answered(&["agent", "reply", "1", "--json"], ANSWER)?;
+
+        // Then one JSON line carries the text and when it was written.
+        let printed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            (code, out.lines().count(), printed),
+            (0, 1, serde_json::json!({ "text": "done", "at": 5 })),
+            "--json prints the reply's JSON, got {out}"
+        );
+        Ok(())
     }
 }

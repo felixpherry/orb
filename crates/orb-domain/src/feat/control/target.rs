@@ -66,7 +66,7 @@ pub(crate) fn no_session(session: SessionId) -> ApiError {
     ApiError::new(
         ErrorCode::NotFound,
         format!("no session {}", session.0),
-        "orb session list shows the sessions",
+        "orb session list shows open sessions; --all adds settled ones",
     )
 }
 

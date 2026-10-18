@@ -69,6 +69,10 @@ pub(crate) const NOUNS: &[NounHelp] = &[
         name: "plate",
         summary: "the user's list of what needs them: add, change, close and list items",
     },
+    NounHelp {
+        name: "project",
+        summary: "orb's projects: list them to find the ID orb session create takes",
+    },
 ];
 
 /// A word that takes no value and has no default: a required positional, a
@@ -146,6 +150,9 @@ const PLATE_VERBS: &str = "the user's next step: decide (pick a direction), revi
      approve (a plan or a step), answer (a question you asked), reply (someone else's message), \
      merge (a branch that's ready), note (an FYI) or idea (a follow-up you offer; it lands parked)";
 
+/// Every agent status, as `--status` takes them.
+const STATUSES: &str = "unknown|working|needs_approval|needs_input|idle|failed|stopped|gone";
+
 /// What a change replies once done.
 const DONE: &str = "{}";
 
@@ -157,11 +164,25 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "session",
         verb: "list",
-        usage: "orb session list",
-        summary: "List every session, settled ones included.",
-        params: &[],
-        examples: &["orb session list"],
-        reply: "{\"sessions\": [{\"id\", \"project\", \"name\", \"dir\", \"branch\", \"settled\"}]}",
+        usage: "orb session list [--all] [--project <id>]",
+        summary: "List open sessions; --all adds settled ones.",
+        params: &[
+            word("--all", "settled sessions too"),
+            flag(
+                "--project",
+                "<id>",
+                Some("every project"),
+                "only this project's sessions; orb project list shows the IDs",
+            ),
+        ],
+        examples: &[
+            "orb session list",
+            "orb session list --all",
+            "orb session list --project 4",
+        ],
+        reply: "{\"sessions\": [{\"id\", \"project\", \"name\", \"dir\", \"branch\", \"settled\"}], \"hidden\": N, \"hint\"}; \
+                hidden counts the settled sessions left out, hint (only when hidden > 0) says how to list them; \
+                names are cut to 60 characters",
     },
     CommandHelp {
         noun: "tab",
@@ -184,11 +205,42 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "list",
-        usage: "orb agent list",
-        summary: "List every live agent in every session.",
+        usage: "orb agent list [--all] [--session <id>] [--status <status>[,<status>...]]",
+        summary: "List live agents; --all adds stopped and gone ones.",
+        params: &[
+            word("--all", "stopped and gone agents too"),
+            flag(
+                "--session",
+                "<id>",
+                Some("every session"),
+                "only this session's agents",
+            ),
+            flag(
+                "--status",
+                STATUSES,
+                Some("every status but stopped and gone"),
+                "only agents with these statuses; separate several with commas",
+            ),
+        ],
+        examples: &[
+            "orb agent list",
+            "orb agent list --status needs_approval,needs_input",
+            "orb agent list --session 7 --all",
+        ],
+        reply: "{\"agents\": [{\"id\", \"pane\", \"session\", \"harness\", \"name\", \"title\", \"status\"}], \"hidden\": N, \"hint\"}; \
+                hidden counts the stopped and gone agents left out, hint (only when hidden > 0) says how to list them; \
+                title only when it differs from name, both cut to 60 characters; \
+                orb agent get <pane> has the full row with cwd and branch",
+    },
+    CommandHelp {
+        noun: "project",
+        verb: "list",
+        usage: "orb project list",
+        summary: "List orb's projects (removed ones left out), to find a project's ID.",
         params: &[],
-        examples: &["orb agent list"],
-        reply: "{\"agents\": [{\"id\", \"pane\", \"session\", \"harness\", \"name\", \"title\", \"status\", \"cwd\", \"branch\"}]}",
+        examples: &["orb project list"],
+        reply: "{\"projects\": [{\"id\", \"name\", \"dir\", \"kind\"}]}; \
+                kind is repo, folder, research, learn, incognito, shared_world or fresh_world",
     },
     CommandHelp {
         noun: "session",
@@ -201,7 +253,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 "--project",
                 "<id>",
                 Some("the caller's session's project"),
-                "the project, as the project field of orb session list shows it",
+                "the project's ID, as orb project list shows it",
             ),
             word(
                 "--worktree",
@@ -396,8 +448,8 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "pane",
         verb: "read",
-        usage: "orb pane read [<pane>] [--lines <n>]",
-        summary: "Read a pane's screen as text, with lines of history above it.",
+        usage: "orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]",
+        summary: "Print a pane's screen as plain text, with lines of history above it; trailing spaces and extra blank lines are trimmed.",
         params: &[
             OPTIONAL_PANE,
             flag(
@@ -406,9 +458,30 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 Some("0, the screen only"),
                 "how many lines of history to add above the screen",
             ),
+            flag(
+                "--head",
+                "<n>",
+                Some("every line"),
+                "keep the first n lines, after trimming",
+            ),
+            flag(
+                "--tail",
+                "<n>",
+                Some("every line"),
+                "keep the last n lines, after trimming and --head",
+            ),
+            word(
+                "--json",
+                "print {\"text\": …} as JSON instead of plain text",
+            ),
         ],
-        examples: &["orb pane read 12", "orb pane read 12 --lines 200"],
-        reply: "{\"text\": \"…\"}",
+        examples: &[
+            "orb pane read 12",
+            "orb pane read 12 --tail 20",
+            "orb pane read 12 --lines 200 --tail 50",
+            "orb pane read 12 --json",
+        ],
+        reply: "the trimmed screen as plain text; with --json {\"text\": \"…\"}",
     },
     CommandHelp {
         noun: "agent",
@@ -491,7 +564,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         noun: "agent",
         verb: "get",
         usage: "orb agent get <pane>",
-        summary: "Show a pane's agent, as orb agent list does.",
+        summary: "Show a pane's agent in full: whole name and title, cwd and branch.",
         params: &[AGENT_PANE],
         examples: &["orb agent get 12"],
         reply: "{\"id\", \"pane\", \"session\", \"harness\", \"name\", \"title\", \"status\", \"cwd\", \"branch\"}",
@@ -499,11 +572,17 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "reply",
-        usage: "orb agent reply <pane>",
-        summary: "Read the last reply in a pane's agent's transcript.",
-        params: &[AGENT_PANE],
-        examples: &["orb agent reply 12"],
-        reply: "{\"text\": \"…\", \"at\": unix milliseconds|null}",
+        usage: "orb agent reply <pane> [--json]",
+        summary: "Print the last reply in a pane's agent's transcript as plain text.",
+        params: &[
+            AGENT_PANE,
+            word(
+                "--json",
+                "print {\"text\", \"at\"} as JSON instead of plain text",
+            ),
+        ],
+        examples: &["orb agent reply 12", "orb agent reply 12 --json"],
+        reply: "the reply as plain text; with --json {\"text\": \"…\", \"at\": unix milliseconds|null}",
     },
     CommandHelp {
         noun: "plate",
@@ -677,7 +756,7 @@ pub(crate) fn overview() -> String {
         "Bare orb in an orb pane says which pane, tab and session you're in.".to_owned(),
         String::new(),
         "replies:".to_owned(),
-        "  exit 0  done; the reply is JSON on stdout".to_owned(),
+        "  exit 0  done; the reply is JSON on stdout, except pane read and agent reply, which print plain text (--json gives JSON)".to_owned(),
         "  exit 1  refused, or orb isn't running; {\"code\", \"message\", \"hint\"} on stderr"
             .to_owned(),
         "  exit 2  typed wrong; what was wrong, the usage line and the help command on stderr"
@@ -819,11 +898,14 @@ fn edits(from: &[&str], to: &[&str]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::ffi::OsString;
 
-    use super::{COMMANDS, command, suggest, usage_lines, verbs};
+    use super::{COMMANDS, STATUSES, command, suggest, usage_lines, verbs};
     use crate::feat::control::client::parse;
+    use crate::feat::control::protocol::Op;
     use crate::feat::plate::Verb;
+    use crate::feat::sessions::state::AgentStatus;
 
     /// `line` as the shell splits it: on spaces, with double quotes keeping
     /// a word with spaces whole.
@@ -944,6 +1026,26 @@ mod tests {
         assert_eq!(
             block, usage,
             "the orb skill's Commands block should match the command table"
+        );
+    }
+
+    #[rstest::rstest]
+    fn status_flag_names_every_status() {
+        // Given every status `agent list --status` names in its help.
+        let names = STATUSES.replace('|', ",");
+
+        // When parsing them all as one --status list.
+        let op = parse(&shell_words(&format!("agent list --status {names}")));
+
+        // Then all 8 are statuses, none of them twice.
+        let statuses: HashSet<AgentStatus> = match op {
+            Ok(Op::AgentList { status, .. }) => status.into_iter().collect(),
+            _ => HashSet::new(),
+        };
+        assert_eq!(
+            statuses.len(),
+            8,
+            "--status's help names the 8 agent statuses, got {statuses:?}"
         );
     }
 }

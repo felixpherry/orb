@@ -47,9 +47,16 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Op {
-    /// Every session, settled ones included.
+    /// Sessions: open ones, or every one with `all`.
     #[serde(rename = "session.list")]
-    SessionList,
+    SessionList {
+        /// Settled sessions too.
+        #[serde(default)]
+        all: bool,
+        /// Only this project's.
+        #[serde(default)]
+        project: Option<ProjectId>,
+    },
     /// A session's tabs and the panes in each.
     #[serde(rename = "tab.list")]
     TabList {
@@ -64,9 +71,23 @@ pub enum Op {
         #[serde(default)]
         session: Option<SessionId>,
     },
-    /// Every live agent in every session.
+    /// Agents in panes: live ones, every one with `all`, or those with
+    /// `status`.
     #[serde(rename = "agent.list")]
-    AgentList,
+    AgentList {
+        /// Stopped and gone agents too.
+        #[serde(default)]
+        all: bool,
+        /// Only this session's.
+        #[serde(default)]
+        session: Option<SessionId>,
+        /// Only these statuses; empty for the default.
+        #[serde(default)]
+        status: Vec<AgentStatus>,
+    },
+    /// Projects that aren't removed.
+    #[serde(rename = "project.list")]
+    ProjectList,
     /// Where the caller is: its pane, tab and session.
     #[serde(rename = "orb.here")]
     Here,
@@ -157,7 +178,7 @@ pub enum Op {
     /// Types a command and Enter into a pane.
     #[serde(rename = "pane.run")]
     PaneRun { pane: PaneId, command: String },
-    /// A pane's screen, plus up to `lines` lines of history, as text.
+    /// A pane's screen, plus up to `lines` lines of history, as trimmed text.
     #[serde(rename = "pane.read")]
     PaneRead {
         /// The pane, else the caller's.
@@ -166,6 +187,12 @@ pub enum Op {
         /// How many lines of history to add above the screen.
         #[serde(default)]
         lines: usize,
+        /// Keep the first `head` lines of the trimmed text.
+        #[serde(default)]
+        head: Option<usize>,
+        /// Then keep the last `tail` lines.
+        #[serde(default)]
+        tail: Option<usize>,
     },
     /// Starts an agent in a shell pane and waits until orb sees it.
     #[serde(rename = "agent.start")]
@@ -202,7 +229,7 @@ pub enum Op {
         #[serde(default)]
         timeout: Option<u64>,
     },
-    /// A pane's agent, as `agent list` shows it.
+    /// A pane's agent in full.
     #[serde(rename = "agent.get")]
     AgentGet { pane: PaneId },
     /// The last reply in a pane's agent's transcript.
@@ -415,7 +442,7 @@ impl Reply {
 pub struct SessionRow {
     pub id: SessionId,
     pub project: ProjectId,
-    /// The name the sidebar shows.
+    /// The name the sidebar shows, cut to 60 graphemes.
     pub name: String,
     pub dir: String,
     pub branch: Option<String>,
@@ -426,6 +453,11 @@ pub struct SessionRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionsResult {
     pub sessions: Vec<SessionRow>,
+    /// Settled sessions the open-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// One tab in `tab list`: its place and its panes.
@@ -478,9 +510,25 @@ pub struct PanesResult {
     pub panes: Vec<PaneRow>,
 }
 
-/// One agent in `agent list`.
+/// One agent in `agent list`: no cwd or branch, which its session's row
+/// already has.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRow {
+    pub id: AgentId,
+    pub pane: Option<PaneId>,
+    pub session: SessionId,
+    pub harness: String,
+    /// The name the sidebar shows, cut to 60 graphemes.
+    pub name: String,
+    /// The agent's own title when it differs from `name`, cut the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub status: AgentStatus,
+}
+
+/// One agent in full, as `agent get` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentDetail {
     pub id: AgentId,
     pub pane: Option<PaneId>,
     pub session: SessionId,
@@ -564,6 +612,27 @@ pub struct ReplyResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentsResult {
     pub agents: Vec<AgentRow>,
+    /// Stopped and gone agents the live-only default left out.
+    pub hidden: usize,
+    /// How to see them, when `hidden > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// One project in `project list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectRow {
+    pub id: ProjectId,
+    pub name: String,
+    pub dir: String,
+    /// repo, folder, research, learn, incognito, shared_world or fresh_world.
+    pub kind: &'static str,
+}
+
+/// `project list`'s result.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectsResult {
+    pub projects: Vec<ProjectRow>,
 }
 
 /// What `plate add` replies: the new item.

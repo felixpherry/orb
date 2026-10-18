@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::TextInput;
 use crate::feat::harness::HarnessId;
@@ -155,7 +155,7 @@ impl ProjectKind {
 }
 
 /// What an agent's session is doing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     /// Not polled yet since orb started.
