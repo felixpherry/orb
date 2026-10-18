@@ -214,8 +214,9 @@ pub fn read_exchanges(path: &Path) -> io::Result<(u64, Vec<Exchange>)> {
 }
 
 /// The exchanges after one transcript line: a prompt opens one, an assistant
-/// line adds its text or tool to the latest. Meta and sidechain lines change
-/// nothing.
+/// line adds its text or tool to the latest, and an API error line marks it
+/// failed (its text still shows as the reply). Meta and sidechain lines
+/// change nothing.
 fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
     let flag = |key| line.get(key).and_then(Value::as_bool) == Some(true);
     if flag("isMeta") || flag("isSidechain") {
@@ -243,11 +244,13 @@ fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
                 return exchanges;
             };
             let blocks = line.pointer("/message/content").and_then(Value::as_array);
+            let mut has_text = false;
             for block in blocks.into_iter().flatten() {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(text) = text_field(block, "text") {
                             exchange.reply = Some((text, time));
+                            has_text = true;
                         }
                     }
                     Some("tool_use") => {
@@ -261,14 +264,39 @@ fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
                     _ => {}
                 }
             }
+            let failed = api_error(line);
+            if failed.is_some() || has_text {
+                exchange.failure = failed;
+            }
         }
         _ => {}
     }
     exchanges
 }
 
-/// Reads the prompts and Claude's text blocks added to the transcript since
-/// `offset`, each with where its line sits and which prompt it answers.
+/// The error an API error line holds: its text blocks, else its `error`
+/// code; `None` for any other line.
+fn api_error(line: &Value) -> Option<String> {
+    if line.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let text = line
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| text_field(block, "text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| text_field(line, "error"))
+}
+
+/// Reads the prompts, Claude's text blocks and its API errors (as failures)
+/// added to the transcript since `offset`, each with where its line sits and
+/// which prompt it answers.
 ///
 /// `prompt_offset` is the prompt the previous read ended under. A replaced
 /// transcript is read from the start, and its prompt offset starts at 0.
@@ -320,6 +348,10 @@ pub fn read_messages(path: &Path, offset: u64, prompt_offset: u64) -> io::Result
                 }
             }
             Some("assistant") => {
+                if let Some(error) = api_error(&value) {
+                    messages.push(message(Role::Failure, error));
+                    continue;
+                }
                 let blocks = value.pointer("/message/content").and_then(Value::as_array);
                 messages.extend(
                     blocks
@@ -361,6 +393,7 @@ mod tests {
     use super::{
         Exchange, Scan, locate, read_exchanges, read_messages, scan_title, transcript_path,
     };
+    use crate::feat::sessions::transcript::Role;
 
     const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"Fix the parser\nIt drops the last line"}}"#;
 
@@ -1111,6 +1144,106 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0],
             "a replaced transcript's old prompt offset should be dropped"
+        );
+        Ok(())
+    }
+
+    /// An API error line as Claude writes it: a synthetic assistant line
+    /// holding the error as one text block.
+    fn api_error(text: &str) -> String {
+        json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "error": "server_error",
+            "message": {
+                "model": "<synthetic>",
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        })
+        .to_string()
+    }
+
+    #[rstest::rstest]
+    fn claude_api_error_line_is_a_failure_message() -> io::Result<()> {
+        // Given a prompt, then an API error line.
+        let dir = tempdir()?;
+        let path = write_transcript(
+            dir.path(),
+            &[
+                &user("Fix the parser"),
+                &api_error("API Error: Connection lost mid-response."),
+            ],
+        )?;
+
+        // When reading the messages.
+        let read = read_messages(&path, 0, 0)?;
+
+        // Then the error is a failure, not an assistant message.
+        let found: Vec<_> = read
+            .messages
+            .iter()
+            .map(|message| (message.role, message.text.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Role::User, "Fix the parser"),
+                (Role::Failure, "API Error: Connection lost mid-response."),
+            ],
+            "an API error line should read as a failure"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn claude_exchange_ending_in_an_api_error_carries_the_failure() -> io::Result<()> {
+        // Given a prompt answered by an API error line.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            &user("Fix the parser"),
+            &api_error("You've hit your weekly limit"),
+        ])?;
+
+        // Then the exchange failed, and the preview still shows the error.
+        let ends: Vec<_> = exchanges
+            .iter()
+            .map(|exchange| {
+                (
+                    exchange.failure.as_deref(),
+                    exchange.reply.as_ref().map(|(text, _)| text.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            [(
+                Some("You've hit your weekly limit"),
+                Some("You've hit your weekly limit")
+            )],
+            "the exchange should carry the failure and keep the error as its reply"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn claude_text_after_an_api_error_clears_the_failure() -> io::Result<()> {
+        // Given a prompt, an API error, then Claude's text after a retry.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            &user("Fix the parser"),
+            &api_error("API Error: 500"),
+            &text("Fixed"),
+        ])?;
+
+        // Then the exchange no longer counts as failed.
+        assert_eq!(
+            exchanges
+                .iter()
+                .map(|exchange| exchange.failure.clone())
+                .collect::<Vec<_>>(),
+            [None],
+            "a reply after the error should clear the failure"
         );
         Ok(())
     }

@@ -24,11 +24,19 @@ pub(crate) const NAME_LIMIT: usize = 60;
 
 /// `name` cut to [`NAME_LIMIT`] graphemes, ending in `…` when cut.
 pub(crate) fn short_name(name: &str) -> String {
-    let graphemes: Vec<&str> = name.graphemes(true).collect();
-    if graphemes.len() <= NAME_LIMIT {
-        return name.to_owned();
+    cut(name, NAME_LIMIT)
+}
+
+/// `text` cut to `limit` graphemes, ending in `…` when cut.
+pub(crate) fn cut(text: &str, limit: usize) -> String {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    if graphemes.len() <= limit {
+        return text.to_owned();
     }
-    let mut cut: String = graphemes.into_iter().take(NAME_LIMIT - 1).collect();
+    let mut cut: String = graphemes
+        .into_iter()
+        .take(limit.saturating_sub(1))
+        .collect();
     cut.push('…');
     cut
 }
@@ -432,6 +440,8 @@ pub enum ErrorCode {
     Busy,
     /// The shell didn't run the typed command.
     NotRun,
+    /// The agent's turn ended in a failed model call.
+    TurnFailed,
     /// Something else went wrong; the message says what.
     Failed,
 }
@@ -717,10 +727,19 @@ pub enum WaitEnd {
     Blocked,
 }
 
-/// `agent wait`'s (and `agent prompt --wait`'s) result.
+/// `agent wait`'s result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WaitResult {
     pub status: WaitEnd,
+}
+
+/// `agent prompt --wait`'s result: the turn ended, with everything the
+/// agent wrote since the prompt and when, in unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnswerResult {
+    pub status: WaitEnd,
+    pub text: String,
+    pub at: Option<i64>,
 }
 
 /// `agent reply`'s result: the last reply's text and when it was written,

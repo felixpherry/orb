@@ -7,30 +7,32 @@ use std::fs::{self, Permissions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use wherror::Error;
 
-use crate::feat::control::agent::{self, Timing};
+use crate::feat::control::agent::Timing;
+use crate::feat::control::agent_ops::PromptAsk;
 use crate::feat::control::change::Change;
 use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
 use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
 use crate::feat::control::protocol::{
-    ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SEE_LOG, SettledResult,
-    StartResult,
+    AgentDetail, ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SEE_LOG,
+    SettledResult, StartResult,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
+use crate::feat::control::turns::{Prompts, Turns};
 use crate::feat::control::validator;
 use crate::feat::control::{agent_ops, pane_ops};
-use crate::feat::harness::{HarnessId, Harnesses};
+use crate::feat::harness::Harnesses;
 use crate::feat::plate::api::{self as plate, PlateAsk};
 use crate::feat::sessions::sessions_actor::{ApiAdd, ApiStart, ApiStartError, SessionsActor};
 use crate::feat::sessions::state::SessionKind;
@@ -60,6 +62,20 @@ pub struct ControlDeps {
     pub panes: PaneControl,
     /// Read agents' transcripts for their replies.
     pub harnesses: Harnesses,
+    /// What orb last pasted into each pane's agent; only the control server
+    /// reads or writes it.
+    pub prompts: Prompts,
+}
+
+impl ControlDeps {
+    /// The read side of agents' turns over these deps.
+    pub(super) const fn turns(&self) -> Turns<'_> {
+        Turns {
+            state: &self.state,
+            harnesses: &self.harnesses,
+            prompts: &self.prompts,
+        }
+    }
 }
 
 /// Opens the control socket at `path`, only for the user, and answers each
@@ -232,24 +248,16 @@ pub(super) enum Action {
         name: Option<String>,
     },
     /// A prompt pasted into an agent, then maybe waited on.
-    Prompt {
-        pane: PaneId,
-        text: String,
-        wait: bool,
-        timeout: Option<Duration>,
-    },
+    Prompt(PromptAsk),
     /// A wait until the pane's agent is idle or blocked.
     Wait {
         pane: PaneId,
         timeout: Option<Duration>,
     },
-    /// The last reply in an agent's transcript.
-    Transcript {
-        harness: HarnessId,
-        path: PathBuf,
-        /// The agent's pane, for the refusals' hints.
-        pane: PaneId,
-    },
+    /// What a pane's agent wrote since orb's prompt, else its last reply.
+    Reply { pane: PaneId },
+    /// An agent's full row, its status read through a just-sent prompt.
+    Get { pane: PaneId, detail: AgentDetail },
     /// A plate add, update or close the sessions actor answers.
     Plate(PlateAsk),
 }
@@ -306,20 +314,13 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
         Ok(Action::PaneWait(ask)) => {
             return pane_ops::wait_for(&deps.panes, &ask, gone, PaneTiming::REAL);
         }
+        Ok(Action::Get { pane, detail }) => return agent_ops::get(deps.turns(), pane, detail),
         Ok(Action::Wait { pane, timeout }) => {
-            let deadline = timeout.map(|limit| Instant::now() + limit);
             let poke = || agent_ops::poke(deps);
-            return match agent::wait_done(&deps.state, pane, &poke, gone, Timing::REAL, deadline) {
-                Ok(done) => Reply::ok(&done),
-                Err(error) => Reply::err(error),
-            };
+            return agent_ops::wait(deps.turns(), pane, timeout, &poke, gone, Timing::REAL);
         }
-        Ok(Action::Transcript {
-            harness,
-            path,
-            pane,
-        }) => {
-            return match agent::last_reply(&deps.harnesses, &harness, &path, pane) {
+        Ok(Action::Reply { pane }) => {
+            return match deps.turns().reply(pane) {
                 Ok(reply) => Reply::ok(&reply),
                 Err(error) => Reply::err(error),
             };
@@ -334,12 +335,10 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
         Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
         Ok(Action::Run(ask)) => pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL),
         Ok(Action::StartAgent { at, line, name }) => agent_ops::start_in(deps, at, line, name),
-        Ok(Action::Prompt {
-            pane,
-            text,
-            wait,
-            timeout,
-        }) => agent_ops::prompt_agent(deps, pane, text, wait, timeout, gone),
+        Ok(Action::Prompt(ask)) => {
+            let poke = || agent_ops::poke(deps);
+            agent_ops::prompt_agent(&deps.panes, deps.turns(), ask, &poke, gone, Timing::REAL)
+        }
         Ok(Action::Plate(ask)) => plate::ask(deps, ask),
         Err(error) => Reply::err(error),
     };
@@ -1298,9 +1297,15 @@ mod tests {
         };
         let planned = plan(&app, &request);
 
-        // Then it is answered from the state.
+        // Then it is answered with the agent's row.
         assert!(
-            matches!(&planned, Ok(Action::Answered(reply)) if reply.ok),
+            matches!(
+                &planned,
+                Ok(Action::Get {
+                    pane: PaneId(1),
+                    ..
+                })
+            ),
             "a settled session's agent can still be read, got {planned:?}"
         );
     }
@@ -1906,7 +1911,7 @@ mod tests {
         // Then the answer has the whole title as name and title, its cwd and
         // its branch.
         let row = match &planned {
-            Ok(Action::Answered(reply)) => reply.result.clone(),
+            Ok(Action::Get { detail, .. }) => serde_json::to_value(detail).ok(),
             _ => None,
         };
         let field = |key: &str| row.as_ref()?.get(key)?.as_str().map(str::to_owned);

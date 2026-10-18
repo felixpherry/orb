@@ -73,7 +73,7 @@ How a key press turns into a change on screen, and which part of orb is allowed 
 ## The control socket
 
 - **orb listens on two sockets.** `orb session`, `orb tab`, `orb pane` and `orb agent` are served on orb.sock (crates/orb-domain/src/feat/control/server.rs:1-3); terminal-browser's split socket (control/browser_socket.rs:1-10) passes its splits and focus moves through the same requests.
-- **Each request gets its own thread, and it writes no state.** It answers reads from the state, asks the sessions actor for anything it adds or starts (the actor checks and claims the one starting slot), and hands pane changes to the loop as a control event.
+- **Each request gets its own thread, and it writes no state.** It answers reads from the state, asks the sessions actor for anything it adds or starts (the actor checks and claims the one starting slot), and hands pane changes to the loop as a control event. The one thing the control server keeps itself is what orb last pasted into each pane's agent (`Prompts`, crates/orb-domain/src/feat/control/turns.rs:46-48), in its deps behind a mutex, never in `AppState`.
 
 ## Adding a feature
 

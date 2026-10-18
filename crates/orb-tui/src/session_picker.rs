@@ -816,6 +816,7 @@ mod tests {
                 .map(|&(name, count)| (name.to_owned(), count))
                 .collect(),
             reply: reply.map(|reply| (reply.to_owned(), None)),
+            failure: None,
         }
     }
 

@@ -1,7 +1,8 @@
 //! Control — lets an agent (or a script) running inside orb ask orb to do
 //! things: list sessions, tabs, panes, agents and projects, add and close panes, tabs and
 //! sessions, type into panes and read them, start, prompt and read other
-//! agents, and add, change, close and list items on the user's plate.
+//! agents (and read back what they wrote since orb's prompt), and add,
+//! change, close and list items on the user's plate.
 //!
 //! A running orb listens on a socket only the user can open. The `orb session`,
 //! `orb tab`, `orb pane`, `orb agent`, `orb plate` and `orb project` commands send it one
@@ -25,6 +26,7 @@ pub mod protocol;
 pub(crate) mod screen_text;
 pub mod server;
 pub(crate) mod target;
+pub mod turns;
 pub(crate) mod validator;
 
 pub use agent::quoted;

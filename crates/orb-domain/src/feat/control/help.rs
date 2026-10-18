@@ -655,7 +655,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "prompt",
-        usage: "orb agent prompt <pane> <text> [--wait [--timeout <ms>]]",
+        usage: "orb agent prompt <pane> <text> [--wait [--timeout <ms>]] [--json]",
         summary: "Paste a prompt into an agent and press Enter.",
         params: &[
             AGENT_PANE,
@@ -665,7 +665,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             ),
             word(
                 "--wait",
-                "wait for the turn to end or the agent to stop and ask the user",
+                "wait for the turn to end, then print what the agent wrote since this prompt",
             ),
             flag(
                 "--timeout",
@@ -673,14 +673,19 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 Some("no limit while work goes on"),
                 "milliseconds the whole call may take; only with --wait",
             ),
+            word(
+                "--json",
+                "print {\"status\", \"text\", \"at\"} as JSON instead of plain text",
+            ),
             word("--", "the prompt follows, even when it starts with -"),
         ],
         examples: &[
             "orb agent prompt 12 \"Review the diff on this branch.\" --wait",
             "orb agent prompt 12 \"Fix the login bug.\"",
+            "orb agent prompt 12 \"Summarise the plan.\" --wait --json",
             "orb agent prompt 12 --wait --timeout 600000 -- \"--force is broken\"",
         ],
-        reply: "{\"submitted\": true}; with --wait {\"status\": \"idle\"|\"blocked\"}",
+        reply: "{\"submitted\": true}; with --wait the answer as plain text, or with --json {\"status\": \"idle\", \"text\": \"…\", \"at\": unix milliseconds|null}; agent_blocked when the agent stops to ask the user, turn_failed when its model call fails",
     },
     CommandHelp {
         noun: "agent",
@@ -697,7 +702,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             ),
         ],
         examples: &["orb agent wait 12", "orb agent wait 12 --timeout 600000"],
-        reply: "{\"status\": \"idle\"|\"blocked\"}",
+        reply: "{\"status\": \"idle\"|\"blocked\"}; a prompt orb sent under 5 s ago counts as work; turn_failed when the agent's model call failed",
     },
     CommandHelp {
         noun: "agent",
@@ -706,13 +711,13 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         summary: "Show a pane's agent in full: whole name and title, cwd and branch.",
         params: &[AGENT_PANE],
         examples: &["orb agent get 12"],
-        reply: "{\"id\", \"pane\", \"session\", \"harness\", \"name\", \"title\", \"status\", \"cwd\", \"branch\"}",
+        reply: "{\"id\", \"pane\", \"session\", \"harness\", \"name\", \"title\", \"status\", \"cwd\", \"branch\"}; status reads \"working\" for 5 s after orb's prompt",
     },
     CommandHelp {
         noun: "agent",
         verb: "reply",
         usage: "orb agent reply <pane> [--json]",
-        summary: "Print the last reply in a pane's agent's transcript as plain text.",
+        summary: "Print everything a pane's agent wrote since orb's last prompt to it, else its last reply, as plain text.",
         params: &[
             AGENT_PANE,
             word(
@@ -721,7 +726,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             ),
         ],
         examples: &["orb agent reply 12", "orb agent reply 12 --json"],
-        reply: "the reply as plain text; with --json {\"text\": \"…\", \"at\": unix milliseconds|null}",
+        reply: "the reply as plain text; with --json {\"text\": \"…\", \"at\": unix milliseconds|null}; turn_failed when the turn ended in a failed model call",
     },
     CommandHelp {
         noun: "plate",
@@ -892,7 +897,7 @@ pub(crate) fn overview() -> String {
         "Bare orb in an orb pane says which pane, tab and session you're in.".to_owned(),
         String::new(),
         "replies:".to_owned(),
-        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
+        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait, agent prompt --wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
         "  exit 1  refused, or orb isn't running; {\"code\", \"message\", \"hint\"} on stderr"
             .to_owned(),
         "  exit 2  typed wrong; what was wrong, the usage line and the help command on stderr"

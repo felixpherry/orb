@@ -201,7 +201,7 @@ orb pane run <pane> <command> [--wait] [--timeout <ms>] [--force] [--tail <n>] [
 orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]
 orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]
 orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]
-orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
+orb agent prompt <pane> <text> [--wait [--timeout <ms>]] [--json]
 orb agent wait <pane> [--timeout <ms>]
 orb agent get <pane>
 orb agent reply <pane> [--json]

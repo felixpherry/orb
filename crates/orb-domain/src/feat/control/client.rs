@@ -54,9 +54,10 @@ pub fn entry(args: &[OsString], in_pane: bool) -> Entry {
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
 /// pane `caller` when it runs inside orb. The reply's result (plain text for a
-/// pane's screen, a waited-on command's output and an agent's answer unless
-/// `--json` is given, else JSON) or
-/// the help asked for goes to `out`, an error or a usage error to `err`; returns the exit code.
+/// pane's screen, a waited-on command's output, an agent's reply and its
+/// answer to a waited-on prompt unless `--json` is given, else JSON) or the
+/// help asked for goes to `out`, an error or a usage error to `err`; returns
+/// the exit code.
 pub fn run<O, E>(
     args: &[OsString],
     caller: Option<PaneId>,
@@ -124,6 +125,7 @@ fn prints_text(op: &Op) -> bool {
         op,
         Op::PaneRead { .. }
             | Op::AgentReply { .. }
+            | Op::AgentPrompt { wait: true, .. }
             | Op::PaneRun { wait: true, .. }
             | Op::PaneWait { .. }
     )
@@ -134,7 +136,7 @@ fn prints_text(op: &Op) -> bool {
 /// any other reply, or one not of its shape.
 fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
     match op {
-        Op::PaneRead { .. } | Op::AgentReply { .. } => result
+        Op::PaneRead { .. } | Op::AgentReply { .. } | Op::AgentPrompt { .. } => result
             .get("text")?
             .as_str()
             .map(|text| text.trim_end_matches('\n').to_owned()),
@@ -1615,6 +1617,10 @@ mod tests {
         &["agent", "prompt", "3", "hi", "--wait", "--timeout", "500"],
         Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: Some(500) },
     )]
+    #[case::prompt_wait_json(
+        &["agent", "prompt", "3", "hi", "--wait", "--json"],
+        Op::AgentPrompt { pane: PaneId(3), text: "hi".into(), wait: true, timeout: None },
+    )]
     #[case::prompt_dashed(
         &["agent", "prompt", "3", "--", "--hi"],
         Op::AgentPrompt { pane: PaneId(3), text: "--hi".into(), wait: false, timeout: None },
@@ -2368,6 +2374,48 @@ mod tests {
         assert_eq!(
             (code, out.lines().count(), printed),
             (0, 1, serde_json::json!({ "text": "done", "at": 5 })),
+            "--json prints the reply's JSON, got {out}"
+        );
+        Ok(())
+    }
+
+    /// An orb answer to `agent prompt --wait`.
+    const PROMPT_ANSWER: &str = r#"{"ok":true,"result":{"status":"idle","text":"done","at":5}}"#;
+
+    #[rstest::rstest]
+    fn prompt_wait_prints_the_answer_as_text() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose agent in pane 1 answers the prompt "done".
+        // When running `agent prompt 1 hi --wait`.
+        let printed = answered(&["agent", "prompt", "1", "hi", "--wait"], PROMPT_ANSWER)?;
+
+        // Then the answer prints as plain text.
+        assert_eq!(
+            printed,
+            (0, "done\n".to_owned()),
+            "agent prompt --wait prints the answer as text"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn prompt_wait_with_json_prints_status_text_and_at() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        // Given an orb whose agent in pane 1 answers the prompt "done" at 5.
+        // When running `agent prompt 1 hi --wait --json`.
+        let (code, out) = answered(
+            &["agent", "prompt", "1", "hi", "--wait", "--json"],
+            PROMPT_ANSWER,
+        )?;
+
+        // Then one JSON line carries the status, the text and its time.
+        let printed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            (code, out.lines().count(), printed),
+            (
+                0,
+                1,
+                serde_json::json!({ "status": "idle", "text": "done", "at": 5 })
+            ),
             "--json prints the reply's JSON, got {out}"
         );
         Ok(())

@@ -201,7 +201,7 @@ pub(crate) mod fake {
     use super::{
         Harness, HarnessError, HarnessId, HarnessInfo, RunningAgent, Scan, TranscriptFormat,
     };
-    use crate::feat::sessions::transcript::{Exchange, MessageRead};
+    use crate::feat::sessions::transcript::{Exchange, Message, MessageRead};
 
     /// A harness named `id` whose every transcript holds the exchanges the
     /// test scripts, and that sees the agents the test scripts running.
@@ -209,6 +209,8 @@ pub(crate) mod fake {
         id: &'static str,
         /// What [`TranscriptFormat::exchanges`] answers for any path.
         exchanges: Vec<Exchange>,
+        /// What [`TranscriptFormat::messages`] reads from any path.
+        messages: Vec<Message>,
         /// What [`Harness::running`] answers.
         running: Mutex<Result<Vec<RunningAgent>, String>>,
         /// What [`Harness::reports_status`] answers.
@@ -221,6 +223,7 @@ pub(crate) mod fake {
             Self {
                 id,
                 exchanges: Vec::new(),
+                messages: Vec::new(),
                 running: Mutex::new(Ok(running)),
                 reports: false,
             }
@@ -229,6 +232,12 @@ pub(crate) mod fake {
         /// This harness, reading `exchanges` from any transcript.
         pub(crate) fn with_exchanges(self, exchanges: Vec<Exchange>) -> Self {
             Self { exchanges, ..self }
+        }
+
+        /// This harness, reading `messages` from any transcript: those at or
+        /// past the offset asked for.
+        pub(crate) fn with_messages(self, messages: Vec<Message>) -> Self {
+            Self { messages, ..self }
         }
 
         /// A harness like pi, whose status comes from its pane reports.
@@ -266,7 +275,12 @@ pub(crate) mod fake {
             prompt_offset: u64,
         ) -> io::Result<MessageRead> {
             Ok(MessageRead {
-                messages: Vec::new(),
+                messages: self
+                    .messages
+                    .iter()
+                    .filter(|message| message.offset >= offset)
+                    .cloned()
+                    .collect(),
                 offset,
                 restarted: false,
                 prompt_offset,
