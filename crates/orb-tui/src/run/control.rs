@@ -4,7 +4,9 @@
 use std::sync::mpsc::Sender;
 
 use orb_domain::feat::control::change;
-use orb_domain::feat::control::pane_control::{PaneReply, PaneRequest};
+use orb_domain::feat::control::pane_control::{
+    Finished, PaneAnswer, PaneLines, PaneReply, PaneRequest, ShellPhase, ShellView,
+};
 use orb_domain::feat::control::protocol::{ApiError, ErrorCode};
 use orb_domain::ids::PaneId;
 use orb_term::Pane;
@@ -24,33 +26,43 @@ impl App {
                     for command in &commands {
                         self.execute(command);
                     }
-                    None
+                    PaneAnswer::Done
                 })
             }
             PaneRequest::Send { pane, text } => self.live_pane(pane).map(|live| {
                 live.paste(&text);
-                None
+                PaneAnswer::Done
             }),
             PaneRequest::Keys { pane, keys } => self.live_pane(pane).map(|live| {
                 for key in &keys {
                     live.key(key);
                 }
-                None
+                PaneAnswer::Done
             }),
             PaneRequest::Type { pane, text } => self.live_pane(pane).map(|live| {
                 live.type_text(&text);
-                None
+                PaneAnswer::Done
             }),
             PaneRequest::Run { pane, line } => self.run_line(pane, line),
             PaneRequest::Launch { pane, line } => self.launch(pane, line),
             PaneRequest::Prompt { pane, text } => self.live_pane(pane).map(|live| {
                 live.paste(&text);
                 live.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-                None
+                PaneAnswer::Done
             }),
-            PaneRequest::Read { pane, lines } => {
-                self.live_pane(pane).map(|live| Some(live.text(lines)))
-            }
+            PaneRequest::Read { pane, lines } => self
+                .live_pane(pane)
+                .map(|live| PaneAnswer::Text(live.text(lines))),
+            PaneRequest::Shell { pane } => self
+                .live_pane(pane)
+                .map(|live| PaneAnswer::Shell(shell_view(live.shell()))),
+            PaneRequest::Between { pane, start, end } => self.live_pane(pane).map(|live| {
+                let lines = live.text_between(start, end);
+                PaneAnswer::Lines(PaneLines {
+                    text: lines.text,
+                    truncated: lines.truncated,
+                })
+            }),
         };
         let _ = reply.send(answer);
     }
@@ -105,6 +117,32 @@ impl App {
                 self.typing.insert(id, line);
             }
         }
-        Ok(None)
+        Ok(PaneAnswer::Done)
+    }
+}
+
+/// `shell` as the control server sees it: the command line holds leftover
+/// text when the cursor moved since the prompt ended. A running command's
+/// start line stays behind.
+fn shell_view(shell: orb_term::ShellState) -> ShellView {
+    let phase = match shell.phase {
+        orb_term::ShellPhase::Unknown => ShellPhase::Unknown,
+        orb_term::ShellPhase::AtPrompt { input_at } => ShellPhase::AtPrompt {
+            leftover: input_at.is_some_and(|at| at != shell.cursor),
+        },
+        orb_term::ShellPhase::Running {
+            program, started, ..
+        } => ShellPhase::Running { program, started },
+    };
+    ShellView {
+        marks_seen: shell.marks_seen,
+        phase,
+        last: shell.last.map(|last| Finished {
+            exit: last.exit,
+            start_line: last.start_line,
+            end_line: last.end_line,
+            started: last.started,
+        }),
+        seq: shell.seq,
     }
 }

@@ -60,6 +60,7 @@ rusqlite = { version = "0.40", default-features = false, features = ["fallible_u
 ratatui-which-key = "0.14"
 unicode-segmentation = "1.13"
 fuzzy-matcher = "0.3"
+regex = "1.13"
 tempfile = "3.27"
 jiff = "0.2.37"
 notify-rust = "4.18"

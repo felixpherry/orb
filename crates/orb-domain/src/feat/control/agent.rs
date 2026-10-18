@@ -149,7 +149,7 @@ pub(crate) fn no_agent(pane: PaneId) -> ApiError {
 }
 
 /// Why a wait ended without an answer: nobody is listening any more.
-fn caller_left() -> ApiError {
+pub(crate) fn caller_left() -> ApiError {
     ApiError::new(
         ErrorCode::Timeout,
         "the caller hung up",

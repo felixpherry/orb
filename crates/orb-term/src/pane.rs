@@ -24,6 +24,7 @@ use wherror::Error;
 
 use crate::emulator::{Emulator, Notify, lock};
 use crate::graphics::GraphicsFrame;
+use crate::shell::{Lines, ShellState};
 
 /// The pane's size in character cells, and each cell's size in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +138,7 @@ pub struct PaneError;
 /// A running child in a PTY. Its output is parsed on a background thread, so
 /// the screen is current whenever the owner draws; the owner is notified of
 /// output, clipboard copies, and exit. The pane keeps 10 000 lines of history
-/// for the wheel to scroll back through.
+/// for the wheel to scroll back through, and follows its shell's prompt marks.
 ///
 /// Dropping the pane kills the child.
 pub struct Pane {
@@ -402,6 +403,18 @@ impl Pane {
     /// history: soft-wrapped rows joined, trailing blanks dropped.
     pub fn text(&self, lines: usize) -> String {
         lock(&self.emulator).text(lines)
+    }
+
+    /// What the child shell is doing, from its prompt marks (see
+    /// [`ShellState`]).
+    pub fn shell(&self) -> ShellState {
+        lock(&self.emulator).shell()
+    }
+
+    /// The text of absolute lines `start..end`, clamped to what the history
+    /// and screen still hold (see [`Lines`]).
+    pub fn text_between(&self, start: i64, end: i64) -> Lines {
+        lock(&self.emulator).text_between(start, end)
     }
 }
 

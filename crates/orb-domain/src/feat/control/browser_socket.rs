@@ -227,6 +227,10 @@ where
     result_of(orb(&ask(Op::PaneRun {
         pane,
         command: line,
+        wait: false,
+        timeout: None,
+        force: false,
+        tail: None,
     })))
     .map(|_| json!({}))
 }
@@ -487,6 +491,10 @@ mod tests {
                     pane: PaneId(9),
                     command: r"'/opt/tb/bin/terminal-browser' 'open' 'https://x.test/?q=it'\''s'"
                         .to_owned(),
+                    wait: false,
+                    timeout: None,
+                    force: false,
+                    tail: None,
                 },
             }),
             "the command should be typed, quoted, into the new pane"

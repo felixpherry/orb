@@ -13,12 +13,14 @@
 //! `terminal-browser open --split` opens an orb pane.
 
 pub(crate) mod agent;
+pub(crate) mod agent_ops;
 pub mod browser_socket;
 pub mod change;
 pub mod client;
 pub(crate) mod help;
 pub(crate) mod lists;
 pub mod pane_control;
+pub(crate) mod pane_ops;
 pub mod protocol;
 pub(crate) mod screen_text;
 pub mod server;

@@ -1,6 +1,7 @@
-//! The running orb's side of the control socket: reads each request, answers
-//! it from orb's state, asks the sessions actor for what it adds or the screen
-//! loop for what it changes and for what a pane shows, and writes the reply.
+//! The running orb's side of the control socket: reads each request, works out
+//! from orb's state what it comes to, has `agent_ops` and `pane_ops` carry out
+//! agent and pane requests, asks the sessions actor for what it adds or the
+//! screen loop for what it changes, and writes the reply.
 
 use std::fs::{self, Permissions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -16,23 +17,22 @@ use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use wherror::Error;
 
-use crate::command::SessionsCommand;
 use crate::feat::control::agent::{self, Timing};
 use crate::feat::control::change::Change;
-use crate::feat::control::lists::{agent_detail, ended, route, settled, tab_panes};
-use crate::feat::control::pane_control::{PaneControl, PaneRequest, key_event};
+use crate::feat::control::lists::{ended, route, settled, tab_panes};
+use crate::feat::control::pane_control::{PaneControl, PaneRequest};
+use crate::feat::control::pane_ops::{PaneTiming, RunAsk, WaitAsk};
 use crate::feat::control::protocol::{
-    AgentKind, ApiError, ClosedResult, Direction, Done, ErrorCode, Op, PaneResult, PromptResult,
-    ReadResult, Reply, Request, SEE_LOG, SettledResult, StartResult,
+    ApiError, ClosedResult, ErrorCode, Op, ReadResult, Reply, Request, SEE_LOG, SettledResult,
+    StartResult,
 };
 use crate::feat::control::screen_text;
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
+use crate::feat::control::{agent_ops, pane_ops};
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::plate::api::{self as plate, PlateAsk};
-use crate::feat::sessions::sessions_actor::{
-    ApiAdd, ApiPlace, ApiStart, ApiStartError, SessionsActor,
-};
+use crate::feat::sessions::sessions_actor::{ApiAdd, ApiStart, ApiStartError, SessionsActor};
 use crate::feat::sessions::state::SessionKind;
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
@@ -194,7 +194,7 @@ where
 
 /// What a request comes to once read against the state.
 #[derive(Debug)]
-enum Action {
+pub(super) enum Action {
     /// Answered from the state alone.
     Answered(Reply),
     /// A new shell the sessions actor adds, then named and given its command
@@ -210,12 +210,17 @@ enum Action {
     Change(Change),
     /// A close or settle the screen loop applies, replying with what it ended.
     Ending { change: Change, ended: Ended },
-    /// Typing the screen loop does into a pane: a send, keys or a run.
+    /// Typing the screen loop does into a pane: a send, keys or a type.
     Pane(PaneRequest),
+    /// A command line typed into a shell pane, then maybe waited on.
+    Run(RunAsk),
+    /// A wait until a pane shows a matching line.
+    PaneWait(WaitAsk),
     /// A pane's text the screen loop reads, then cut to its first `head` and
     /// last `tail` lines.
     Read {
-        request: PaneRequest,
+        pane: PaneId,
+        lines: usize,
         head: Option<usize>,
         tail: Option<usize>,
     },
@@ -251,7 +256,7 @@ enum Action {
 
 /// Where `agent start` runs its agent.
 #[derive(Debug)]
-enum StartIn {
+pub(super) enum StartIn {
     /// A shell pane that's already there.
     Pane(PaneId),
     /// A new shell the sessions actor adds first.
@@ -260,7 +265,7 @@ enum StartIn {
 
 /// What a close or settle replies once applied.
 #[derive(Debug)]
-enum Ended {
+pub(super) enum Ended {
     /// The panes a pane or tab close ended.
     Closed(ClosedResult),
     /// The session a settle ended, with its panes.
@@ -286,24 +291,24 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
         Ok(Action::Read {
-            request,
+            pane,
+            lines,
             head,
             tail,
         }) => {
-            return match deps.panes.ask(request) {
+            return match deps.panes.text(pane, lines) {
                 Ok(text) => Reply::ok(&ReadResult {
-                    text: screen_text::cut(
-                        &screen_text::trim(&text.unwrap_or_default()),
-                        head,
-                        tail,
-                    ),
+                    text: screen_text::cut(&screen_text::trim(&text), head, tail),
                 }),
                 Err(error) => Reply::err(error),
             };
         }
+        Ok(Action::PaneWait(ask)) => {
+            return pane_ops::wait_for(&deps.panes, &ask, gone, PaneTiming::REAL);
+        }
         Ok(Action::Wait { pane, timeout }) => {
             let deadline = timeout.map(|limit| Instant::now() + limit);
-            let poke = || poke(deps);
+            let poke = || agent_ops::poke(deps);
             return match agent::wait_done(&deps.state, pane, &poke, gone, Timing::REAL, deadline) {
                 Ok(done) => Reply::ok(&done),
                 Err(error) => Reply::err(error),
@@ -319,21 +324,22 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
                 Err(error) => Reply::err(error),
             };
         }
-        Ok(Action::Add { add, name, run }) => add_pane(deps, add, name, run),
+        Ok(Action::Add { add, name, run }) => pane_ops::add_pane(deps, add, name, run),
         Ok(Action::Start(start)) => start_session(deps, start),
-        Ok(Action::Change(change)) => typed(deps, PaneRequest::Change(change)),
+        Ok(Action::Change(change)) => pane_ops::typed(deps, PaneRequest::Change(change)),
         Ok(Action::Ending { change, ended }) => match deps.panes.ask(PaneRequest::Change(change)) {
             Ok(_) => ended.reply(),
             Err(error) => Reply::err(error),
         },
-        Ok(Action::Pane(request)) => typed(deps, request),
-        Ok(Action::StartAgent { at, line, name }) => start_in(deps, at, line, name),
+        Ok(Action::Pane(request)) => pane_ops::typed(deps, request),
+        Ok(Action::Run(ask)) => pane_ops::run(&deps.panes, &ask, gone, PaneTiming::REAL),
+        Ok(Action::StartAgent { at, line, name }) => agent_ops::start_in(deps, at, line, name),
         Ok(Action::Prompt {
             pane,
             text,
             wait,
             timeout,
-        }) => prompt_agent(deps, pane, text, wait, timeout, gone),
+        }) => agent_ops::prompt_agent(deps, pane, text, wait, timeout, gone),
         Ok(Action::Plate(ask)) => plate::ask(deps, ask),
         Err(error) => Reply::err(error),
     };
@@ -386,7 +392,7 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         Op::PaneSplit { .. }
         | Op::PaneStack { .. }
         | Op::PaneFloat { .. }
-        | Op::TabCreate { .. } => add_io(app, &request.op, caller),
+        | Op::TabCreate { .. } => pane_ops::add_io(app, &request.op, caller),
         Op::SessionCreate {
             project,
             worktree,
@@ -443,12 +449,13 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::PaneKeys { .. }
         | Op::PaneType { .. }
         | Op::PaneRun { .. }
-        | Op::PaneRead { .. } => pane_io(app, &request.op, caller),
+        | Op::PaneRead { .. }
+        | Op::PaneWait { .. } => pane_ops::pane_io(app, &request.op, caller),
         Op::AgentStart { .. }
         | Op::AgentPrompt { .. }
         | Op::AgentWait { .. }
         | Op::AgentGet { .. }
-        | Op::AgentReply { .. } => agent_io(app, &request.op, caller),
+        | Op::AgentReply { .. } => agent_ops::agent_io(app, &request.op, caller),
         Op::PlateList => {
             let now = SystemTime::now();
             Ok(Action::Answered(plate::list(
@@ -463,416 +470,9 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
     }
 }
 
-/// What an agent request comes to, read from `app`. A wait is refused on a
-/// settled session; a get and a reply are answered there.
-fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
-    match op {
-        Op::AgentStart {
-            pane,
-            kind,
-            name,
-            args,
-            split,
-            tab,
-        } => Ok(Action::StartAgent {
-            at: agent_start(app, *pane, *split, *tab, *kind, caller)?,
-            line: agent::shell_line(*kind, args),
-            name: name.clone(),
-        }),
-        Op::AgentPrompt {
-            pane,
-            text,
-            wait,
-            timeout,
-        } => {
-            changing(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
-            validator::agent_ready(app, *pane)?;
-            Ok(Action::Prompt {
-                pane: *pane,
-                text: text.clone(),
-                wait: *wait,
-                timeout: timeout.map(Duration::from_millis),
-            })
-        }
-        Op::AgentWait { pane, timeout } => {
-            changing(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
-            Ok(Action::Wait {
-                pane: *pane,
-                timeout: timeout.map(Duration::from_millis),
-            })
-        }
-        Op::AgentGet { pane } => {
-            let session = target::resolve(app, Some(Target::Pane(*pane)), caller)
-                .map_err(agent_pane)?
-                .session;
-            let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
-            Ok(Action::Answered(Reply::ok(&agent_detail(
-                app, session, agent, *pane,
-            ))))
-        }
-        Op::AgentReply { pane } => {
-            target::resolve(app, Some(Target::Pane(*pane)), caller).map_err(agent_pane)?;
-            let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
-            let path = agent.transcript.clone().ok_or_else(|| {
-                ApiError::new(
-                    ErrorCode::NoReply,
-                    "no transcript yet",
-                    format!("orb agent wait {0}, then orb agent reply {0}", pane.0),
-                )
-            })?;
-            Ok(Action::Transcript {
-                harness: agent.harness.clone(),
-                path,
-                pane: *pane,
-            })
-        }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not an agent request",
-            "orb help lists the commands",
-        )),
-    }
-}
-
-/// Where `agent start` runs a `kind` agent: pane `pane` (else the caller's,
-/// `pane_busy` while an agent is live there), a new pane split off the
-/// caller's toward `split`, or a new tab of the caller's session with `tab`.
-/// Naming more than one place is a `bad_request`, as is splitting a float.
-fn agent_start(
-    app: &AppState,
-    pane: Option<PaneId>,
-    split: Option<Direction>,
-    tab: bool,
-    kind: AgentKind,
-    caller: Option<PaneId>,
-) -> Result<StartIn, ApiError> {
-    match (pane, split, tab) {
-        (Some(_), Some(_), _) | (Some(_), _, true) | (None, Some(_), true) => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "--pane, --split and --tab exclude each other",
-            format!(
-                "name one: orb agent start --kind {} --split right",
-                kind.program()
-            ),
-        )),
-        (None, Some(direction), false) => {
-            let (session, at) = tiled(app, None, caller, START_FLOAT)?;
-            Ok(StartIn::New(ApiAdd {
-                session,
-                place: ApiPlace::Split {
-                    at,
-                    split: direction.into(),
-                },
-                dir: None,
-            }))
-        }
-        (None, None, true) => Ok(StartIn::New(ApiAdd {
-            session: changing_session(app, None, caller)?,
-            place: ApiPlace::Tab,
-            dir: None,
-        })),
-        (pane, None, false) => {
-            let Some(pane) = changing(app, pane.map(Target::Pane), caller)?.pane else {
-                return Err(ApiError::new(
-                    ErrorCode::BadRequest,
-                    "no pane to start in",
-                    format!(
-                        "name the pane: orb agent start --kind {} --pane <id>",
-                        kind.program()
-                    ),
-                ));
-            };
-            validator::pane_free(app, pane, kind)?;
-            Ok(StartIn::Pane(pane))
-        }
-    }
-}
-
-/// Why `agent start --split` can't run from a float.
-const START_FLOAT: &str = "a float can't be split; start the agent with --tab instead";
-
-/// `error`, pointing a missing pane at the agent list, which shows where
-/// each agent runs.
-fn agent_pane(error: ApiError) -> ApiError {
-    if error.code == ErrorCode::NotFound {
-        error.with_hint("orb agent list shows each agent's pane")
-    } else {
-        error
-    }
-}
-
-/// Pokes the sessions poll so it reads the panes now.
-fn poke(deps: &ControlDeps) {
-    let _ = deps
-        .sessions
-        .tell(SessionsCommand::RefreshSessions)
-        .try_send();
-}
-
-/// Has the screen loop paste `text` into `pane`'s agent and press Enter;
-/// with `wait`, waits for the turn to end or the agent to be blocked, with
-/// `timeout` over the whole call, until `gone` says the caller hung up.
-fn prompt_agent(
-    deps: &ControlDeps,
-    pane: PaneId,
-    text: String,
-    wait: bool,
-    timeout: Option<Duration>,
-    gone: &dyn Fn() -> bool,
-) -> Reply {
-    let deadline = timeout.map(|limit| Instant::now() + limit);
-    let pasted = SystemTime::now();
-    if let Err(error) = deps.panes.ask(PaneRequest::Prompt { pane, text }) {
-        return Reply::err(error);
-    }
-    if !wait {
-        return Reply::ok(&PromptResult { submitted: true });
-    }
-    let poke = || poke(deps);
-    match agent::wait_prompted(
-        &deps.state,
-        pane,
-        &poke,
-        gone,
-        Timing::REAL,
-        deadline,
-        pasted,
-    ) {
-        Ok(done) => Reply::ok(&done),
-        Err(error) => Reply::err(error),
-    }
-}
-
-/// Has the screen loop type `line` into `pane`, names the pane `name` if
-/// given (a failed rename is logged, not replied), then waits for the agent
-/// to start.
-fn start_agent(deps: &ControlDeps, pane: PaneId, line: String, name: Option<String>) -> Reply {
-    if let Err(error) = deps.panes.ask(PaneRequest::Launch { pane, line }) {
-        return Reply::err(error);
-    }
-    if let Some(name) = name
-        && let Err(error) = deps
-            .panes
-            .ask(PaneRequest::Change(Change::RenamePane { pane, name }))
-    {
-        deps.log.line(
-            "control",
-            &format!("couldn't name pane {}: {}", pane.0, error.message),
-        );
-    }
-    match agent::wait_started(&deps.state, pane, &|| poke(deps), Timing::REAL) {
-        Ok(started) => Reply::ok(&started),
-        Err(error) => Reply::err(error),
-    }
-}
-
-/// Adds the pane `at` asks for, if any, then starts the agent there (see
-/// [`start_agent`]).
-fn start_in(deps: &ControlDeps, at: StartIn, line: String, name: Option<String>) -> Reply {
-    let pane = match at {
-        StartIn::Pane(pane) => pane,
-        StartIn::New(add) => match added(deps, add) {
-            Ok(pane) => pane,
-            Err(error) => return Reply::err(error),
-        },
-    };
-    start_agent(deps, pane, line, name)
-}
-
-/// What a split, stack, float or new tab comes to, read from `app`: the
-/// pane or session it adds to, settled before a bad `cwd`.
-fn add_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
-    match op {
-        Op::PaneSplit {
-            pane,
-            direction,
-            name,
-            run,
-            cwd,
-        } => {
-            let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
-            let place = ApiPlace::Split {
-                at,
-                split: (*direction).into(),
-            };
-            adding(session, place, name.clone(), run.clone(), cwd.as_deref())
-        }
-        Op::PaneStack {
-            pane,
-            name,
-            run,
-            cwd,
-        } => {
-            let (session, at) = tiled(app, *pane, caller, SPLIT_FLOAT)?;
-            adding(
-                session,
-                ApiPlace::Stack { at },
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
-        }
-        Op::PaneFloat {
-            session,
-            name,
-            run,
-            cwd,
-        } => {
-            let session = changing_session(app, *session, caller)?;
-            adding(
-                session,
-                ApiPlace::Float,
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
-        }
-        Op::TabCreate {
-            session,
-            name,
-            run,
-            cwd,
-        } => {
-            let session = changing_session(app, *session, caller)?;
-            adding(
-                session,
-                ApiPlace::Tab,
-                name.clone(),
-                run.clone(),
-                cwd.as_deref(),
-            )
-        }
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not an add",
-            "orb help lists the commands",
-        )),
-    }
-}
-
-/// The add of a shell at `place` in `session`, in folder `cwd` when given:
-/// `bad_request` before anything is added when `cwd` isn't an absolute path
-/// to a folder.
-fn adding(
-    session: SessionId,
-    place: ApiPlace,
-    name: Option<String>,
-    run: Option<String>,
-    cwd: Option<&Path>,
-) -> Result<Action, ApiError> {
-    if let Some(dir) = cwd
-        && !(dir.is_absolute() && dir.is_dir())
-    {
-        return Err(ApiError::new(
-            ErrorCode::BadRequest,
-            format!("no folder {}", dir.display()),
-            "give --cwd an existing folder; orb pane list shows each pane's cwd",
-        ));
-    }
-    Ok(Action::Add {
-        add: ApiAdd {
-            session,
-            place,
-            dir: cwd.map(Path::to_path_buf),
-        },
-        name,
-        run,
-    })
-}
-
-/// What a send, keys, type, run or read comes to, read from `app`: settled before
-/// an unknown key name, so a refused list of keys sends nothing.
-fn pane_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
-    match op {
-        Op::PaneSend { pane, text } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
-            Ok(Action::Pane(PaneRequest::Send {
-                pane: *pane,
-                text: text.clone(),
-            }))
-        }
-        Op::PaneKeys { pane, keys } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
-            let keys = keys
-                .iter()
-                .map(|name| {
-                    key_event(name).ok_or_else(|| {
-                        ApiError::new(
-                            ErrorCode::BadRequest,
-                            format!("unknown key {name}"),
-                            key_names(*pane),
-                        )
-                    })
-                })
-                .collect::<Result<_, _>>()?;
-            Ok(Action::Pane(PaneRequest::Keys { pane: *pane, keys }))
-        }
-        Op::PaneType { pane, text } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
-            Ok(Action::Pane(PaneRequest::Type {
-                pane: *pane,
-                text: text.clone(),
-            }))
-        }
-        Op::PaneRun { pane, command } => {
-            changing(app, Some(Target::Pane(*pane)), caller)?;
-            Ok(Action::Pane(PaneRequest::Run {
-                pane: *pane,
-                line: command.clone(),
-            }))
-        }
-        Op::PaneRead {
-            pane,
-            lines,
-            head,
-            tail,
-        } => match changing(app, pane.map(Target::Pane), caller)? {
-            Resolved {
-                pane: Some(pane), ..
-            } => Ok(Action::Read {
-                request: PaneRequest::Read {
-                    pane,
-                    lines: *lines,
-                },
-                head: *head,
-                tail: *tail,
-            }),
-            Resolved { pane: None, .. } => Err(ApiError::new(
-                ErrorCode::BadRequest,
-                "no pane to read",
-                "name the pane: orb pane read <pane>",
-            )),
-        },
-        _ => Err(ApiError::new(
-            ErrorCode::BadRequest,
-            "not pane input or output",
-            "orb help lists the commands",
-        )),
-    }
-}
-
-/// The hint for an unknown key name in `pane`: the names `pane keys` knows,
-/// and the command that types text there.
-fn key_names(pane: PaneId) -> String {
-    format!(
-        "key names: enter esc tab backspace space delete insert up down left right home end \
-         pageup pagedown f1-f12 shift+tab ctrl+<a-z> alt+<char>, or one character; \
-         for letters and text use orb pane type {} <text>",
-        pane.0
-    )
-}
-
-/// Asks the screen loop for `request` and replies `{}` once it's done.
-fn typed(deps: &ControlDeps, request: PaneRequest) -> Reply {
-    match deps.panes.ask(request) {
-        Ok(_) => Reply::ok(&Done {}),
-        Err(error) => Reply::err(error),
-    }
-}
-
 /// What a change is about, as [`target::resolve`] finds it; `settled` when
 /// its session is settled.
-fn changing(
+pub(super) fn changing(
     app: &AppState,
     target: Option<Target>,
     caller: Option<PaneId>,
@@ -883,7 +483,7 @@ fn changing(
 }
 
 /// The session a change names, else the caller's; `settled` when it is.
-fn changing_session(
+pub(super) fn changing_session(
     app: &AppState,
     session: Option<SessionId>,
     caller: Option<PaneId>,
@@ -982,7 +582,7 @@ fn session_create(
 
 /// Pane `pane` (else the caller's) and its session; `bad_request` saying
 /// `why` when it's a float.
-fn tiled(
+pub(super) fn tiled(
     app: &AppState,
     pane: Option<PaneId>,
     caller: Option<PaneId>,
@@ -1008,41 +608,13 @@ fn tiled(
 }
 
 /// Why a float can't be split or stacked.
-const SPLIT_FLOAT: &str = "floats can't be split or stacked";
+pub(super) const SPLIT_FLOAT: &str = "floats can't be split or stacked";
 
 /// Asks the sessions actor for the shell `add` describes; `failed` when it can't.
-fn added(deps: &ControlDeps, add: ApiAdd) -> Result<PaneId, ApiError> {
+pub(super) fn added(deps: &ControlDeps, add: ApiAdd) -> Result<PaneId, ApiError> {
     deps.runtime
         .block_on(async { deps.sessions.ask(add).await })
         .map_err(|error| ApiError::new(ErrorCode::Failed, error.to_string(), SEE_LOG))
-}
-
-/// Adds the shell, then names it and types `run` into it on the screen loop,
-/// replying with the new pane; a rename or run the loop refuses is replied
-/// as that refusal, naming the new pane.
-fn add_pane(deps: &ControlDeps, add: ApiAdd, name: Option<String>, run: Option<String>) -> Reply {
-    let pane = match added(deps, add) {
-        Ok(pane) => pane,
-        Err(error) => return Reply::err(error),
-    };
-    for request in follow_ups(pane, name, run) {
-        if let Err(error) = deps.panes.ask(request) {
-            return Reply::err(ApiError {
-                message: format!("pane {} was added, but {}", pane.0, error.message),
-                hint: Some(format!("orb pane read {} shows it", pane.0)),
-                ..error
-            });
-        }
-    }
-    Reply::ok(&PaneResult { pane })
-}
-
-/// The screen-loop requests that name a new pane and start its command: the
-/// rename first, then the run.
-fn follow_ups(pane: PaneId, name: Option<String>, run: Option<String>) -> Vec<PaneRequest> {
-    let rename = name.map(|name| PaneRequest::Change(Change::RenamePane { pane, name }));
-    let run = run.map(|line| PaneRequest::Run { pane, line });
-    rename.into_iter().chain(run).collect()
 }
 
 /// Asks the sessions actor to start `start` and replies with the new session
@@ -1090,13 +662,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Action, ControlServerError, Ended, START_FLOAT, StartIn, follow_ups, hung_up, log_text,
-        open, plan, reply_line, serve, watch_for_hang_up,
+        Action, ControlServerError, Ended, StartIn, hung_up, log_text, open, plan, reply_line,
+        serve, watch_for_hang_up,
     };
+    use crate::feat::control::agent_ops::START_FLOAT;
     use crate::feat::control::change::Change;
     use crate::feat::control::client;
     use crate::feat::control::lists::route;
     use crate::feat::control::pane_control::PaneRequest;
+    use crate::feat::control::pane_ops::follow_ups;
     use crate::feat::control::protocol::{
         AgentKind, ApiError, ClosedResult, Direction, Done, EndedRow, ErrorCode, ItemResult, Op,
         Reply, Request, SEE_LOG, SettledResult,
@@ -1213,13 +787,15 @@ mod tests {
     #[case::pane_send(Op::PaneSend { pane: PaneId(1), text: "x".into() })]
     #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
     #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into() })]
-    #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into() })]
+    #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: false, timeout: None, force: false, tail: None })]
+    #[case::pane_run_wait(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: Some(5), force: false, tail: None })]
     #[case::pane_read(Op::PaneRead {
         pane: None,
         lines: 0,
         head: None,
         tail: None,
     })]
+    #[case::pane_wait(Op::PaneWait { pane: PaneId(1), text: Some("x".into()), regex: None, timeout: None, lines: None })]
     #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false })]
     #[case::agent_start_split(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: Some(Direction::Right), tab: false })]
     #[case::agent_start_tab(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: true })]
@@ -1407,6 +983,65 @@ mod tests {
             planned.map(drop).map_err(|error| error.code),
             Err(ErrorCode::BadRequest),
             "an unknown key name sends nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_wait_with_a_bad_regex_is_a_bad_request() {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning a wait in pane 1 for the pattern `(ok`, a group
+        // left open.
+        let request = Request {
+            caller: None,
+            op: Op::PaneWait {
+                pane: PaneId(1),
+                text: None,
+                regex: Some("(ok".into()),
+                timeout: None,
+                lines: None,
+            },
+        };
+        let planned = plan(&app, &request).map(drop);
+
+        // Then it is refused with bad_request naming the pattern.
+        assert_eq!(
+            planned.map_err(|error| (error.code, error.message)),
+            Err((
+                ErrorCode::BadRequest,
+                "`(ok` isn't a pattern: error: unclosed group".to_owned()
+            )),
+            "a pattern that doesn't compile waits on nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::neither(None, None)]
+    #[case::both(Some("a"), Some("b"))]
+    fn pane_wait_needs_text_or_regex(#[case] text: Option<&str>, #[case] regex: Option<&str>) {
+        // Given live session 1 with pane 1.
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+
+        // When planning a wait in pane 1 without exactly one of text and
+        // regex.
+        let request = Request {
+            caller: None,
+            op: Op::PaneWait {
+                pane: PaneId(1),
+                text: text.map(str::to_owned),
+                regex: regex.map(str::to_owned),
+                timeout: None,
+                lines: None,
+            },
+        };
+        let planned = plan(&app, &request).map(drop);
+
+        // Then it is refused with bad_request.
+        assert_eq!(
+            planned.map_err(|error| error.code),
+            Err(ErrorCode::BadRequest),
+            "a wait needs one thing to look for"
         );
     }
 
@@ -2312,10 +1947,8 @@ mod tests {
             matches!(
                 &planned,
                 Ok(Action::Read {
-                    request: PaneRequest::Read {
-                        pane: PaneId(1),
-                        lines: 50
-                    },
+                    pane: PaneId(1),
+                    lines: 50,
                     head: Some(10),
                     tail: Some(5),
                 })

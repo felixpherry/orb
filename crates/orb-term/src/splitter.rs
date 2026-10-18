@@ -5,8 +5,9 @@
 //! the start of a cut sequence is carried into the next read. What comes out
 //! keeps the child's byte order: runs of text for the emulator, kitty graphics
 //! commands, and markers for the synchronized-update brackets, the cell-size,
-//! version and pixel-mouse queries, pixel-mouse switches, screen clears and
-//! resets. Only the exact forms below are picked out; everything else stays
+//! version and pixel-mouse queries, pixel-mouse switches, screen clears,
+//! resets and shell prompt marks (OSC 133), which are left in the text and
+//! marked. Only the exact forms below are picked out; everything else stays
 //! text.
 
 use std::borrow::Cow;
@@ -14,8 +15,18 @@ use std::mem;
 
 const ESC: u8 = 0x1b;
 /// The longest unfinished escape sequence carried into the next read; a
-/// longer one is let through as text.
+/// longer one is let through as text, except a prompt mark, which may run to
+/// [`MAX_MARK`].
 const MAX_ESCAPE: usize = 32;
+/// The longest prompt mark carried into the next read; a longer one is marked
+/// from what arrived, and the rest of it is text.
+const MAX_MARK: usize = 4 * 1024;
+/// The bytes a prompt mark starts with, after its `ESC ]`.
+const MARK_START: &[u8] = b"133;";
+/// The parameter of a command start that holds its percent-encoded command
+/// line.
+const CMDLINE_URL: &[u8] = b"cmdline_url=";
+const BEL: u8 = 0x07;
 /// The largest graphics command kept; a bigger one is dropped whole.
 const MAX_GRAPHICS: usize = 16 * 1024 * 1024;
 /// The length of `ESC _ G`, which starts a graphics command.
@@ -52,6 +63,22 @@ pub(crate) enum Piece<'a> {
     ClearedScreen,
     /// Follows a full reset (`ESC c`) left in the text before it.
     Reset,
+    /// Follows a shell's prompt mark (OSC 133) left in the text before it.
+    PromptMark(Mark),
+}
+
+/// One shell prompt mark (OSC 133).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Mark {
+    /// `A`: the prompt starts.
+    PromptStart,
+    /// `B`: the prompt ends; typing starts here.
+    InputStart,
+    /// `C`: a command starts; `program` is the first word of its
+    /// percent-decoded `cmdline_url`.
+    CommandStart { program: Option<String> },
+    /// `D`: the command ended, with its exit status when given.
+    CommandEnd { exit: Option<i32> },
 }
 
 impl Piece<'_> {
@@ -68,6 +95,7 @@ impl Piece<'_> {
             Piece::PixelMouseQuery => Piece::PixelMouseQuery,
             Piece::ClearedScreen => Piece::ClearedScreen,
             Piece::Reset => Piece::Reset,
+            Piece::PromptMark(mark) => Piece::PromptMark(mark),
         }
     }
 }
@@ -143,7 +171,7 @@ impl Splitter {
             let (before, seq) = bytes.split_at_checked(at).unwrap_or((bytes, &[]));
             match classify(seq) {
                 Seq::Text(skip) => scanned = at + skip,
-                Seq::Partial if seq.len() >= MAX_ESCAPE => {
+                Seq::Partial if seq.len() >= cap(seq) => {
                     push_text(pieces, Cow::Borrowed(bytes));
                     return &[];
                 }
@@ -178,23 +206,32 @@ impl Splitter {
     fn resume_escape<'a>(&mut self, bytes: &'a [u8], pieces: &mut Vec<Piece<'a>>) -> &'a [u8] {
         let carried = self.carry.len();
         let (head, _) = bytes
-            .split_at_checked(MAX_ESCAPE.saturating_sub(carried))
+            .split_at_checked(MAX_MARK.saturating_sub(carried))
             .unwrap_or((bytes, &[]));
         self.carry.extend_from_slice(head);
         // How much of the joined bytes is text, the marker after it, how much
         // of them the sequence used, and what comes next.
         let (text, marker, used, open) = match classify(&self.carry) {
-            Seq::Partial if self.carry.len() < MAX_ESCAPE => return &[],
+            Seq::Partial if self.carry.len() < cap(&self.carry) => return &[],
             Seq::Partial => (self.carry.len(), None, self.carry.len(), Open::Nothing),
             Seq::Text(len) => (len, None, len, Open::Nothing),
             Seq::TakenOut(piece, len) => (0, Some(piece), len, Open::Nothing),
             Seq::Marked(piece, len) => (len, Some(piece), len, Open::Nothing),
             Seq::Graphics => (0, None, GRAPHICS_START, Open::Graphics),
         };
+        // A prompt mark ended by an escape that isn't its `ESC \` stops
+        // before that escape, which may sit in the carried bytes; it starts
+        // the next sequence.
+        let unused = self.carry.get(used..carried).map(<[u8]>::to_vec);
         self.carry.truncate(text);
         push_text(pieces, Cow::Owned(mem::take(&mut self.carry)));
         pieces.extend(marker);
         self.open = open;
+        if let Some(unused) = unused.filter(|unused| !unused.is_empty()) {
+            self.carry = unused;
+            self.open = Open::Escape;
+            return bytes;
+        }
         bytes
             .get(used.saturating_sub(carried)..)
             .unwrap_or_default()
@@ -265,8 +302,113 @@ fn classify(seq: &[u8]) -> Seq {
         [ESC, b'_', b'G', ..] => Seq::Graphics,
         [ESC, b'_', ..] => Seq::Text(2),
         [ESC, b'[', body @ ..] => csi(body),
+        [ESC, b']', body @ ..] => osc(body),
         _ => Seq::Text(1),
     }
+}
+
+/// How long the unfinished sequence `seq` may grow while carried into the
+/// next read.
+fn cap(seq: &[u8]) -> usize {
+    match seq {
+        [ESC, b']', body @ ..] if body.starts_with(MARK_START) => MAX_MARK,
+        _ => MAX_ESCAPE,
+    }
+}
+
+/// What an OSC is, from the bytes after its `ESC ]`: a prompt mark (`133;`
+/// then `A`, `B`, `C` or `D`) ending in BEL or `ESC \`, or text. An escape
+/// other than `ESC \` ends a mark before it.
+fn osc(body: &[u8]) -> Seq {
+    if body.len() < MARK_START.len() && MARK_START.starts_with(body) {
+        return Seq::Partial;
+    }
+    let Some(after) = body.strip_prefix(MARK_START) else {
+        return Seq::Text(2);
+    };
+    let letter = match after {
+        [] | [b'A'..=b'D'] => return Seq::Partial,
+        [letter @ b'A'..=b'D', b';' | BEL | ESC, ..] => *letter,
+        _ => return Seq::Text(2),
+    };
+    // The most of `body` a mark may take, and where its parameters start.
+    let limit = MAX_MARK - 2;
+    let params_at = MARK_START.len() + 1;
+    let terminator = body
+        .get(params_at..body.len().min(limit))
+        .and_then(|params| params.iter().position(|&byte| byte == BEL || byte == ESC))
+        .map(|at| params_at + at);
+    // The mark's length in `body`, and where its parameters stop.
+    let (len, params_end) = match terminator {
+        Some(at) => match (body.get(at), body.get(at + 1)) {
+            (Some(&BEL), _) => (at + 1, at),
+            (_, Some(b'\\')) => (at + 2, at),
+            (_, None) if body.len() < limit => return Seq::Partial,
+            _ => (at, at),
+        },
+        None if body.len() < limit => return Seq::Partial,
+        None => (limit, limit),
+    };
+    let params = body.get(params_at..params_end).unwrap_or_default();
+    Seq::Marked(Piece::PromptMark(mark(letter, params)), 2 + len)
+}
+
+/// The prompt mark `letter` names, read from its `params`: the bytes after
+/// the letter, up to its terminator.
+fn mark(letter: u8, params: &[u8]) -> Mark {
+    let mut params = params
+        .strip_prefix(b";")
+        .unwrap_or(params)
+        .split(|&byte| byte == b';');
+    match letter {
+        b'A' => Mark::PromptStart,
+        b'B' => Mark::InputStart,
+        b'C' => Mark::CommandStart {
+            program: params
+                .find_map(|param| param.strip_prefix(CMDLINE_URL))
+                .and_then(|url| {
+                    String::from_utf8_lossy(&percent_decoded(url))
+                        .split_whitespace()
+                        .next()
+                        .map(str::to_owned)
+                }),
+        },
+        _ => Mark::CommandEnd {
+            exit: params
+                .next()
+                .and_then(|status| std::str::from_utf8(status).ok())
+                .and_then(|status| status.parse().ok()),
+        },
+    }
+}
+
+/// `bytes` with each `%XX` (two hex digits) turned into the byte it names; a
+/// `%` not followed by two hex digits stays as it is.
+fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some((&byte, after)) = rest.split_first() {
+        let escaped = match (byte, after) {
+            (b'%', [high, low, ..]) => hex(*high).zip(hex(*low)).map(|(high, low)| high << 4 | low),
+            _ => None,
+        };
+        match escaped {
+            Some(escaped) => {
+                decoded.push(escaped);
+                rest = after.get(2..).unwrap_or_default();
+            }
+            None => {
+                decoded.push(byte);
+                rest = after;
+            }
+        }
+    }
+    decoded
+}
+
+/// The value of the hex digit `digit`.
+fn hex(digit: u8) -> Option<u8> {
+    u8::try_from(char::from(digit).to_digit(16)?).ok()
 }
 
 /// What a CSI is, from the bytes after its `ESC [`: parameter and
@@ -299,7 +441,7 @@ fn csi(body: &[u8]) -> Seq {
 mod tests {
     use std::borrow::Cow;
 
-    use super::{MAX_GRAPHICS, Piece, Splitter};
+    use super::{MAX_GRAPHICS, MAX_MARK, Mark, Piece, Splitter};
 
     /// The pieces `reads` split into, one read after another, owned, with
     /// neighbouring text joined.
@@ -537,5 +679,173 @@ mod tests {
 
         // Then only the text around it comes out.
         assert_eq!(split, [text(b"ab")], "the oversized command is dropped");
+    }
+
+    /// A command start mark for `program`.
+    fn command_start(program: &str) -> Piece<'static> {
+        Piece::PromptMark(Mark::CommandStart {
+            program: Some(program.to_owned()),
+        })
+    }
+
+    #[rstest::rstest]
+    #[case::prompt_start(b"\x1b]133;A;click_events=1\x1b\\", Mark::PromptStart)]
+    #[case::input_start(b"\x1b]133;B\x1b\\", Mark::InputStart)]
+    #[case::command_start(
+        b"\x1b]133;C;cmdline_url=echo%20hi%3B%20echo%20there\x1b\\",
+        Mark::CommandStart { program: Some("echo".to_owned()) }
+    )]
+    #[case::command_end(b"\x1b]133;D;0\x1b\\", Mark::CommandEnd { exit: Some(0) })]
+    #[case::command_end_without_exit(b"\x1b]133;D\x1b\\", Mark::CommandEnd { exit: None })]
+    #[case::bel_ended(b"\x1b]133;D;2\x07", Mark::CommandEnd { exit: Some(2) })]
+    fn prompt_marks_stay_in_the_text_and_are_marked(#[case] seq: &[u8], #[case] mark: Mark) {
+        // Given text around a shell's prompt mark.
+        let output = [b"a", seq, b"b"].concat();
+
+        // When splitting it.
+        let split = pieces(&[&output]);
+
+        // Then the mark stays in the text before it and a marker follows.
+        assert_eq!(
+            split,
+            [
+                text(&[b"a", seq].concat()),
+                Piece::PromptMark(mark),
+                text(b"b")
+            ],
+            "the mark is text, then marked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn long_command_start_cut_anywhere_comes_out_once() {
+        // Given a command start mark over 100 bytes long.
+        let url = "cargo%20test%20--workspace%20".repeat(5);
+        let seq = format!("\x1b]133;C;cmdline_url={url}\x1b\\");
+        let sample = [b"a", seq.as_bytes(), b"b"].concat();
+
+        for cut in 0..=sample.len() {
+            // When it arrives in two reads cut at `cut`.
+            let (first, second) = sample.split_at_checked(cut).unwrap_or_default();
+            let split = pieces(&[first, second]);
+
+            // Then the whole text comes out once, with one mark after the
+            // sequence.
+            assert_eq!(
+                split,
+                [
+                    text(&[b"a", seq.as_bytes()].concat()),
+                    command_start("cargo"),
+                    text(b"b")
+                ],
+                "pieces for the cut at byte {cut}"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    fn command_start_names_its_programs_first_word() {
+        // Given a command start for `vim notes.md`.
+        let seq = b"\x1b]133;C;cmdline_url=vim%20notes.md\x1b\\";
+
+        // When splitting it.
+        let split = pieces(&[seq]);
+
+        // Then the mark names vim only.
+        assert_eq!(
+            split,
+            [text(seq), command_start("vim")],
+            "the program is the command line's first word"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::one_read(None)]
+    #[case::two_reads(Some(100))]
+    fn command_start_past_its_cap_is_still_marked(#[case] cut: Option<usize>) {
+        // Given a command start with no terminator in its first 4 KiB.
+        let start = b"\x1b]133;C;cmdline_url=";
+        let output = [start.as_slice(), &[b'x'; MAX_MARK], b"\x1b\\b"].concat();
+        let reads = match cut.and_then(|cut| output.split_at_checked(cut)) {
+            Some((first, second)) => vec![first, second],
+            None => vec![output.as_slice()],
+        };
+
+        // When splitting it.
+        let split = pieces(&reads);
+
+        // Then it is marked from what arrived, and every byte is still text.
+        let (marked, rest) = output.split_at_checked(MAX_MARK).unwrap_or_default();
+        let program = "x".repeat(MAX_MARK - start.len());
+        assert_eq!(
+            split,
+            [text(marked), command_start(&program), text(rest)],
+            "a mark past its cap is marked, then the rest is text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn mark_ended_by_another_escape_cut_anywhere_keeps_that_escape() {
+        // Given an input start ended by a synchronized-update start instead
+        // of its own terminator.
+        let sample = b"\x1b]133;B\x1b[?2026hb";
+
+        for cut in 0..=sample.len() {
+            // When it arrives in two reads cut at `cut`.
+            let (first, second) = sample.split_at_checked(cut).unwrap_or_default();
+            let split = pieces(&[first, second]);
+
+            // Then the mark ends before that escape, which is still picked
+            // out.
+            assert_eq!(
+                split,
+                [
+                    text(b"\x1b]133;B"),
+                    Piece::PromptMark(Mark::InputStart),
+                    Piece::SyncStart,
+                    text(b"b")
+                ],
+                "pieces for the cut at byte {cut}"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::title(b"\x1b]0;fish\x07")]
+    #[case::unknown_mark(b"\x1b]133;X\x1b\\")]
+    #[case::other_number(b"\x1b]1337;A\x1b\\")]
+    fn other_osc_sequences_stay_text(#[case] seq: &[u8]) {
+        // Given text around an OSC that isn't a prompt mark.
+        let output = [b"a", seq, b"b"].concat();
+
+        // When splitting it.
+        let split = pieces(&[&output]);
+
+        // Then all of it is text.
+        assert_eq!(split, [text(&output)], "only prompt marks are marked");
+    }
+
+    #[rstest::rstest]
+    #[case::other_number(b"\x1b]1337;A\x1b\\")]
+    #[case::unknown_mark(b"\x1b]133;X\x1b\\")]
+    #[case::sync_after_osc(b"\x1b]13\x1b[?2026h")]
+    fn other_osc_sequences_cut_anywhere_stay_text(#[case] seq: &[u8]) {
+        // Given text around an OSC that starts like a prompt mark but isn't
+        // one.
+        let output = [b"a", seq, b"b"].concat();
+
+        for cut in 0..=output.len() {
+            // When it arrives in two reads cut at `cut`.
+            let (first, second) = output.split_at_checked(cut).unwrap_or_default();
+            let split = pieces(&[first, second]);
+
+            // Then every byte comes out once, in order, as text, with any
+            // sequence after it still picked out.
+            let expected = match seq {
+                b"\x1b]13\x1b[?2026h" => vec![text(b"a\x1b]13"), Piece::SyncStart, text(b"b")],
+                _ => vec![text(&output)],
+            };
+            assert_eq!(split, expected, "pieces for the cut at byte {cut}");
+        }
     }
 }

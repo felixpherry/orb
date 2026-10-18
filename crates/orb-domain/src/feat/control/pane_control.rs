@@ -53,10 +53,81 @@ pub enum PaneRequest {
         pane: PaneId,
         lines: usize,
     },
+    /// What the pane's shell is doing.
+    Shell {
+        pane: PaneId,
+    },
+    /// The text of the pane's absolute lines `start..end`.
+    Between {
+        pane: PaneId,
+        start: i64,
+        end: i64,
+    },
 }
 
-/// The loop's answer: the screen text for a read, nothing for the rest.
-pub type PaneReply = Result<Option<String>, ApiError>;
+/// What a pane's shell is doing, as the screen loop saw it from the prompt
+/// marks the shell sends.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShellView {
+    /// Whether the shell sent any prompt mark.
+    pub marks_seen: bool,
+    pub phase: ShellPhase,
+    /// The last command that ended.
+    pub last: Option<Finished>,
+    /// Goes up by one on every mark.
+    pub seq: u64,
+}
+
+/// Where a pane's shell is, between marks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ShellPhase {
+    /// No mark yet.
+    #[default]
+    Unknown,
+    /// At its prompt; `leftover` when text sits on the command line (the
+    /// cursor moved since the prompt ended).
+    AtPrompt { leftover: bool },
+    /// Running `program` (its first word), started by the mark with seq
+    /// `started`.
+    Running {
+        program: Option<String>,
+        started: u64,
+    },
+}
+
+/// A command that ended: its exit status, its output's absolute lines
+/// (`end_line` not included), and the seq of the mark that started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Finished {
+    pub exit: Option<i32>,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub started: u64,
+}
+
+/// Lines a `Between` read, and whether their start had already scrolled out
+/// of the pane's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneLines {
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// The loop's answer to one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneAnswer {
+    /// The request was carried out.
+    Done,
+    /// The screen text a `Read` asked for.
+    Text(String),
+    /// The shell a `Shell` asked about.
+    Shell(ShellView),
+    /// The lines a `Between` asked for.
+    Lines(PaneLines),
+}
+
+/// The loop's answer, or its refusal.
+pub type PaneReply = Result<PaneAnswer, ApiError>;
 
 /// The key `name` stands for in `orb pane keys`: one character, sent as its
 /// key (an uppercase letter as the shifted one); `enter esc tab backspace space
@@ -179,6 +250,56 @@ impl PaneControl {
     }
 }
 
+impl PaneControl {
+    /// Pane `pane`'s screen after up to `lines` lines of history, as text.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::ask`] does, or `failed` when the loop answers
+    /// with something other than text.
+    pub fn text(&self, pane: PaneId, lines: usize) -> Result<String, ApiError> {
+        match self.ask(PaneRequest::Read { pane, lines })? {
+            PaneAnswer::Text(text) => Ok(text),
+            _ => Err(wrong_kind()),
+        }
+    }
+
+    /// What pane `pane`'s shell is doing.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::ask`] does, or `failed` when the loop answers
+    /// with something other than the shell.
+    pub fn shell(&self, pane: PaneId) -> Result<ShellView, ApiError> {
+        match self.ask(PaneRequest::Shell { pane })? {
+            PaneAnswer::Shell(shell) => Ok(shell),
+            _ => Err(wrong_kind()),
+        }
+    }
+
+    /// The text of pane `pane`'s absolute lines `start..end`.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::ask`] does, or `failed` when the loop answers
+    /// with something other than lines.
+    pub fn between(&self, pane: PaneId, start: i64, end: i64) -> Result<PaneLines, ApiError> {
+        match self.ask(PaneRequest::Between { pane, start, end })? {
+            PaneAnswer::Lines(lines) => Ok(lines),
+            _ => Err(wrong_kind()),
+        }
+    }
+}
+
+/// The refusal for an answer of the wrong kind.
+fn wrong_kind() -> ApiError {
+    ApiError::new(
+        ErrorCode::Failed,
+        "orb's screen answered with the wrong kind of reply",
+        SEE_LOG,
+    )
+}
+
 impl std::fmt::Debug for PaneControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PaneControl")
@@ -189,7 +310,9 @@ impl std::fmt::Debug for PaneControl {
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::key_event;
+    use super::{PaneAnswer, PaneControl, key_event};
+    use crate::feat::control::protocol::ErrorCode;
+    use crate::ids::PaneId;
 
     #[rstest::rstest]
     #[case::enter("enter", KeyCode::Enter, KeyModifiers::NONE)]
@@ -243,5 +366,23 @@ mod tests {
 
         // Then there is no key.
         assert_eq!(key, None, "{name:?} names no key");
+    }
+
+    #[rstest::rstest]
+    fn shell_answered_with_text_is_refused_as_failed() {
+        // Given a screen loop that answers every request with text.
+        let panes = PaneControl::new(|_, reply| {
+            let _ = reply.send(Ok(PaneAnswer::Text("hi".into())));
+        });
+
+        // When asking it what pane 1's shell is doing.
+        let shell = panes.shell(PaneId(1));
+
+        // Then the answer is refused as failed.
+        assert_eq!(
+            shell.map_err(|error| error.code),
+            Err(ErrorCode::Failed),
+            "an answer of the wrong kind is a failure"
+        );
     }
 }

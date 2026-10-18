@@ -197,8 +197,9 @@ orb session focus <session>
 orb pane send <pane> <text>
 orb pane keys <pane> <key>...
 orb pane type <pane> <text>
-orb pane run <pane> <command>
+orb pane run <pane> <command> [--wait] [--timeout <ms>] [--force] [--tail <n>] [--json]
 orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]
+orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]
 orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]
 orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
 orb agent wait <pane> [--timeout <ms>]

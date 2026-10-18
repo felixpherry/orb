@@ -1,6 +1,7 @@
 //! The `orb session|tab|pane|agent|plate|project …` commands: turn the words typed into one
 //! request, send it to the running orb, print its reply (JSON for data, plain
-//! text for a pane's screen and an agent's answer) and pick the exit code
+//! text for a pane's screen, a command's output, a line waited for and an agent's answer) and
+//! pick the exit code
 //! (0 done, 1 refused or orb not running, 2 typed wrong). `orb help` and
 //! `--help` print help instead, with no orb needed. Bare `orb` in an orb pane
 //! says which pane, tab and session it is.
@@ -17,8 +18,9 @@ use wherror::Error;
 
 use crate::feat::control::agent::Timing;
 use crate::feat::control::help::{self, CommandHelp};
+use crate::feat::control::pane_ops::last_line;
 use crate::feat::control::protocol::{
-    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, SEE_LOG,
+    AgentKind, ApiError, Direction, ErrorCode, HereResult, Op, Reply, Request, RunResult, SEE_LOG,
 };
 use crate::feat::sessions::state::AgentStatus;
 use crate::ids::{PaneId, PlateItemId, ProjectId, SessionId};
@@ -52,7 +54,8 @@ pub fn entry(args: &[OsString], in_pane: bool) -> Entry {
 
 /// Runs `orb <noun> <verb> …` against the orb listening on `socket`, as the
 /// pane `caller` when it runs inside orb. The reply's result (plain text for a
-/// pane's screen and an agent's answer unless `--json` is given, else JSON) or
+/// pane's screen, a waited-on command's output and an agent's answer unless
+/// `--json` is given, else JSON) or
 /// the help asked for goes to `out`, an error or a usage error to `err`; returns the exit code.
 pub fn run<O, E>(
     args: &[OsString],
@@ -86,18 +89,15 @@ where
     };
     let limit = reply_limit(&op);
     let as_text = prints_text(&op) && !words.as_deref().is_some_and(asked_json);
-    match ask(socket, &Request { caller, op }, limit) {
+    let request = Request { caller, op };
+    match ask(socket, &request, limit) {
         Ok(Reply {
             ok: true, result, ..
         }) => {
             let result = result.unwrap_or(serde_json::Value::Null);
-            match result
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .filter(|_| as_text)
-            {
+            match text_of(&request.op, &result).filter(|_| as_text) {
                 Some(text) => {
-                    let _ = writeln!(out, "{}", text.trim_end_matches('\n'));
+                    let _ = writeln!(out, "{text}");
                 }
                 None => {
                     let _ = writeln!(out, "{result}");
@@ -120,7 +120,58 @@ where
 
 /// Whether `op`'s reply prints as plain text unless `--json` is given.
 fn prints_text(op: &Op) -> bool {
-    matches!(op, Op::PaneRead { .. } | Op::AgentReply { .. })
+    matches!(
+        op,
+        Op::PaneRead { .. }
+            | Op::AgentReply { .. }
+            | Op::PaneRun { wait: true, .. }
+            | Op::PaneWait { .. }
+    )
+}
+
+/// `op`'s reply `result` as plain text: a screen's or an answer's text, a
+/// waited-on command's output and exit, the line a wait matched; `None` for
+/// any other reply, or one not of its shape.
+fn text_of(op: &Op, result: &serde_json::Value) -> Option<String> {
+    match op {
+        Op::PaneRead { .. } | Op::AgentReply { .. } => result
+            .get("text")?
+            .as_str()
+            .map(|text| text.trim_end_matches('\n').to_owned()),
+        Op::PaneWait { .. } => result.get("line")?.as_str().map(str::to_owned),
+        Op::PaneRun { pane, .. } => serde_json::from_value::<RunResult>(result.clone())
+            .ok()
+            .map(|run| run_text(*pane, &run)),
+        _ => None,
+    }
+}
+
+/// A waited-on command's output in pane `pane` as lines: a note when its
+/// start was gone from the history, a note naming how many earlier lines were
+/// cut and how to read them, the output, then `[exit n]` (`[exit ?]` when
+/// the shell sends no prompt marks).
+fn run_text(pane: PaneId, run: &RunResult) -> String {
+    let shown = run.output.lines().count();
+    let mut lines = Vec::new();
+    if run.truncated {
+        lines.push("[… earlier output is gone from the pane's history]".to_owned());
+    }
+    if run.lines > shown {
+        lines.push(format!(
+            "[… {} earlier lines; orb pane read {} --lines {}]",
+            run.lines - shown,
+            pane.0,
+            run.lines
+        ));
+    }
+    if !run.output.is_empty() {
+        lines.push(run.output.clone());
+    }
+    lines.push(
+        run.exit
+            .map_or_else(|| "[exit ?]".to_owned(), |exit| format!("[exit {exit}]")),
+    );
+    lines.join("\n")
 }
 
 /// Whether `--json` is among `words` before `--`.
@@ -244,6 +295,8 @@ pub(crate) enum UsageProblem {
         flag: &'static str,
         needs: &'static str,
     },
+    /// `--regex`'s value isn't a pattern, `why` says what's wrong.
+    BadPattern { got: String, why: String },
 }
 
 impl UsageError {
@@ -320,6 +373,7 @@ impl UsageError {
                 format!("{one} and {other} can't go together")
             }
             UsageProblem::Needs { flag, needs } => format!("{flag} only goes with {needs}"),
+            UsageProblem::BadPattern { got, why } => format!("--regex can't take {got}: {why}"),
         }
     }
 
@@ -706,8 +760,10 @@ fn agent_words(
     })
 }
 
-/// The pane input or output `verb` and its words ask for. `send`, `type`,
-/// `run` and `keys` take their words as typed, so text starting with `--` is kept.
+/// The pane input or output `verb` and its words ask for. `send`, `type` and
+/// `keys` take their words as typed, so text starting with `--` is kept; `run`,
+/// `wait` and `read` read their flags, and `run` takes a command starting with
+/// `--` after `--`.
 fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<Op, UsageProblem> {
     Ok(match verb {
         "send" => {
@@ -725,10 +781,27 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
             }
         }
         "run" => {
-            let [pane, command] = exact(rest, ["<pane>", "<command>"])?;
+            let words = Words::split(rest, command)?;
+            let wait = words.switch("--wait");
+            let timeout = words.number("--timeout")?;
+            let tail = words.number("--tail")?;
+            for (flag, given) in [("--timeout", timeout.is_some()), ("--tail", tail.is_some())] {
+                if given && !wait {
+                    return Err(UsageProblem::Needs {
+                        flag,
+                        needs: "--wait",
+                    });
+                }
+            }
+            let given = [words.positional.as_slice(), words.after.as_slice()].concat();
+            let [pane, line] = exact(&given, ["<pane>", "<command>"])?;
             Op::PaneRun {
                 pane: PaneId(number("<pane>", pane)?),
-                command: command.to_owned(),
+                command: line.to_owned(),
+                wait,
+                timeout,
+                force: words.switch("--force"),
+                tail,
             }
         }
         "keys" => match rest {
@@ -739,6 +812,30 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
                 keys: owned(keys),
             },
         },
+        "wait" => {
+            let words = Words::split(rest, command)?;
+            let pane = PaneId(words.one("<pane>")?);
+            words.exclusive(&["--text", "--regex"])?;
+            let text = words.value("--text").map(str::to_owned);
+            let regex = words.value("--regex").map(str::to_owned);
+            match (&text, &regex) {
+                (None, None) => return Err(UsageProblem::MissingFlag { flag: "--text" }),
+                (_, Some(pattern)) => {
+                    regex::Regex::new(pattern).map_err(|error| UsageProblem::BadPattern {
+                        got: pattern.clone(),
+                        why: last_line(&error.to_string()).to_owned(),
+                    })?;
+                }
+                _ => {}
+            }
+            Op::PaneWait {
+                pane,
+                text,
+                regex,
+                timeout: words.number("--timeout")?,
+                lines: words.number("--lines")?,
+            }
+        }
         "read" => {
             let words = Words::split(rest, command)?;
             Op::PaneRead {
@@ -1026,6 +1123,12 @@ fn reply_limit(op: &Op) -> Option<Duration> {
             timeout,
             ..
         }
+        | Op::PaneRun {
+            wait: true,
+            timeout,
+            ..
+        }
+        | Op::PaneWait { timeout, .. }
         | Op::AgentWait { timeout, .. } => {
             timeout.map(|limit| Duration::from_millis(limit) + SLACK)
         }
@@ -1085,6 +1188,7 @@ fn timeout_hint(op: &Op) -> String {
         | Op::PaneKeys { pane, .. }
         | Op::PaneType { pane, .. }
         | Op::PaneRun { pane, .. }
+        | Op::PaneWait { pane, .. }
         | Op::PaneClose { pane }
         | Op::PaneRename { pane, .. }
         | Op::PaneFocus { pane }
@@ -1284,10 +1388,6 @@ mod tests {
         &["pane", "type", "12", ":wq"],
         Op::PaneType { pane: PaneId(12), text: ":wq".into() },
     )]
-    #[case::run(
-        &["pane", "run", "3", "just test"],
-        Op::PaneRun { pane: PaneId(3), command: "just test".into() },
-    )]
     #[case::read_own(&["pane", "read", "--lines", "5"], Op::PaneRead {
         pane: None,
         lines: 5,
@@ -1306,6 +1406,172 @@ mod tests {
 
         // Then they make the request they spell.
         assert_eq!(op, Ok(expected), "{words:?} parse to their request");
+    }
+
+    /// `pane run 3 <command>` as asked: waiting, its timeout, forced and its tail.
+    fn run_op(
+        command: &str,
+        wait: bool,
+        timeout: Option<u64>,
+        force: bool,
+        tail: Option<usize>,
+    ) -> Op {
+        Op::PaneRun {
+            pane: PaneId(3),
+            command: command.into(),
+            wait,
+            timeout,
+            force,
+            tail,
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::plain(&["pane", "run", "3", "just test"], run_op("just test", false, None, false, None))]
+    #[case::wait(
+        &["pane", "run", "3", "just test", "--wait"],
+        run_op("just test", true, None, false, None),
+    )]
+    #[case::wait_timeout(
+        &["pane", "run", "3", "just test", "--wait", "--timeout", "600000"],
+        run_op("just test", true, Some(600_000), false, None),
+    )]
+    #[case::force(
+        &["pane", "run", "3", "--force", "just test"],
+        run_op("just test", false, None, true, None),
+    )]
+    #[case::wait_tail(
+        &["pane", "run", "3", "just test", "--wait", "--tail", "20"],
+        run_op("just test", true, None, false, Some(20)),
+    )]
+    #[case::json(
+        &["pane", "run", "3", "git status", "--wait", "--json"],
+        run_op("git status", true, None, false, None),
+    )]
+    #[case::double_dash(
+        &["pane", "run", "3", "--wait", "--", "--version"],
+        run_op("--version", true, None, false, None),
+    )]
+    fn run_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing the words.
+        let op = parse(&args(words));
+
+        // Then they make the run they spell.
+        assert_eq!(op, Ok(expected), "{words:?} parse to their run");
+    }
+
+    #[rstest::rstest]
+    fn run_timeout_without_wait_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running `pane run 3 x --timeout 5` without --wait.
+        let (code, _, err) = ran(&["pane", "run", "3", "x", "--timeout", "5"])?;
+
+        // Then it exits 2 saying --timeout needs --wait.
+        assert_eq!(
+            (code, err.lines().next()),
+            (2, Some("error: --timeout only goes with --wait")),
+            "a timeout only goes with --wait"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn run_tail_without_wait_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running `pane run 3 x --tail 5` without --wait.
+        let (code, _, err) = ran(&["pane", "run", "3", "x", "--tail", "5"])?;
+
+        // Then it exits 2 saying --tail needs --wait.
+        assert_eq!(
+            (code, err.lines().next()),
+            (2, Some("error: --tail only goes with --wait")),
+            "a tail only goes with --wait"
+        );
+        Ok(())
+    }
+
+    /// `pane wait 3` for `text` or `regex`, with `timeout` and `lines`.
+    fn wait_op(
+        text: Option<&str>,
+        regex: Option<&str>,
+        timeout: Option<u64>,
+        lines: Option<usize>,
+    ) -> Op {
+        Op::PaneWait {
+            pane: PaneId(3),
+            text: text.map(str::to_owned),
+            regex: regex.map(str::to_owned),
+            timeout,
+            lines,
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::text(
+        &["pane", "wait", "3", "--text", "Listening on"],
+        wait_op(Some("Listening on"), None, None, None),
+    )]
+    #[case::regex(
+        &["pane", "wait", "3", "--regex", "result: (ok|FAILED)"],
+        wait_op(None, Some("result: (ok|FAILED)"), None, None),
+    )]
+    #[case::lines(
+        &["pane", "wait", "3", "--text", "ready", "--lines", "50"],
+        wait_op(Some("ready"), None, None, Some(50)),
+    )]
+    #[case::timeout(
+        &["pane", "wait", "3", "--text", "ready", "--timeout", "60000"],
+        wait_op(Some("ready"), None, Some(60_000), None),
+    )]
+    fn wait_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing the words.
+        let op = parse(&args(words));
+
+        // Then they make the wait they spell.
+        assert_eq!(op, Ok(expected), "{words:?} parse to their wait");
+    }
+
+    #[rstest::rstest]
+    fn wait_with_text_and_regex_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running `pane wait 3` with both --text and --regex.
+        let (code, _, err) = ran(&["pane", "wait", "3", "--text", "a", "--regex", "b"])?;
+
+        // Then it exits 2 saying they can't go together.
+        assert_eq!(
+            (code, err.lines().next()),
+            (2, Some("error: --text and --regex can't go together")),
+            "a wait takes one of --text and --regex"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn wait_without_text_or_regex_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running `pane wait 3` with neither --text nor --regex.
+        let (code, _, err) = ran(&["pane", "wait", "3"])?;
+
+        // Then it exits 2 asking for --text.
+        assert_eq!(
+            (code, err.lines().next()),
+            (2, Some("error: `orb pane wait` needs --text <text>")),
+            "a wait needs something to look for"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn wait_with_a_bad_regex_is_a_usage_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When running `pane wait 3 --regex "(ok"`, a group left open.
+        let (code, _, err) = ran(&["pane", "wait", "3", "--regex", "(ok"])?;
+
+        // Then it exits 2 naming the pattern and what's wrong with it.
+        assert_eq!(
+            (code, err.lines().next()),
+            (
+                2,
+                Some("error: --regex can't take (ok: error: unclosed group")
+            ),
+            "a pattern that doesn't compile is typed wrong"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -1575,6 +1841,26 @@ mod tests {
     #[case::list(
         Op::SessionList { all: false, project: None },
         Some(Duration::from_secs(60))
+    )]
+    #[case::run_wait_with_timeout(
+        Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: Some(1000), force: false, tail: None },
+        Some(Duration::from_secs(16)),
+    )]
+    #[case::run_wait_without_timeout(
+        Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: None, force: false, tail: None },
+        None,
+    )]
+    #[case::run_without_wait(
+        Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: false, timeout: None, force: false, tail: None },
+        Some(Duration::from_secs(60)),
+    )]
+    #[case::pane_wait_with_timeout(
+        Op::PaneWait { pane: PaneId(1), text: Some("x".into()), regex: None, timeout: Some(1000), lines: None },
+        Some(Duration::from_secs(16)),
+    )]
+    #[case::pane_wait_without_timeout(
+        Op::PaneWait { pane: PaneId(1), text: Some("x".into()), regex: None, timeout: None, lines: None },
+        None,
     )]
     fn reply_limit_outlasts_the_asked_timeout(#[case] op: Op, #[case] expected: Option<Duration>) {
         // Given / When working out how long to wait for the reply.
@@ -1914,7 +2200,7 @@ mod tests {
         "orb agent get 3 shows where it got to",
     )]
     #[case::pane(
-        Op::PaneRun { pane: PaneId(3), command: "x".into() },
+        Op::PaneRun { pane: PaneId(3), command: "x".into(), wait: false, timeout: None, force: false, tail: None },
         "orb pane read 3 shows the pane",
     )]
     #[case::agent_in_a_new_pane(
@@ -2082,6 +2368,123 @@ mod tests {
         assert_eq!(
             (code, out.lines().count(), printed),
             (0, 1, serde_json::json!({ "text": "done", "at": 5 })),
+            "--json prints the reply's JSON, got {out}"
+        );
+        Ok(())
+    }
+
+    /// An orb answer to `pane run --wait`: "a" and "b", exit 0.
+    const RAN: &str =
+        r#"{"ok":true,"result":{"exit":0,"output":"a\nb","lines":2,"truncated":false}}"#;
+
+    #[rstest::rstest]
+    fn run_wait_prints_output_then_exit() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb where the command printed "a" and "b" and exited 0.
+        // When running `pane run 1 x --wait`.
+        let printed = answered(&["pane", "run", "1", "x", "--wait"], RAN)?;
+
+        // Then the output prints as plain lines, then its exit code.
+        assert_eq!(
+            printed,
+            (0, "a\nb\n[exit 0]\n".to_owned()),
+            "pane run --wait prints the output and [exit n]"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn run_wait_with_cut_output_says_how_many_lines_came_before()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb where the command printed 250 lines, the last two
+        // "y" and "z", and exited 1.
+        let cut =
+            r#"{"ok":true,"result":{"exit":1,"output":"y\nz","lines":250,"truncated":false}}"#;
+
+        // When running `pane run 4 x --wait --tail 2`.
+        let printed = answered(&["pane", "run", "4", "x", "--wait", "--tail", "2"], cut)?;
+
+        // Then a first line says how many came before and how to read them.
+        assert_eq!(
+            printed,
+            (
+                0,
+                "[… 248 earlier lines; orb pane read 4 --lines 250]\ny\nz\n[exit 1]\n".to_owned()
+            ),
+            "cut output names the lines left out"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn run_wait_without_an_exit_prints_exit_unknown() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose pane sends no prompt marks, its screen "done".
+        let quiet =
+            r#"{"ok":true,"result":{"exit":null,"output":"done","lines":1,"truncated":false}}"#;
+
+        // When running `pane run 1 x --wait`.
+        let printed = answered(&["pane", "run", "1", "x", "--wait"], quiet)?;
+
+        // Then the exit prints as unknown.
+        assert_eq!(
+            printed,
+            (0, "done\n[exit ?]\n".to_owned()),
+            "no prompt marks means no exit code"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn run_wait_with_json_prints_the_json_shape() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb where the command printed "a" and "b" and exited 0.
+        // When running `pane run 1 x --wait --json`.
+        let (code, out) = answered(&["pane", "run", "1", "x", "--wait", "--json"], RAN)?;
+
+        // Then one JSON line carries the exit, output, lines and truncated.
+        let printed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            (code, out.lines().count(), printed),
+            (
+                0,
+                1,
+                serde_json::json!({ "exit": 0, "output": "a\nb", "lines": 2, "truncated": false })
+            ),
+            "--json prints the reply's JSON, got {out}"
+        );
+        Ok(())
+    }
+
+    /// An orb answer to `pane wait`: the line "Listening on :3000".
+    const MATCHED: &str = r#"{"ok":true,"result":{"line":"Listening on :3000"}}"#;
+
+    #[rstest::rstest]
+    fn wait_prints_the_matching_line() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose pane 1 showed "Listening on :3000".
+        // When running `pane wait 1 --text Listening`.
+        let printed = answered(&["pane", "wait", "1", "--text", "Listening"], MATCHED)?;
+
+        // Then the matching line prints as plain text.
+        assert_eq!(
+            printed,
+            (0, "Listening on :3000\n".to_owned()),
+            "pane wait prints the line it matched"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn wait_with_json_prints_the_json_shape() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an orb whose pane 1 showed "Listening on :3000".
+        // When running `pane wait 1 --text Listening --json`.
+        let (code, out) = answered(
+            &["pane", "wait", "1", "--text", "Listening", "--json"],
+            MATCHED,
+        )?;
+
+        // Then one JSON line carries the line.
+        let printed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            (code, printed),
+            (0, serde_json::json!({ "line": "Listening on :3000" })),
             "--json prints the reply's JSON, got {out}"
         );
         Ok(())

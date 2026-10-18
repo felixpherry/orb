@@ -12,12 +12,17 @@
 //! The pane keeps a history the owner can scroll with the wheel, and a text
 //! selection the owner drives with the mouse and copies on release. The owner
 //! can also read the screen and its history as plain text.
+//!
+//! The pane follows the prompt marks (OSC 133) its shell sends, so the owner
+//! can see whether the shell waits at its prompt or runs a command, how the
+//! last command ended, and read that command's output by line.
 
 mod emulator;
 mod encode;
 mod graphics;
 mod pane;
 mod render;
+mod shell;
 mod splitter;
 
 pub use graphics::{GraphicsFrame, Visible};
@@ -25,3 +30,4 @@ pub use pane::{
     CellSize, GraphicsSupport, PANE_READER_THREAD, Pane, PaneColors, PaneCommand, PaneError,
     PaneEvent, PaneSize,
 };
+pub use shell::{Finished, Lines, ShellPhase, ShellState, Spot};

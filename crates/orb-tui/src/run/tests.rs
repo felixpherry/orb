@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use orb_domain::feat::control::change::Change;
-use orb_domain::feat::control::pane_control::PaneRequest;
+use orb_domain::feat::control::pane_control::{PaneAnswer, PaneLines, PaneRequest, ShellPhase};
 use orb_domain::feat::control::protocol::ErrorCode;
 use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
 use orb_domain::feat::layout::tree::Split;
@@ -2697,6 +2697,114 @@ fn agent_prompt_pastes_the_text_then_presses_enter() -> io::Result<()> {
     // Then the text and Enter reach the program in the pane.
     let typed = log_holding(&test.dir.path().join("typed"), "hello\n");
     assert_eq!(typed, "hello\n", "the prompt is pasted and entered");
+    Ok(())
+}
+
+/// A client whose shell draws a prompt between its prompt marks, then waits.
+fn prints_prompt_marks(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf '\\033]133;A\\033\\\\$ \\033]133;B\\033\\\\'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// A client that prints three lines, then waits.
+fn prints_three_lines(_: &ZmxSession) -> Vec<OsString> {
+    [
+        "/bin/sh",
+        "-c",
+        "printf 'one\\ntwo\\nthree\\n'; /bin/sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+impl LoopTest {
+    /// Asks the loop `request` after each of its events, for up to five
+    /// seconds, until `done` holds for the answer; the last answer.
+    fn ask_until(
+        &mut self,
+        request: &PaneRequest,
+        done: impl Fn(&PaneAnswer) -> bool,
+    ) -> io::Result<Option<PaneAnswer>> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Ok(event) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                self.app.handle(event, &mut io::sink())?;
+            }
+            let (tx, rx) = mpsc::channel();
+            self.app
+                .handle(LoopEvent::Control(request.clone(), tx), &mut io::sink())?;
+            let answer = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(io::Error::other)?
+                .ok();
+            if answer.as_ref().is_some_and(&done) {
+                return Ok(answer);
+            }
+            last = answer;
+        }
+        Ok(last)
+    }
+}
+
+#[rstest::rstest]
+fn agent_shell_request_reads_the_panes_prompt_marks() -> io::Result<()> {
+    // Given attached pane 1 whose shell drew a prompt between its prompt
+    // marks.
+    let mut test = loop_app(FakeZmx::listing(""), prints_prompt_marks)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks what pane 1's shell is doing.
+    let answer = test.ask_until(
+        &PaneRequest::Shell { pane: PaneId(1) },
+        |answer| matches!(answer, PaneAnswer::Shell(shell) if shell.seq >= 2),
+    )?;
+
+    // Then it has seen the marks and sits at its prompt with nothing typed.
+    let shell = match answer {
+        Some(PaneAnswer::Shell(shell)) => Some((shell.marks_seen, shell.phase)),
+        _ => None,
+    };
+    assert_eq!(
+        shell,
+        Some((true, ShellPhase::AtPrompt { leftover: false })),
+        "the shell's prompt marks put it at a clean prompt"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_between_request_reads_the_lines_asked_for() -> io::Result<()> {
+    // Given attached pane 1 that printed `one`, `two` and `three` on its
+    // first three lines.
+    let mut test = loop_app(FakeZmx::listing(""), prints_three_lines)?;
+    test.attach(&[PaneId(1)]);
+
+    // When an agent asks for lines 1 to 3.
+    let between = PaneRequest::Between {
+        pane: PaneId(1),
+        start: 1,
+        end: 3,
+    };
+    let answer = test.ask_until(
+        &between,
+        |answer| matches!(answer, PaneAnswer::Lines(lines) if lines.text.contains("three")),
+    )?;
+
+    // Then it gets the second and third lines, none cut off.
+    assert_eq!(
+        answer,
+        Some(PaneAnswer::Lines(PaneLines {
+            text: "two\nthree".into(),
+            truncated: false,
+        })),
+        "the request reads exactly the lines asked for"
+    );
     Ok(())
 }
 

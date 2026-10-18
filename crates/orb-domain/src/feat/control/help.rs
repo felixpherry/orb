@@ -492,17 +492,50 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "pane",
         verb: "run",
-        usage: "orb pane run <pane> <command>",
-        summary: "Type a command line and Enter into a pane; a pane not drawn yet gets it once it is.",
+        usage: "orb pane run <pane> <command> [--wait] [--timeout <ms>] [--force] [--tail <n>] [--json]",
+        summary: "Type a command line and Enter into a pane's shell; a pane not drawn yet gets it \
+                  once it is. In a shell that sends prompt marks (fish does), it's refused while \
+                  a program runs there unless --force, and text left on the command line is \
+                  cleared first. With --wait, print the command's output and exit code once it \
+                  ends.",
         params: &[
             PANE,
             word(
                 "<command>",
-                "the command line, one quoted word, taken as is",
+                "the command line, one quoted word; put -- before it if it starts with --",
+            ),
+            word("--wait", "wait for the command to end and print its output"),
+            flag(
+                "--timeout",
+                "<ms>",
+                Some("no limit; only with --wait"),
+                "milliseconds the whole call may take",
+            ),
+            word("--force", "type even while a program runs in the pane"),
+            flag(
+                "--tail",
+                "<n>",
+                Some("200; only with --wait"),
+                "keep the output's last n lines",
+            ),
+            word(
+                "--json",
+                "print {\"exit\", \"output\", \"lines\", \"truncated\"} as JSON instead of plain text",
+            ),
+            word(
+                "--",
+                "the command line follows, even when it starts with --",
             ),
         ],
-        examples: &["orb pane run 12 \"just test\""],
-        reply: DONE,
+        examples: &[
+            "orb pane run 12 \"just test\"",
+            "orb pane run 12 \"cargo build\" --wait --timeout 600000",
+            "orb pane run 12 \"git status\" --wait --json",
+        ],
+        reply: "{} ; with --wait the output's last lines as plain text, then [exit n] ([exit ?] \
+                in a shell that sends no prompt marks, where it returns once the screen is quiet \
+                for 1 s); with --json {\"exit\": n|null, \"output\": \"…\", \"lines\": N, \
+                \"truncated\": bool}",
     },
     CommandHelp {
         noun: "pane",
@@ -541,6 +574,45 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             "orb pane read 12 --json",
         ],
         reply: "the trimmed screen as plain text; with --json {\"text\": \"…\"}",
+    },
+    CommandHelp {
+        noun: "pane",
+        verb: "wait",
+        usage: "orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]",
+        summary: "Wait until a line of a pane's screen or recent history holds the text or matches \
+                  the pattern, and print that line. Text already on screen counts, so wait for \
+                  text only the new output prints.",
+        params: &[
+            PANE,
+            flag("--text", "<text>", None, "text a line must hold"),
+            flag(
+                "--regex",
+                "<pattern>",
+                None,
+                "a pattern a line must match, instead of --text",
+            ),
+            flag(
+                "--timeout",
+                "<ms>",
+                Some("until you hang up"),
+                "milliseconds to wait before giving up",
+            ),
+            flag(
+                "--lines",
+                "<n>",
+                Some("200"),
+                "how many lines of history above the screen to search",
+            ),
+            word(
+                "--json",
+                "print {\"line\": …} as JSON instead of plain text",
+            ),
+        ],
+        examples: &[
+            "orb pane wait 12 --text \"Listening on\" --timeout 60000",
+            "orb pane wait 12 --regex \"test result: (ok|FAILED)\"",
+        ],
+        reply: "the first matching line as plain text; with --json {\"line\": \"…\"}",
     },
     CommandHelp {
         noun: "agent",
@@ -785,8 +857,8 @@ const RECIPES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Read a pane's screen with 50 lines of history:",
-        &["orb pane read <pane> --lines 50"],
+        "Run a command in a shell pane and get its output and exit code:",
+        &["orb pane run <pane> \"<command>\" --wait"],
     ),
 ];
 
@@ -820,7 +892,7 @@ pub(crate) fn overview() -> String {
         "Bare orb in an orb pane says which pane, tab and session you're in.".to_owned(),
         String::new(),
         "replies:".to_owned(),
-        "  exit 0  done; the reply is JSON on stdout, except pane read and agent reply, which print plain text (--json gives JSON)".to_owned(),
+        "  exit 0  done; the reply is JSON on stdout, except pane read, pane run --wait, pane wait and agent reply, which print plain text (--json gives JSON)".to_owned(),
         "  exit 1  refused, or orb isn't running; {\"code\", \"message\", \"hint\"} on stderr"
             .to_owned(),
         "  exit 2  typed wrong; what was wrong, the usage line and the help command on stderr"

@@ -1414,6 +1414,7 @@ dependencies = [
  "kameo",
  "notify-rust",
  "ratatui",
+ "regex",
  "rstest",
  "rusqlite",
  "serde",

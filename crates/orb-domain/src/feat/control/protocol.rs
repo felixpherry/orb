@@ -214,9 +214,24 @@ pub enum Op {
     /// Types text into a pane: no paste, no Enter.
     #[serde(rename = "pane.type")]
     PaneType { pane: PaneId, text: String },
-    /// Types a command and Enter into a pane.
+    /// Types a command and Enter into a pane's shell.
     #[serde(rename = "pane.run")]
-    PaneRun { pane: PaneId, command: String },
+    PaneRun {
+        pane: PaneId,
+        command: String,
+        /// Wait for the command to end and reply with its output.
+        #[serde(default)]
+        wait: bool,
+        /// With `wait`, give up after this many milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// Type even while a program runs in the pane.
+        #[serde(default)]
+        force: bool,
+        /// With `wait`, keep the output's last `tail` lines (200 when left out).
+        #[serde(default)]
+        tail: Option<usize>,
+    },
     /// A pane's screen, plus up to `lines` lines of history, as trimmed text.
     #[serde(rename = "pane.read")]
     PaneRead {
@@ -232,6 +247,23 @@ pub enum Op {
         /// Then keep the last `tail` lines.
         #[serde(default)]
         tail: Option<usize>,
+    },
+    /// Waits until a line of a pane's text holds `text` or matches `regex`.
+    #[serde(rename = "pane.wait")]
+    PaneWait {
+        pane: PaneId,
+        /// Text a line must hold.
+        #[serde(default)]
+        text: Option<String>,
+        /// A pattern a line must match.
+        #[serde(default)]
+        regex: Option<String>,
+        /// Give up after this many milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// Lines of history searched above the screen (200 when left out).
+        #[serde(default)]
+        lines: Option<usize>,
     },
     /// Starts an agent in a shell pane, or in a new one, and waits until orb
     /// sees it.
@@ -396,6 +428,10 @@ pub enum ErrorCode {
     Timeout,
     /// The agent didn't start working after the prompt.
     PromptStalled,
+    /// A program runs in the pane's shell.
+    Busy,
+    /// The shell didn't run the typed command.
+    NotRun,
     /// Something else went wrong; the message says what.
     Failed,
 }
@@ -637,6 +673,23 @@ pub struct SettledResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub text: String,
+}
+
+/// `pane run --wait`'s result: the exit status (null without prompt marks),
+/// the output's last lines, how many lines it had, and whether its start was
+/// gone from the pane's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunResult {
+    pub exit: Option<i32>,
+    pub output: String,
+    pub lines: usize,
+    pub truncated: bool,
+}
+
+/// `pane wait`'s result: the first line that matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchResult {
+    pub line: String,
 }
 
 /// `agent start`'s result: the agent orb saw start in the pane.
