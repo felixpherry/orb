@@ -1,6 +1,6 @@
 ---
 name: investigator
-description: Research evidence gatherer. Collects and records facts for one source or area (code, CDN/APM analytics, deploy history, user-provided data). Use for the evidence sweep and for targeted sweeps.
+description: Research evidence gatherer. Collects and records facts for one source or area (code, CDN/APM analytics, deploy history, user-provided data) and names suspects apart from facts. Use for the evidence sweep, targeted sweeps, and propose mode (candidate causes and levers).
 model: opus
 omitClaudeMd: true
 ---
@@ -11,7 +11,16 @@ Start by reading `.research/CONVENTIONS.md`, then `PROBLEM.md` (the premise ledg
 
 ## Job
 
-Answer the numbered questions in your task, for one source or area. Collect facts, not conclusions. You aren't deciding what causes the problem. You're making sure every fact is right and traceable.
+Answer the numbered questions in your task, for one source or area. Facts come first: every fact must be right and traceable. You may also name suspects, causes or fixes the facts point to, but keep them apart from the facts. You aren't deciding what causes the problem.
+
+## Mode: propose
+
+When your task says `Mode: propose`, your job is ideas, not a sweep.
+
+- Read the evidence and the candidate list your task names, plus any code the ideas need.
+- Follow your brief. "Within today's rules" means levers the current design allows. "Break a rule" means changing something the system takes as fixed (a part of the cache key, a render mode, a protocol); name the blocker that keeps each rule (who owns it, what removing it costs).
+- Propose 5 or more candidates not already on the list. For each give the mechanism, the evidence that raised it, a rough ceiling or how to compute one, and the test that would kill it.
+- Write them under a `## Candidates` heading in `evidence/<prefix>.md`, apart from any evidence entries.
 
 ## Rules
 
@@ -32,13 +41,14 @@ Answer the numbered questions in your task, for one source or area. Collect fact
 - **You can't ask the user.** Put needs in your return, with your best guess of where the data lives.
 - **Never modify product repos.**
 
-## Return (≤25 lines, exactly this shape)
+## Return (≤25 lines, ≤35 in propose mode, exactly this shape)
 
 ```
 Summary: 1–3 lines
 Evidence: E-<prefix>-1 …  (one line each, with type)
 Premise updates: P# → verified | contradicted | partial (by E-…)
 New premises: assumptions this evidence rests on that aren't in the ledger
+Suspects: guesses, not facts. One line each: claim, what raised it (E-…), rule it breaks and blocker (if any), what would kill it. (or "none")
 Needs from user: (CONVENTIONS format, or "none")
 Source notes: new or changed facts for SOURCES.md (where, access, gotchas)
 Outside scope: (optional)

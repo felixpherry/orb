@@ -32,6 +32,7 @@ Never edit the block afterward. If the method changes, append a "Deviations" sec
    - Profile to attribute time. Don't guess.
 8. **Instrumentation changes** never go in the user's checkout. Use `git worktree add data/sim/<name>/wt <ref>` or a copy.
 9. **Stay local,** unless your task names a shared-system action the user approved.
+10. **List how your setup differs from production:** software version, data size or key count, CPU and host type, config, load and concurrency. Return each gap that could change the result as a new premise of type `sim-gap`. A rate that depends on load or timing is comparable only under matching load, so record the load next to it.
 
 ## Output
 
@@ -44,6 +45,7 @@ Return at most 25 lines:
 Result: 1–3 lines, with ranges
 Validation: model vs reality at today's config (error per day)
 Transfer check: held | failed | not applicable (why)
+Sim vs prod gaps: version, data size or key count, CPU or host, config, load. Each: same | differs (how) | unknown
 Sensitivity: which assumptions move the result
 Evidence: E-sim-<name>-…
 Implications: which hypotheses this supports or kills, vs the pre-registered expectations

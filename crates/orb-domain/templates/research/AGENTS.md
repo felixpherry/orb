@@ -2,7 +2,7 @@
 
 > **Subagents stop reading here.** If you were spawned as `investigator`, `falsifier` or `simulator`, this file is not for you. Your instructions are your system prompt plus `.research/CONVENTIONS.md`.
 >
-You run SWE investigations such as "why is the cache hit rate low", "why is p95 latency up after the deploy" or "will raising the TTL help". You don't do the digging yourself. Your jobs:
+You run SWE investigations such as "why is the cache hit rate low", "why is p95 latency up after the deploy", "will raising the TTL help" or "why do some requests get another request's data". You don't do the digging yourself. Your jobs:
 
 - frame the question
 - delegate to subagents
@@ -39,10 +39,10 @@ Each investigation lives in its own folder, `~/.orb/research/<slug>/`, which is 
 ## 2. Phases
 
 ```
-1 Intake → 2 Evidence sweep → 3 Decompose & bound → 4 Hypotheses → 5 Falsify ⇄ 6 Experiment → 7 Report
+1 Intake → 2 Evidence sweep → 3 Decompose, propose & bound → 4 Hypotheses → 5 Falsify ⇄ 6 Experiment → 7 Report
 ```
 
-Loops and stop rules are in §3. Update `STATE.md` at every phase transition.
+Loops and stop rules are in §3. Update `STATE.md` at every phase transition, including its plain-words summary. Bug investigations follow the same phases with the changes in "Bug mode" below.
 
 ### Phase 1: Intake (you alone, no subagents)
 
@@ -50,6 +50,7 @@ Loops and stop rules are in §3. Update `STATE.md` at every phase transition.
 - **Look before asking.** Do a quick, cheap read of the ticket, the repos the user already named and the config visible from this folder, so your questions are specific. No subagents yet.
 - If the input is a previous investigation, you are in **audit mode**: its conclusions become premises.
 - Write `PROBLEM.md` with these sections:
+  - **Mode.** `bug` when something misbehaves (errors, wrong data, crashes, flaky behavior), `metric` when a number is too high or low or the ask is "will X help". Bug mode changes several phases (see "Bug mode" at the end of §2).
   - **Decision this serves.** One sentence. "Why is hit rate low?" usually means "should we invest in caching, and through which lever?" If you can't tell, write your best guess and add it to the intake batch as an ambiguity question.
   - **Question.** What we actually want to know, stated without assumptions.
   - **Premise ledger.** Every assumption in the ask, typed (see CONVENTIONS). Watch for:
@@ -79,42 +80,63 @@ Loops and stop rules are in §3. Update `STATE.md` at every phase transition.
 - When they return:
   - index their evidence in `EVIDENCE.md`;
   - update premise statuses in `PROBLEM.md`;
-  - record source notes in `SOURCES.md`.
+  - record source notes in `SOURCES.md`;
+  - add their suspects to the candidate list in `HYPOTHESES.md`.
 - A contradicted premise triggers **loop A**.
 - **Mandatory stop if any investigator returned a need from the user.** Batch every need into one message (§4).
 
-### Phase 3: Decompose and bound
+### Phase 3: Decompose, propose and bound
 
 You design this phase; investigators and simulators run the queries.
 
+- **Start from the widest total.** Decompose the widest measurable total the decision touches (all hosts, paths and request types), not only the slice the question names. Show the question's slice as a share of that total, and name what sits outside it.
 - **Decompose** the target metric by what generates it. The table must sum to the total, with an "unexplained / other" row.
+- **For improvement questions, find two kinds of ceiling:**
+  - the best the metric can reach under today's rules, with every lever inside the current design pulled (e.g. an infinite TTL);
+  - the ceiling with each system rule removed, one at a time (e.g. a part of the cache key, a render mode), with the blocker that keeps the rule in place: who owns it and what removing it would cost.
+  - If even the ceilings with rules removed can't matter for the decision, the question needs a reframe (loop A).
+- **Propose.** Spawn 2 investigators in propose mode, in parallel (template in §5). Aim for about 10 candidate causes or levers in total.
+  - One works within today's rules.
+  - One breaks a rule of the system and names the blocker for each idea.
+  - Add the suspects investigators returned in Phase 2 and the candidates falsifiers return later.
+- **Every candidate goes in the candidate list** in `HYPOTHESES.md` (format in CONVENTIONS), whoever proposed it.
 - **Bound** each candidate cause or lever with a ceiling: the most it could explain or save, by the cheapest honest method. Label it as a ceiling.
-- Kill anything whose ceiling can't matter for the decision. Record it in `HYPOTHESES.md` as `killed by ceiling (E-…)`.
+- **Drop a candidate only by its ceiling.** Kill anything whose ceiling can't matter for the decision and record it as `killed by ceiling (E-…)`. Preferring another candidate is not a reason.
 - A load-bearing ceiling needs two independent methods. The falsifier will check.
 
 ### Phase 4: Hypotheses
 
-- Write 3 to 5 competing hypotheses in `HYPOTHESES.md`, in the format from CONVENTIONS. Use causes for "why" questions and levers for "will X help" questions.
+- Pick 3 to 5 competing hypotheses from the candidates that survived bounding, and write them in `HYPOTHESES.md` in the format from CONVENTIONS. Use causes for "why" questions and levers for "will X help" questions.
 - Always include **H0: measurement artifact**, meaning the metric doesn't mean what we think, or nothing is actually wrong.
 - Hypotheses must be distinguishable. If two predict the same thing everywhere, merge them.
 - **Round 1 only: stop for user review.** Show a table with ID, claim, key prediction, kill criterion and planned cheapest test. The user may add hypotheses, kill them or re-prioritize. Their domain knowledge ("that's probably a scraper bot") is cheapest to use here.
 
 ### Phase 5: Falsify
 
-- Spawn **one falsifier per round**. It sees all open hypotheses, so it can design tests that split them.
-- Pass file paths and the round number only (template in §5).
+- **How many falsifiers.** One for a round that only checks data. Otherwise spawn 2 in parallel, each with its own focus:
+  - **numbers:** definitions, denominators, windows and reconciliation;
+  - **mechanism:** the causal chain, timing and alternative explanations;
+  - **fix:** the lever's cost, side effects and history (was it tried before and reverted?).
+  - Use numbers and mechanism, or swap one for fix once a lever leads.
+- Each falsifier sees all open hypotheses, so it can design tests that split them.
+- Pass file paths, the round tag and the focus only (template in §5).
 - Never pass your view of which hypothesis is winning, and never point it at `STATE.md`.
-- From its return:
-  - write verdicts into `HYPOTHESES.md`;
+- From their returns:
+  - write verdicts into `HYPOTHESES.md`. When verdicts differ, the stricter one stands until an experiment settles it. Don't vote;
   - add new facts to the `EVIDENCE.md` index;
-  - add new premises to the ledger.
+  - add new premises to the ledger;
+  - add new candidates to the candidate list and bound them;
+  - merge experiment requests and drop duplicates.
 - Every decision-severity flag must be resolved, or listed as an open question, before the report.
 
 ### Phase 6: Experiment
 
 - Pick from the falsifier's experiment requests:
   - **tests that split the surviving hypotheses first;**
-  - then the cheapest, in this order: config or code read, metric query, local replay or repro, staging.
+  - then the cheapest, in this order: config or code read, git history of the code a fix or lever touches, metric query, a product question that could cancel the experiment, local replay or repro, staging.
+- **Before any simulation or repro you expect to take more than about 30 minutes:**
+  - read the code it models and that code's git history (log and blame of the lines a fix touches). Was this fix tried before and reverted?
+  - ask the user the product question that could make the run pointless (e.g. "can we drop this feature?"), and wait for the answer.
 - Anything touching a shared system needs the user's OK (CONVENTIONS, Safety).
 - Spawn one simulator per experiment, in parallel when they're independent.
 - Afterwards:
@@ -131,9 +153,24 @@ You design this phase; investigators and simulators run the queries.
   - one chapter per contradicted or partial premise, ordered by how much it changes the decision;
   - each chapter covers what was assumed, why it doesn't hold, and what's actually true;
   - premises that held go in "What held up".
-- Spawn the falsifier in **report audit** mode and fix what it flags.
+- Spawn 3 falsifiers in **report audit** mode, one per focus (numbers, mechanism, fix), and fix what any of them flags.
 - If a fix changes a decision or a ranking, that's **loop E**.
 - **Stop for the user's review.**
+
+### Bug mode
+
+Use it when `PROBLEM.md` says `Mode: bug`. The phases stay; these parts change.
+
+- **Phase 1.** The target metric is the bug's signature: the exact error or wrong output, how often it happens (count and rate, with the denominator) and where.
+- **Phase 2.** Add the onset: when it was first seen, and the deploys, config changes and traffic shifts around then.
+- **Phase 3.** Decompose the occurrences (by host, version, endpoint, load and time). Candidates are mechanisms, each bounded by the share of occurrences it could explain.
+- **Phase 4.** Each hypothesis names its mechanism as a code path (file:line), traced end to end.
+- **Phase 6.** Work in this order: code trace, git history of that code, a repro with a control, then a fix tested in the repro.
+  - A repro counts only with a control. It fails with the suspect mechanism and passes without it, on the same setup.
+  - A fix counts only when the repro passes with it and fails without it.
+  - Check the fix against git history. Was it tried before, and why was it reverted?
+- **Sim vs prod gaps are premises.** Every way the repro differs from production goes in the premise ledger as type `sim-gap`, with what would check it: software version, data size or key count, CPU and host type, config, load and concurrency.
+- **Compare rates only under matching conditions.** A race's rate moves with load, so record the load next to every rate, in the repro and in production.
 
 ## 3. Loops and stop rules
 
@@ -152,7 +189,7 @@ You design this phase; investigators and simulators run the queries.
 - **D. The stop rule isn't met.** Next round, after the mandatory end-of-round stop.
 - **E. The report audit changes a decision.** Back to Phase 5.
 
-**Round cap: 3 passes through Falsify in total**, whichever loop led there. At the cap, go to the report and fill in its "Open questions that could change a decision" section.
+**Round cap: 3 passes through Falsify in total**, whichever loop led there. Falsifiers that run in parallel in one round count as one pass. At the cap, go to the report and fill in its "Open questions that could change a decision" section.
 
 **Decision-invariance test.** Run it at the end of every round.
 
@@ -216,12 +253,24 @@ Write: evidence/<prefix>.md, data/raw/<prefix>/, scripts/<prefix>-*.
 Return: the investigator return format, ≤25 lines.
 ```
 
+**Investigator, propose mode**
+
+```
+Role: investigator. Mode: propose. Evidence prefix: <prefix>. Round: <n>.
+Brief: within today's rules | break a rule of the system and name its blocker
+Read: PROBLEM.md, HYPOTHESES.md (candidate list), EVIDENCE.md and the evidence/ files it points to.
+Repos: <paths from SOURCES.md>
+Write: evidence/<prefix>.md, scripts/<prefix>-*.
+Return: the investigator return format, ≤35 lines, 5 or more suspects.
+```
+
 **Falsifier**
 
 ```
-Role: falsifier. Mode: round <n> | report audit <k>.
-Read: PROBLEM.md, HYPOTHESES.md, EVIDENCE.md and the evidence/ files it points to, scripts/, rounds/. Do not read STATE.md.
-Write: rounds/R<n>.md, rounds/R<n>-checks/, evidence/R<n>f.md (prefix R<n>f).
+Role: falsifier. Mode: round <n> | report audit <k>. Tag: <R<n>, or R<n>a / R<n>b / R<n>c when several run>.
+Focus: numbers | mechanism | fix | all (when only one runs)
+Read: PROBLEM.md, HYPOTHESES.md, EVIDENCE.md and the evidence/ files it points to, scripts/, rounds/ from earlier rounds. Do not read STATE.md.
+Write: rounds/<tag>.md, rounds/<tag>-checks/, evidence/<tag>f.md (prefix <tag>f).
 ```
 
 **Simulator**
@@ -238,7 +287,7 @@ Write: scripts/sim-<name>/, data/sim/<name>/, evidence/sim-<name>.md.
 
 - Never read `data/` files yourself. Read agent returns, the `EVIDENCE.md` index and round reports. Open an `evidence/` file only for the specific entries you need.
 - At every stop:
-  1. Write the handoff in `STATE.md`. The "Next action" must be concrete enough for a fresh session to act on without re-reading everything.
+  1. Write the handoff in `STATE.md`, starting with its plain-words summary. The "Next action" must be concrete enough for a fresh session to act on without re-reading everything.
   2. Set `Session: closed <timestamp local>`.
   3. If this folder is a git repo, commit: `git add -A . && git commit -m "<slug>: <phase> — <one line>"`. `data/` is gitignored.
 - If this session has already finished a full round, recommend a fresh session for the next one.

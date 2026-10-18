@@ -16,6 +16,12 @@ Start by reading `.research/CONVENTIONS.md`. Then read:
 
 **Don't read `STATE.md`.** You judge the evidence, not the orchestrator's current opinion.
 
+## Tag and focus
+
+- **Your task gives a tag:** `R<n>`, or `R<n>a`, `R<n>b`… when several falsifiers run in parallel. Use it in every file name below.
+- **Other falsifiers may be working on this round.** Don't read their files for this round; independent attacks catch more.
+- **Your task may name a focus:** numbers (section B), mechanism (A and C), or fix (the lever's cost, side effects and history). Go deepest there, but still run every section and flag anything decision-severe you see outside it.
+
 ## Mode: round `<n>`
 
 ### A. Attack each open hypothesis
@@ -57,15 +63,20 @@ List every assumption the current conclusions rest on that isn't in the ledger.
 Write one for each undetermined hypothesis and each decision-severity flag: the cheapest experiment that settles it.
 
 - **Prefer tests that split the surviving hypotheses,** meaning each hypothesis predicts a different outcome.
-- Then prefer cheaper ones: config or code read, then metric query, then local replay or repro, then staging.
+- Then prefer cheaper ones: config or code read, then git history of the code a fix touches, then metric query, then a product question for the user that could cancel the experiment, then local replay or repro, then staging.
+- **For any proposed fix, check git history.** Was it tried before and reverted, and why? Do this yourself; it's a cheap check.
 - For each request, give: what to run, the expected outcome under each hypothesis, and the cost.
+
+### E. New candidates
+
+Attacking hypotheses often shows a cause or fix nobody listed. Name each one with the evidence that raised it. The orchestrator adds it to the candidate list and bounds it.
 
 ### Cheap checks you may run yourself
 
 You may run read-only queries and small scripts to kill or confirm something quickly.
 
-- Save them in `rounds/R<n>-checks/`.
-- Record any new facts in `evidence/R<n>f.md` with prefix `R<n>f`.
+- Save them in `rounds/<tag>-checks/`.
+- Record any new facts in `evidence/<tag>f.md` with prefix `<tag>f`.
 - Anything heavier becomes an experiment request.
 - Never edit `HYPOTHESES.md`, `EVIDENCE.md`, or another agent's files.
 
@@ -81,11 +92,11 @@ Read `REPORT.md`.
    - every contradicted or partial premise in the ledger has a chapter, or an explicit reason it doesn't;
    - every "what's actually true" claim is backed by evidence, not by the absence of the assumed thing.
 
-Write `rounds/audit-<k>.md`.
+Write `rounds/audit-<k>.md`, or `rounds/audit-<k><letter>.md` when your tag has a letter.
 
 ## Output
 
-Write `rounds/R<n>.md` with sections A–D. Then return at most 30 lines:
+Write `rounds/<tag>.md` with sections A–E. Then return at most 30 lines:
 
 ```
 Verdicts: H# → killed | survived | undetermined (key evidence)
@@ -93,6 +104,7 @@ Decision-severity flags: …
 Magnitude flags: count + worst one
 New premises: …
 Experiment requests (ranked): …
-New facts: E-R<n>f-… (or "none")
+New candidates: claim (evidence that raised it), or "none"
+New facts: E-<tag>f-… (or "none")
 Needs from user: (CONVENTIONS format, or "none")
 ```

@@ -19,7 +19,7 @@ Read by the orchestrator and every subagent. Subagents: read this first, every t
   HYPOTHESES.md
   EVIDENCE.md               index, one line per evidence entry
   evidence/<prefix>.md      one file per agent task
-  rounds/R<n>.md            falsifier reports, plus rounds/R<n>-checks/
+  rounds/<tag>.md           falsifier reports, plus rounds/<tag>-checks/ (tag R<n>, or R<n>a, R<n>b… when several run)
   scripts/                  every query, replay and repro, re-runnable
   data/raw/  data/provided/  data/sim/      gitignored; may contain IPs and user agents
   REPORT.md
@@ -31,7 +31,7 @@ No agent ever edits `AGENTS.md`/`CLAUDE.md`, `.claude/` or `.pi/` during an inve
 
 - **Orchestrator:** `STATE.md`, `PROBLEM.md`, `HYPOTHESES.md`, the `EVIDENCE.md` index, `REPORT.md`, `SOURCES.md`, and creates `.env` placeholders.
 - **Investigator and simulator:** their own `evidence/<prefix>.md`, `scripts/<prefix>*` and `data/{raw,sim}/<prefix>/`.
-- **Falsifier:** `rounds/R<n>.md`, `rounds/R<n>-checks/`, `evidence/R<n>f.md`.
+- **Falsifier:** `rounds/<tag>.md`, `rounds/<tag>-checks/`, `evidence/<tag>f.md`, with the tag from its task.
 
 Never edit another agent's files. Source discoveries go in your return, and the orchestrator records them.
 
@@ -77,12 +77,24 @@ The ledger lives in `PROBLEM.md`:
 | ID | Premise | Type | Status | Check | Evidence |
 ```
 
-- **Types:** metric, vendor-defined, baseline, importance, causal, solution, scope.
+- **Types:** metric, vendor-defined, baseline, importance, causal, solution, scope, sim-gap.
+  - **sim-gap:** a way a simulation or repro differs from production (version, data size or key count, CPU or host, config, load). Results that rest on it hold only if the gap doesn't matter.
 - **Status:** unverified, verified, contradicted, partial, or untestable (with the reason).
 
 If your conclusion depends on an assumption that isn't in the ledger, list it under "New premises" in your return. The most dangerous ones hide in vendor metric definitions and in "obviously" steps.
 
 ## Hypotheses (`HYPOTHESES.md`)
+
+The file starts with the candidate list: every cause or lever anyone proposed, so none gets lost.
+
+```
+| ID | Candidate | Proposed by | Rule it breaks (blocker) | Ceiling | Status |
+```
+
+- **Proposed by:** the agent and evidence or round file, e.g. `inv-propose-b`, `R2b`.
+- **Status:** `hypothesis H<n>` | `killed by ceiling (E-…)` | `not bounded yet`.
+
+Hypotheses follow:
 
 ```
 ### H<n>: <claim in one sentence>
@@ -105,7 +117,7 @@ H0 (measurement artifact) is always on the list.
 - **Timezone.** Prose uses the local timezone stated in `PROBLEM.md`; scripts and evidence give local and UTC.
 - **Per-day values** say how they were derived: total ÷ days, or median of daily values.
 - **Ranges beat single points.** Give worst / average / best day, or low / likely / high with how each was made.
-- **Decomposition tables** have a total row and an "unexplained / other" row.
+- **Decomposition tables** have a total row and an "unexplained / other" row. Start from the widest total the decision touches and show the question's slice as a share of it.
 - **Labels.** Ceilings say "up to". Estimates say how they were estimated. Code-traced numbers say "from code, not measured".
 - Every number traces to an evidence ID.
 
@@ -172,6 +184,10 @@ Be kind to rate limits: save raw query outputs and reuse them.
 
 ```
 # STATE: <slug>
+
+## What we know, in plain words
+- <at most 5 bullets; no IDs, no jargon; mark each as measured or a guess>
+
 - Session: open since <ts local> | closed <ts local>
 - Phase: <n> <name>    Round: <k>/3
 - Decision this serves: <from PROBLEM.md>
@@ -183,6 +199,8 @@ Be kind to rate limits: save raw query outputs and reuse them.
 ## Log
 - <ts local> <phase transition or loop, one line>
 ```
+
+Rewrite "What we know, in plain words" at every phase transition. Someone who wasn't in the session should understand the state of play from it in under a minute.
 
 ## Return format for "Needs from user" (all agents)
 

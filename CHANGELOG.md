@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - ship-plan runs falsify between review and fixes, and fixes only what it rules on. Its second round runs simplify and deslop on the first round's changes too.
+- The Research kit decomposes from the widest total, with ceilings under today's rules and with each system rule removed. Two investigators propose about 10 candidates, and the orchestrator drops one only by its ceiling. Rounds run 2 falsifiers with different focuses (3 for the report audit), and code and git history come before long simulations. A bug mode works from signature to a repro with a control, with every sim vs prod gap in the premise ledger. STATE.md opens with a plain-words summary.
 
 - `⏎` in the search picker (`<C-g> /`) opens the found agent's own pane instead of its session, and resumes its chat in a new tab if it ended.
 - `Alt x` and `<C-g> p x` ask before closing a pane that runs an agent; a shell pane still closes at once.
