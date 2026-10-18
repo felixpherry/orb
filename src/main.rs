@@ -19,7 +19,6 @@ use orb_domain::feat::control::client::{self, Entry};
 use orb_domain::feat::control::protocol::socket_path;
 use orb_domain::feat::control::server::{self, ControlDeps};
 use orb_domain::feat::control::turns::Prompts;
-use orb_domain::feat::control::typed_lines::TypedLines;
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::harness::Harnesses;
@@ -242,7 +241,6 @@ fn run(
             panes: frontend.controller(),
             harnesses: harnesses.clone(),
             prompts: Prompts::default(),
-            typed: TypedLines::default(),
         },
     );
     let ended = frontend

@@ -27,7 +27,6 @@ pub(crate) mod screen_text;
 pub mod server;
 pub(crate) mod target;
 pub mod turns;
-pub mod typed_lines;
 pub(crate) mod validator;
 
 pub use agent::quoted;

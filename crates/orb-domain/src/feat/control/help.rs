@@ -643,10 +643,11 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         verb: "wait",
         usage: "orb pane wait <pane> (--text <text> | --regex <pattern>) [--timeout <ms>] [--lines <n>] [--json]",
         summary: "Wait until a line of a pane's screen or recent history holds the text or matches \
-                  the pattern, and print that line. Text already on screen counts, so wait for \
-                  text only the new output prints. A command line the shell echoed, or a line orb \
-                  typed into a REPL, doesn't match; the shell's current prompt does, so --text \
-                  '~>' waits for fish to be back at its prompt.",
+                  the pattern, and print that line. Text already on screen counts, and so does \
+                  what was typed, so wait for text only the output prints. Only the command \
+                  lines a shell's prompt marks show (fish's) are skipped; its current prompt \
+                  counts, so --text '~>' waits for fish to be back at its prompt. For a program \
+                  that echoes what you type, like a REPL, use orb pane type --enter --read.",
         params: &[
             PANE,
             flag("--text", "<text>", None, "text a line must hold"),

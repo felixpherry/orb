@@ -408,7 +408,7 @@ Entries are added or amended **only with human approval**.
 - (api) `orb pane run --wait` returns the command's exit code and output once the shell's prompt is back, and in a shell that sends no prompt marks it returns the output once the screen goes quiet, with no exit code.
 - (api) `orb pane run` is refused with the running program's name while a pane's shell is running it, unless `--force` is given.
 - (api) In a pane whose shell sends no prompt marks, `orb pane run` types without checking what runs there.
-- (api) `orb pane run --wait` fails with `not_run` when the shell took the line without starting it, kept or waiting for more of it, and then presses ctrl+c in the pane to clear it; in a shell never seen marking a command start it says the command may still run and presses nothing.
+- (api) `orb pane run --wait` fails with `not_run` when the shell took the line without starting it, kept or waiting for more of it, presses nothing, and for a kept or unfinished line its hint says to clear it with `orb pane keys <pane> ctrl+c`; in a shell never seen marking a command start it says the command may still run, and its hint says to read the pane and press ctrl+c only if the line still sits at the prompt.
 - (api) `orb agent start` into an existing pane is refused with `busy` and the running program's name while the pane's shell runs a program, unless `--force` is given.
 - (api) `orb agent prompt` is accepted by an agent whose last turn failed, and `orb agent start` into its pane is refused with `pane_busy`.
 - (api) `orb pane wait` returns once a pane's screen or recent history shows the given text or pattern, or fails with `timeout`.
@@ -416,7 +416,7 @@ Entries are added or amended **only with human approval**.
 - (api) `orb agent wait` and `orb agent get` treat a prompt orb just sent as work underway until the agent's turn starts or 5 s pass.
 - (api) A turn that ended in an API error makes `orb agent reply`, `orb agent prompt --wait` and `orb agent wait` fail with `turn_failed` and the error's text.
 - (api) `orb pane close`, `orb tab close` and `orb session settle` reply with the panes and agents they ended.
-- (api) `orb pane wait` never matches a command line the shell echoed or a line orb typed into a program, only what the pane printed around it, and the shell's current prompt counts as printed.
+- (api) `orb pane wait` never matches the command lines a shell's prompt marks show, and the shell's current prompt counts as printed; in a pane without marks, or in a program such as python, every line counts, lines orb typed included.
 - (api) `orb pane type --enter` presses Enter after the text, and `--read` on `orb pane type` and `orb pane keys` waits until the screen changes and then stays the same for 300 ms (at most 3 s) and prints its last lines.
 - (api) `orb plate list` lists items that aren't done unless `--all` is given, and says how many it hid.
 - (api) Every API command takes `--json`, and on a command that already replies JSON it changes nothing.

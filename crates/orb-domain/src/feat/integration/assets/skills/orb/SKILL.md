@@ -44,8 +44,8 @@ orb pane run 12 "just test" --wait              # its output, then [exit 0]
 
 - **`--wait` prints the output's last 200 lines, then `[exit n]`.** `--tail <n>` keeps a different number. `--timeout <ms>` caps the call.
 - **`busy`: a program already runs in the pane,** named in the message.
-- **`not_run`: the shell took the line but didn't run it.** It kept a line it rejected (a syntax error), or it waits for more of the line (an unfinished quote or bracket). orb already pressed ctrl+c to clear it, so fix the command and run it again.
-- **A `timeout` saying it may still run** means the shell was still drawing its prompt: read the pane, don't run the line again.
+- **`not_run`: the shell took the line but didn't run it.** It kept a line it rejected (a syntax error), or it waits for more of the line (an unfinished quote or bracket). orb presses nothing: clear the line with `orb pane keys <pane> ctrl+c`, then fix the command and run it again.
+- **A `timeout` saying it may still run** means orb couldn't tell: the shell was still drawing its prompt, or it hasn't shown a command start yet. `orb pane read` the pane and press ctrl+c only if the line still sits at the prompt. Don't run the line again.
 - **A program that never ends makes `--wait` run to its timeout.** Start a REPL, server or editor with plain `run` (or `--run` on a new pane), then use `pane wait`, or talk to it with `pane type --enter --read`.
 - **Exit codes come from the shell's prompt marks.** fish sends them. In a shell that doesn't (bash and zsh usually), `--wait` returns once the screen stays quiet for 1 s, no sooner than 2 s after the line is typed, and prints `[exit ?]`, and `busy` is never checked.
 - **Without `--wait`, `run` types the line and Enter and replies `{}`.** A pane not drawn yet gets it once it draws, so no sleep is needed after `split`.
@@ -60,8 +60,8 @@ orb pane read 14 --tail 40                               # the screen's last 40 
 ```
 
 - **`--name`, `--run` and `--cwd` work on `tab create`, `pane split`, `pane stack` and `pane float`.** None of them moves the user's keys.
-- **`pane wait` counts text already on screen.** So wait for text only the new output prints. `--regex` takes a pattern instead.
-- **`pane wait` never matches a command line the shell echoed,** or a line you typed into a REPL, only what the pane printed around it. Waiting for `ZEBRA42` after `run "sleep 3; echo ZEBRA42"` returns once it prints. The shell's current prompt does match, so `--text '~>'` waits for fish to be back.
+- **`pane wait` counts text already on screen, and what was typed.** So wait for text only the output prints. `--regex` takes a pattern instead.
+- **Only fish's command lines are skipped.** Its prompt marks show which lines they are, so waiting for `ZEBRA42` after `run "sleep 3; echo ZEBRA42"` returns once it prints. Its current prompt does match, so `--text '~>'` waits for fish to be back. In other shells and in programs like python, nothing is skipped: for a program that echoes what you type, use `type --enter --read`.
 - **`pane read` is a snapshot.** `--lines <n>` adds history above the screen; `--head <n>` and `--tail <n>` keep the first or last lines.
 
 ## A helper agent
@@ -206,7 +206,7 @@ orb plate list --all                 # done items too
 | `prompt_stalled` | `orb pane read` to see why. Don't paste the prompt twice. |
 | `turn_failed` | The model call failed (quota, API error). Tell the user. |
 | `busy` | Type a line into it (`pane type --enter`), quit it, or ask; `--force` only into your own. |
-| `not_run` | Fix the line and run it again; orb already cleared it. |
+| `not_run` | Clear the line with `orb pane keys <pane> ctrl+c`, fix it and run it again. |
 | `timeout` | Check with `orb agent get` or `orb pane read` before trying again; a session may already be there. |
 
 ## Commands
