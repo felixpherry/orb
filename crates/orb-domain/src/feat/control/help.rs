@@ -123,6 +123,30 @@ const CALLERS_PANE: &str = "the caller's pane";
 /// `--session <id>`, the caller's session when left out.
 const SESSION_FLAG: Param = flag("--session", "<id>", Some(CALLERS_SESSION), "the session");
 
+/// `--name <text>` for a new pane.
+const NAME_FLAG: Param = flag(
+    "--name",
+    "<text>",
+    Some("the usual name"),
+    "a name for the new pane",
+);
+
+/// `--run <command>` for a new pane.
+const RUN_FLAG: Param = flag(
+    "--run",
+    "<command>",
+    Some("nothing"),
+    "a command line typed into the new shell, then Enter, once the shell first prints",
+);
+
+/// `--cwd <dir>` for a new pane.
+const CWD_FLAG: Param = flag(
+    "--cwd",
+    "<dir>",
+    Some("the session's folder"),
+    "the folder the new shell starts in; a relative one is from where you run orb",
+);
+
 /// `[<pane>]`, the caller's pane when left out.
 const OPTIONAL_PANE: Param = optional("<pane>", CALLERS_PANE, "the pane's ID");
 
@@ -158,6 +182,10 @@ const DONE: &str = "{}";
 
 /// What an add replies: the new pane.
 const NEW_PANE: &str = "{\"pane\": N}";
+
+/// What a pane or tab close replies: each pane it ended, with the pane's own
+/// name and the live agent's name, each null when there is none.
+const ENDED: &str = "{\"ended\": [{\"pane\": N, \"name\": \"…\"|null, \"agent\": \"…\"|null}]}";
 
 /// Every command, in the order the usage lines list them.
 pub(crate) const COMMANDS: &[CommandHelp] = &[
@@ -275,16 +303,20 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "tab",
         verb: "create",
-        usage: "orb tab create [--session <id>]",
+        usage: "orb tab create [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]",
         summary: "Add a tab with one shell at the end of a session's tabs.",
-        params: &[SESSION_FLAG],
-        examples: &["orb tab create", "orb tab create --session 7"],
+        params: &[SESSION_FLAG, NAME_FLAG, RUN_FLAG, CWD_FLAG],
+        examples: &[
+            "orb tab create",
+            "orb tab create --name server --run \"just dev\"",
+            "orb tab create --session 7 --cwd ../web",
+        ],
         reply: NEW_PANE,
     },
     CommandHelp {
         noun: "pane",
         verb: "split",
-        usage: "orb pane split [<pane>] --direction right|down",
+        usage: "orb pane split [<pane>] --direction right|down [--name <text>] [--run <command>] [--cwd <dir>]",
         summary: "Add a shell beside a pane (or its whole stack).",
         params: &[
             OPTIONAL_PANE,
@@ -294,29 +326,40 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 None,
                 "which side the new pane goes",
             ),
+            NAME_FLAG,
+            RUN_FLAG,
+            CWD_FLAG,
         ],
         examples: &[
             "orb pane split --direction right",
-            "orb pane split 12 --direction down",
+            "orb pane split --direction right --name tests --run \"just test\"",
+            "orb pane split 12 --direction down --cwd /tmp",
         ],
         reply: NEW_PANE,
     },
     CommandHelp {
         noun: "pane",
         verb: "stack",
-        usage: "orb pane stack [<pane>]",
+        usage: "orb pane stack [<pane>] [--name <text>] [--run <command>] [--cwd <dir>]",
         summary: "Add a shell stacked right after a pane.",
-        params: &[OPTIONAL_PANE],
-        examples: &["orb pane stack", "orb pane stack 12"],
+        params: &[OPTIONAL_PANE, NAME_FLAG, RUN_FLAG, CWD_FLAG],
+        examples: &[
+            "orb pane stack",
+            "orb pane stack 12 --name logs --run \"tail -f app.log\"",
+        ],
         reply: NEW_PANE,
     },
     CommandHelp {
         noun: "pane",
         verb: "float",
-        usage: "orb pane float [--session <id>]",
+        usage: "orb pane float [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]",
         summary: "Add a floating shell to a session.",
-        params: &[SESSION_FLAG],
-        examples: &["orb pane float", "orb pane float --session 7"],
+        params: &[SESSION_FLAG, NAME_FLAG, RUN_FLAG, CWD_FLAG],
+        examples: &[
+            "orb pane float",
+            "orb pane float --session 7 --name scratch",
+            "orb pane float --run htop",
+        ],
         reply: NEW_PANE,
     },
     CommandHelp {
@@ -326,7 +369,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         summary: "Close a pane and whatever runs in it.",
         params: &[PANE],
         examples: &["orb pane close 12"],
-        reply: DONE,
+        reply: ENDED,
     },
     CommandHelp {
         noun: "pane",
@@ -361,7 +404,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             "a pane in the tab",
         )],
         examples: &["orb tab close --pane 12"],
-        reply: DONE,
+        reply: ENDED,
     },
     CommandHelp {
         noun: "session",
@@ -385,7 +428,7 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
         summary: "Move a session to the Settled shelf, closing its panes.",
         params: &[optional("<session>", CALLERS_SESSION, "the session's ID")],
         examples: &["orb session settle 7"],
-        reply: DONE,
+        reply: "{\"session\": N, \"name\": \"…\", \"ended\": [{\"pane\": N, \"name\": \"…\"|null, \"agent\": \"…\"|null}]}",
     },
     CommandHelp {
         noun: "session",
@@ -419,15 +462,31 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
                 name: "<key>",
                 value: None,
                 default: None,
-                meaning: "enter esc tab backspace up down left right home end pageup pagedown \
-                          shift+tab ctrl+<a-z> alt+<a-z>, any case",
+                meaning: "enter esc tab backspace space delete insert up down left right home \
+                          end pageup pagedown f1-f12 shift+tab ctrl+<a-z> in any case, \
+                          alt+<char>; or one character, sent as its key (uppercase as shifted)",
                 repeats: true,
             },
         ],
         examples: &[
             "orb pane keys 12 ctrl+c",
             "orb pane keys 12 down down enter",
+            "orb pane keys 12 esc",
+            "orb pane keys 12 q",
         ],
+        reply: DONE,
+    },
+    CommandHelp {
+        noun: "pane",
+        verb: "type",
+        usage: "orb pane type <pane> <text>",
+        summary: "Type text into a pane key by key: no paste, no Enter; control characters \
+                  are left out.",
+        params: &[
+            PANE,
+            word("<text>", "the text, one quoted word, taken as is"),
+        ],
+        examples: &["orb pane type 12 \":wq\"", "orb pane type 12 \"hello\""],
         reply: DONE,
     },
     CommandHelp {
@@ -486,16 +545,23 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     CommandHelp {
         noun: "agent",
         verb: "start",
-        usage: "orb agent start --kind claude|pi [--pane <id>] [--name <text>] [-- <args>...]",
-        summary: "Type claude or pi into a shell pane and wait until orb sees it running (up to 30 s).",
+        usage: "orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]",
+        summary: "Type claude or pi into a shell pane, or a new one, and wait until orb sees it running (up to 30 s).",
         params: &[
             flag("--kind", "claude|pi", None, "which agent to start"),
             flag(
                 "--pane",
                 "<id>",
                 Some(CALLERS_PANE),
-                "a shell pane; always name one, since yours already runs you",
+                "a shell pane; without --pane, --split or --tab, your own",
             ),
+            flag(
+                "--split",
+                "right|down",
+                None,
+                "start in a new pane split off yours",
+            ),
+            word("--tab", "start in a new tab of your session"),
             flag(
                 "--name",
                 "<text>",
@@ -508,8 +574,9 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
             ),
         ],
         examples: &[
+            "orb agent start --kind claude --split right --name helper",
+            "orb agent start --kind pi --tab -- --model sonnet",
             "orb agent start --kind claude --pane 12 --name reviewer",
-            "orb agent start --kind pi --pane 13 -- --model sonnet",
         ],
         reply: "{\"pane\": N, \"agent\": N, \"harness\": \"claude\"|\"pi\", \"status\": \"idle\"|\"working\"}",
     },
@@ -707,15 +774,12 @@ const RECIPES: &[(&str, &[&str])] = &[
     ("See your session's panes:", &["orb pane list"]),
     (
         "Run a command in a new pane:",
-        &[
-            "orb pane split --direction right",
-            "orb pane run <pane> \"<command>\"",
-        ],
+        &["orb pane split --direction right --name <name> --run \"<command>\""],
     ),
     (
         "Ask another agent and read its answer:",
         &[
-            "orb agent start --kind claude --pane <pane>",
+            "orb agent start --kind claude --split right",
             "orb agent prompt <pane> \"<text>\" --wait",
             "orb agent reply <pane>",
         ],

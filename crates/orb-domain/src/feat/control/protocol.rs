@@ -99,6 +99,15 @@ pub enum Op {
         pane: Option<PaneId>,
         /// Which side the new pane goes.
         direction: Direction,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new shell stacked right after a pane.
     #[serde(rename = "pane.stack")]
@@ -106,6 +115,15 @@ pub enum Op {
         /// The pane, else the caller's.
         #[serde(default)]
         pane: Option<PaneId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new floating shell in a session.
     #[serde(rename = "pane.float")]
@@ -113,6 +131,15 @@ pub enum Op {
         /// The session, else the caller's.
         #[serde(default)]
         session: Option<SessionId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new tab with one shell at the end of a session's tabs.
     #[serde(rename = "tab.create")]
@@ -120,6 +147,15 @@ pub enum Op {
         /// The session, else the caller's.
         #[serde(default)]
         session: Option<SessionId>,
+        /// A name for the new pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// A command line typed into the new shell, then Enter.
+        #[serde(default)]
+        run: Option<String>,
+        /// The folder the new shell starts in, else the session's.
+        #[serde(default)]
+        cwd: Option<PathBuf>,
     },
     /// A new session.
     #[serde(rename = "session.create")]
@@ -175,6 +211,9 @@ pub enum Op {
     /// Presses named keys in a pane, in order.
     #[serde(rename = "pane.keys")]
     PaneKeys { pane: PaneId, keys: Vec<String> },
+    /// Types text into a pane: no paste, no Enter.
+    #[serde(rename = "pane.type")]
+    PaneType { pane: PaneId, text: String },
     /// Types a command and Enter into a pane.
     #[serde(rename = "pane.run")]
     PaneRun { pane: PaneId, command: String },
@@ -194,7 +233,8 @@ pub enum Op {
         #[serde(default)]
         tail: Option<usize>,
     },
-    /// Starts an agent in a shell pane and waits until orb sees it.
+    /// Starts an agent in a shell pane, or in a new one, and waits until orb
+    /// sees it.
     #[serde(rename = "agent.start")]
     AgentStart {
         /// The pane, else the caller's.
@@ -207,6 +247,12 @@ pub enum Op {
         /// Typed after the program, each quoted for the shell.
         #[serde(default)]
         args: Vec<String>,
+        /// Start in a new pane split off the caller's toward this side.
+        #[serde(default)]
+        split: Option<Direction>,
+        /// Start in a new tab of the caller's session.
+        #[serde(default)]
+        tab: bool,
     },
     /// Pastes a prompt into an agent and presses Enter.
     #[serde(rename = "agent.prompt")]
@@ -562,6 +608,30 @@ pub struct StartResult {
     reason = "a unit struct would go on the wire as null, not {}"
 )]
 pub struct Done {}
+
+/// One pane a close or settle ended: its own name, and the live agent's
+/// list name (cut to 60 graphemes), each null when there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EndedRow {
+    pub pane: PaneId,
+    pub name: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// `pane close`'s and `tab close`'s result: the panes they ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosedResult {
+    pub ended: Vec<EndedRow>,
+}
+
+/// `session settle`'s result: the session, its name (cut to 60 graphemes),
+/// and the panes it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SettledResult {
+    pub session: SessionId,
+    pub name: String,
+    pub ended: Vec<EndedRow>,
+}
 
 /// `pane read`'s result: the screen as text, empty when it shows nothing.
 #[derive(Debug, Clone, Serialize)]

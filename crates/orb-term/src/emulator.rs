@@ -499,11 +499,13 @@ impl Emulator {
     /// or Ctrl-U would drop what came before it and a newline would run the
     /// line early.
     pub(crate) fn type_line(&self, line: &str) {
-        let printable: String = line
-            .chars()
-            .filter(|character| !character.is_control())
-            .collect();
-        self.write(format!("{printable}\r").as_bytes());
+        self.write(format!("{}\r", printable(line)).as_bytes());
+    }
+
+    /// Types `text` into the child as raw input with no Enter and never as a
+    /// bracketed paste; control characters are left out, as `type_line` does.
+    pub(crate) fn type_text(&self, text: &str) {
+        self.write(printable(text).as_bytes());
     }
 
     /// Sends a mouse event over the pane drawn at `area` to the child;
@@ -733,6 +735,13 @@ fn write_to(writer: &SharedWriter, bytes: &[u8]) {
     let _ = writer.write_all(bytes).and_then(|()| writer.flush());
 }
 
+/// `text` without control characters (C0, DEL and C1), which act as keys in a
+/// prompt.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -979,6 +988,48 @@ mod tests {
 
         // Then the line reaches the child unwrapped.
         assert_eq!(input.contents(), b"claude --resume aa\r", "unwrapped line");
+    }
+
+    #[rstest::rstest]
+    fn typed_text_reaches_the_child_with_no_enter() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing a vim command.
+        emulator.type_text(":wq");
+
+        // Then the child receives the text and nothing after it.
+        assert_eq!(input.contents(), b":wq", "typed text with no Enter");
+    }
+
+    #[rstest::rstest]
+    fn typed_text_leaves_out_control_characters() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing text holding Ctrl-C, a newline, a carriage return, DEL
+        // and a C1 character.
+        emulator.type_text("a\u{3}b\nc\rd\u{7f}e\u{9b}f");
+
+        // Then only the printable text reaches the child.
+        assert_eq!(
+            input.contents(),
+            b"abcdef",
+            "control characters shouldn't act on the program"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typed_text_ignores_bracketed_paste() {
+        // Given a child that turned bracketed paste on.
+        let (mut emulator, input, _) = emulator();
+        emulator.feed(b"\x1b[?2004h");
+
+        // When typing a vim command.
+        emulator.type_text(":wq");
+
+        // Then the text reaches the child unwrapped.
+        assert_eq!(input.contents(), b":wq", "unwrapped text");
     }
 
     #[rstest::rstest]

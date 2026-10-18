@@ -4,16 +4,20 @@
 //! A session list shows open sessions and an agent list live agents unless
 //! asked for all; each counts the rows it left out as `hidden` and gives a
 //! `hint` naming the command that lists them. Names are cut to 60 graphemes.
+//!
+//! It also reads what a close or settle ends, before the change runs.
 
 use serde::Serialize;
 
 use crate::AppState;
+use crate::feat::control::agent;
 use crate::feat::control::protocol::{
-    self, AgentDetail, AgentRow, AgentsResult, ApiError, ErrorCode, HereResult, Op, PaneRow,
-    PanesResult, ProjectRow, ProjectsResult, Reply, Request, SessionRow, SessionsResult, TabRow,
-    TabsResult,
+    self, AgentDetail, AgentRow, AgentsResult, ApiError, EndedRow, ErrorCode, HereResult, Op,
+    PaneRow, PanesResult, ProjectRow, ProjectsResult, Reply, Request, SessionRow, SessionsResult,
+    SettledResult, TabRow, TabsResult,
 };
 use crate::feat::control::target::{self, Resolved, Target};
+use crate::feat::layout::state::Tab;
 use crate::feat::sessions::state::{Agent, AgentStatus, Project, ProjectKind, Session};
 use crate::ids::{PaneId, ProjectId, SessionId};
 
@@ -333,6 +337,45 @@ pub(super) fn agent_detail(
         status: agent.status,
         cwd: agent.cwd.to_string_lossy().into_owned(),
         branch: agent.branch.clone(),
+    }
+}
+
+/// What closing or settling `panes` ends, read before the change: each
+/// pane's own name, and its live agent's list name.
+pub(super) fn ended(app: &AppState, panes: &[PaneId]) -> Vec<EndedRow> {
+    panes
+        .iter()
+        .map(|&pane| EndedRow {
+            pane,
+            name: app.layouts.entry(pane).and_then(|entry| entry.name.clone()),
+            agent: agent::pane_agent(app, pane)
+                .filter(|found| agent::live(found.status))
+                .map(|found| protocol::short_name(app.layouts.agent_name(pane, Some(found)))),
+        })
+        .collect()
+}
+
+/// Every pane of the tab holding `pane`; none for a float.
+pub(super) fn tab_panes(app: &AppState, pane: PaneId) -> Vec<PaneId> {
+    app.layouts
+        .owner_of(pane)
+        .and_then(|session| app.layouts.get(session))
+        .and_then(|layout| layout.tabs().iter().find(|tab| tab.holds(pane)))
+        .map(Tab::pane_ids)
+        .unwrap_or_default()
+}
+
+/// What settling `session` ends, read before it settles: its name and every
+/// pane of its tabs and floats.
+pub(super) fn settled(app: &AppState, session: SessionId) -> SettledResult {
+    SettledResult {
+        session,
+        name: app
+            .sessions
+            .session(session)
+            .map(|found| protocol::short_name(&app.sessions.title(found)))
+            .unwrap_or_default(),
+        ended: ended(app, &app.layouts.session_panes(session)),
     }
 }
 

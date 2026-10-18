@@ -37,6 +37,10 @@ impl App {
                 }
                 None
             }),
+            PaneRequest::Type { pane, text } => self.live_pane(pane).map(|live| {
+                live.type_text(&text);
+                None
+            }),
             PaneRequest::Run { pane, line } => self.run_line(pane, line),
             PaneRequest::Launch { pane, line } => self.launch(pane, line),
             PaneRequest::Prompt { pane, text } => self.live_pane(pane).map(|live| {

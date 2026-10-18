@@ -268,6 +268,11 @@ impl Pane {
         lock(&self.emulator).type_line(line);
     }
 
+    /// Types `text` into the child with no Enter (see [`Emulator::type_text`]).
+    pub fn type_text(&self, text: &str) {
+        lock(&self.emulator).type_text(text);
+    }
+
     /// Sends a mouse event to the child if it asked for mouse reports and the
     /// event happened over the pane drawn at `area`. `pixel` is where it
     /// happened in the outer terminal's pixels, when the outer terminal

@@ -269,6 +269,8 @@ pub struct NextPoll(pub Duration);
 pub struct ApiAdd {
     pub session: SessionId,
     pub place: ApiPlace,
+    /// The folder the new shell starts in instead of the session's.
+    pub dir: Option<PathBuf>,
 }
 
 /// Where an [`ApiAdd`] puts its shell.

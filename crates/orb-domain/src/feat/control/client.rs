@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -476,32 +476,9 @@ fn build(command: &'static CommandHelp, rest: &[&str]) -> Result<Op, UsageProble
     let words = || Words::split(rest, command);
     Ok(match (command.noun, command.verb) {
         (noun, "list") if noun != "plate" => list_words(command, noun, rest)?,
-        ("pane", "float") => Op::PaneFloat {
-            session: session_only(&words()?)?,
-        },
-        ("tab", "create") => Op::TabCreate {
-            session: session_only(&words()?)?,
-        },
-        ("pane", "split") => {
-            let words = words()?;
-            let direction = match words.required("--direction")? {
-                "right" => Direction::Right,
-                "down" => Direction::Down,
-                got => {
-                    return Err(UsageProblem::NotInSet {
-                        flag: "--direction",
-                        got: got.to_owned(),
-                    });
-                }
-            };
-            Op::PaneSplit {
-                pane: words.target("<pane>")?.map(PaneId),
-                direction,
-            }
+        (noun @ "pane", verb @ ("split" | "stack" | "float")) | (noun @ "tab", verb @ "create") => {
+            add_words(command, noun, verb, rest)?
         }
-        ("pane", "stack") => Op::PaneStack {
-            pane: words()?.target("<pane>")?.map(PaneId),
-        },
         ("session", "create") => {
             let words = words()?;
             words.no_positional()?;
@@ -680,11 +657,17 @@ fn agent_words(
                     });
                 }
             };
+            words.exclusive(&["--pane", "--split", "--tab"])?;
             Op::AgentStart {
                 pane: words.number("--pane")?.map(PaneId),
                 kind,
                 name: words.value("--name").map(str::to_owned),
                 args: owned(&words.after),
+                split: words
+                    .value("--split")
+                    .map(|word| direction("--split", word))
+                    .transpose()?,
+                tab: words.switch("--tab"),
             }
         }
         "prompt" => {
@@ -723,13 +706,20 @@ fn agent_words(
     })
 }
 
-/// The pane input or output `verb` and its words ask for. `send`, `run` and
-/// `keys` take their words as typed, so text starting with `--` is kept.
+/// The pane input or output `verb` and its words ask for. `send`, `type`,
+/// `run` and `keys` take their words as typed, so text starting with `--` is kept.
 fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<Op, UsageProblem> {
     Ok(match verb {
         "send" => {
             let [pane, text] = exact(rest, ["<pane>", "<text>"])?;
             Op::PaneSend {
+                pane: PaneId(number("<pane>", pane)?),
+                text: text.to_owned(),
+            }
+        }
+        "type" => {
+            let [pane, text] = exact(rest, ["<pane>", "<text>"])?;
+            Op::PaneType {
                 pane: PaneId(number("<pane>", pane)?),
                 text: text.to_owned(),
             }
@@ -760,6 +750,66 @@ fn pane_io(command: &'static CommandHelp, verb: &str, rest: &[&str]) -> Result<O
         }
         _ => return Err(unknown_verb(verb)),
     })
+}
+
+/// The add request of `noun verb` its words ask for, with `--name`, `--run`
+/// and `--cwd` (a relative folder made absolute from where orb runs).
+fn add_words(
+    command: &'static CommandHelp,
+    noun: &str,
+    verb: &str,
+    rest: &[&str],
+) -> Result<Op, UsageProblem> {
+    let words = Words::split(rest, command)?;
+    let name = words.value("--name").map(str::to_owned);
+    let run = words.value("--run").map(str::to_owned);
+    let cwd = words.value("--cwd").map(absolute);
+    Ok(match (noun, verb) {
+        ("pane", "split") => Op::PaneSplit {
+            direction: direction("--direction", words.required("--direction")?)?,
+            pane: words.target("<pane>")?.map(PaneId),
+            name,
+            run,
+            cwd,
+        },
+        ("pane", "stack") => Op::PaneStack {
+            pane: words.target("<pane>")?.map(PaneId),
+            name,
+            run,
+            cwd,
+        },
+        ("pane", "float") => Op::PaneFloat {
+            session: session_only(&words)?,
+            name,
+            run,
+            cwd,
+        },
+        _ => Op::TabCreate {
+            session: session_only(&words)?,
+            name,
+            run,
+            cwd,
+        },
+    })
+}
+
+/// `--direction`'s (or `flag`'s) value as a side; `NotInSet` naming `flag`
+/// otherwise.
+fn direction(flag: &'static str, word: &str) -> Result<Direction, UsageProblem> {
+    match word {
+        "right" => Ok(Direction::Right),
+        "down" => Ok(Direction::Down),
+        got => Err(UsageProblem::NotInSet {
+            flag,
+            got: got.to_owned(),
+        }),
+    }
+}
+
+/// `dir` as an absolute path, from the current folder when relative; as given
+/// when that can't be read.
+fn absolute(dir: &str) -> PathBuf {
+    std::path::absolute(dir).unwrap_or_else(|_| PathBuf::from(dir))
 }
 
 /// Words that may only hold `--session <id>`: the ID, or `None` when it's
@@ -874,6 +924,15 @@ impl<'a> Words<'a> {
             (true, false) => Ok(Some(true)),
             (false, true) => Ok(Some(false)),
             (false, false) => Ok(None),
+        }
+    }
+
+    /// `Exclusive` naming the first two of `flags` given together.
+    fn exclusive(&self, flags: &[&'static str]) -> Result<(), UsageProblem> {
+        let mut given = flags.iter().filter(|&&flag| self.switch(flag));
+        match (given.next(), given.next()) {
+            (Some(&one), Some(&other)) => Err(UsageProblem::Exclusive { one, other }),
+            _ => Ok(()),
         }
     }
 
@@ -1012,7 +1071,7 @@ fn ask(socket: &Path, request: &Request, limit: Option<Duration>) -> Result<Repl
 }
 
 /// Where to look after `op` got no answer in time: the agent or pane it
-/// named, else the sessions.
+/// named, the agents for an agent started in a new pane, else the sessions.
 fn timeout_hint(op: &Op) -> String {
     match *op {
         Op::AgentPrompt { pane, .. }
@@ -1024,6 +1083,7 @@ fn timeout_hint(op: &Op) -> String {
         } => format!("orb agent get {} shows where it got to", pane.0),
         Op::PaneSend { pane, .. }
         | Op::PaneKeys { pane, .. }
+        | Op::PaneType { pane, .. }
         | Op::PaneRun { pane, .. }
         | Op::PaneClose { pane }
         | Op::PaneRename { pane, .. }
@@ -1034,8 +1094,11 @@ fn timeout_hint(op: &Op) -> String {
         | Op::PaneSplit {
             pane: Some(pane), ..
         }
-        | Op::PaneStack { pane: Some(pane) }
+        | Op::PaneStack {
+            pane: Some(pane), ..
+        }
         | Op::TabClose { pane: Some(pane) } => format!("orb pane read {} shows the pane", pane.0),
+        Op::AgentStart { pane: None, .. } => "orb agent list shows where it got to".to_owned(),
         _ => "orb session list".to_owned(),
     }
 }
@@ -1133,9 +1196,79 @@ mod tests {
             Ok(Op::PaneSplit {
                 pane: Some(PaneId(3)),
                 direction: Direction::Down,
+                name: None,
+                run: None,
+                cwd: None,
             }),
             "the pane and direction come from the words"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::tab_create(
+        &["tab", "create", "--name", "x", "--run", "just dev", "--cwd", "/tmp"],
+        Op::TabCreate { session: None, name: Some("x".into()), run: Some("just dev".into()), cwd: Some("/tmp".into()) },
+    )]
+    #[case::tab_create_bare(
+        &["tab", "create"],
+        Op::TabCreate { session: None, name: None, run: None, cwd: None },
+    )]
+    #[case::pane_split(
+        &["pane", "split", "--direction", "right", "--name", "x", "--run", "just dev", "--cwd", "/tmp"],
+        Op::PaneSplit {
+            pane: None,
+            direction: Direction::Right,
+            name: Some("x".into()),
+            run: Some("just dev".into()),
+            cwd: Some("/tmp".into()),
+        },
+    )]
+    #[case::pane_split_bare(
+        &["pane", "split", "--direction", "right"],
+        Op::PaneSplit { pane: None, direction: Direction::Right, name: None, run: None, cwd: None },
+    )]
+    #[case::pane_stack(
+        &["pane", "stack", "--name", "x", "--run", "just dev", "--cwd", "/tmp"],
+        Op::PaneStack { pane: None, name: Some("x".into()), run: Some("just dev".into()), cwd: Some("/tmp".into()) },
+    )]
+    #[case::pane_stack_bare(
+        &["pane", "stack"],
+        Op::PaneStack { pane: None, name: None, run: None, cwd: None },
+    )]
+    #[case::pane_float(
+        &["pane", "float", "--name", "x", "--run", "just dev", "--cwd", "/tmp"],
+        Op::PaneFloat { session: None, name: Some("x".into()), run: Some("just dev".into()), cwd: Some("/tmp".into()) },
+    )]
+    #[case::pane_float_bare(
+        &["pane", "float"],
+        Op::PaneFloat { session: None, name: None, run: None, cwd: None },
+    )]
+    fn add_words_make_their_request(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing an add with or without its name, run and folder.
+        let op = parse(&args(words));
+
+        // Then each flag lands on the request, and a left-out one is none.
+        assert_eq!(op, Ok(expected), "the add's flags come from the words");
+    }
+
+    #[rstest::rstest]
+    fn relative_cwd_is_made_absolute() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given / When parsing a new tab in folder `sub`.
+        let op = parse(&args(&["tab", "create", "--cwd", "sub"]));
+
+        // Then the folder is taken from where orb runs.
+        let expected = std::env::current_dir()?.join("sub");
+        assert_eq!(
+            op,
+            Ok(Op::TabCreate {
+                session: None,
+                name: None,
+                run: None,
+                cwd: Some(expected),
+            }),
+            "a relative folder is made absolute"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -1146,6 +1279,10 @@ mod tests {
     #[case::keys(
         &["pane", "keys", "3", "esc", "enter"],
         Op::PaneKeys { pane: PaneId(3), keys: vec!["esc".into(), "enter".into()] },
+    )]
+    #[case::type_text(
+        &["pane", "type", "12", ":wq"],
+        Op::PaneType { pane: PaneId(12), text: ":wq".into() },
     )]
     #[case::run(
         &["pane", "run", "3", "just test"],
@@ -1200,11 +1337,13 @@ mod tests {
             kind: AgentKind::Pi,
             name: Some("x".into()),
             args: vec!["--model".into(), "a b".into()],
+            split: None,
+            tab: false,
         },
     )]
     #[case::start_bare(
         &["agent", "start", "--kind", "claude"],
-        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![] },
+        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false },
     )]
     #[case::prompt_wait(
         &["agent", "prompt", "3", "hi", "--wait", "--timeout", "500"],
@@ -1223,6 +1362,82 @@ mod tests {
 
         // Then they make the request they spell.
         assert_eq!(op, Ok(expected), "{words:?} parse to their request");
+    }
+
+    #[rstest::rstest]
+    #[case::split(
+        &["agent", "start", "--kind", "claude", "--split", "down", "--name", "helper"],
+        Op::AgentStart {
+            pane: None,
+            kind: AgentKind::Claude,
+            name: Some("helper".into()),
+            args: vec![],
+            split: Some(Direction::Down),
+            tab: false,
+        },
+    )]
+    #[case::tab(
+        &["agent", "start", "--kind", "pi", "--tab", "--", "--model", "sonnet"],
+        Op::AgentStart {
+            pane: None,
+            kind: AgentKind::Pi,
+            name: None,
+            args: vec!["--model".into(), "sonnet".into()],
+            split: None,
+            tab: true,
+        },
+    )]
+    fn agent_start_takes_split_or_tab(#[case] words: &[&str], #[case] expected: Op) {
+        // Given / When parsing an agent start naming a new pane's place.
+        let op = parse(&args(words));
+
+        // Then the request carries that place and no pane.
+        assert_eq!(op, Ok(expected), "{words:?} start the agent in a new pane");
+    }
+
+    #[rstest::rstest]
+    #[case::pane_and_split(&["--pane", "3", "--split", "right"], "--pane", "--split")]
+    #[case::pane_and_tab(&["--tab", "--pane", "3"], "--pane", "--tab")]
+    #[case::split_and_tab(&["--split", "right", "--tab"], "--split", "--tab")]
+    fn agent_start_places_exclude_each_other(
+        #[case] places: &[&str],
+        #[case] one: &'static str,
+        #[case] other: &'static str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Given an agent start naming two places.
+        let words = [&["agent", "start", "--kind", "claude"], places].concat();
+
+        // When parsing and running it.
+        let problem = problem(&words);
+        let (code, out, _) = ran(&words)?;
+
+        // Then both flags are named, and it exits 2 sending nothing.
+        assert_eq!(
+            (problem, code, out),
+            (
+                Some(UsageProblem::Exclusive { one, other }),
+                2,
+                String::new()
+            ),
+            "an agent starts in one place"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn split_takes_right_or_down() {
+        // Given / When parsing `agent start --kind claude --split left`.
+        let problem = problem(&["agent", "start", "--kind", "claude", "--split", "left"]);
+
+        // Then --split and the value given are named.
+        assert_eq!(
+            problem,
+            Some(UsageProblem::NotInSet {
+                flag: "--split",
+                got: "left".into(),
+            }),
+            "--split is right or down"
+        );
     }
 
     #[rstest::rstest]
@@ -1350,7 +1565,7 @@ mod tests {
     )]
     #[case::wait_without_timeout(Op::AgentWait { pane: PaneId(1), timeout: None }, None)]
     #[case::start(
-        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![] },
+        Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![], split: None, tab: false },
         Some(Duration::from_secs(45)),
     )]
     #[case::session_create(
@@ -1545,7 +1760,8 @@ mod tests {
                 2,
                 String::new(),
                 "error: unknown flag --dir for `orb pane split` (did you mean --direction?)\n\
-                 usage: orb pane split [<pane>] --direction right|down\n\
+                 usage: orb pane split [<pane>] --direction right|down [--name <text>] \
+                 [--run <command>] [--cwd <dir>]\n\
                  help: orb pane split --help\n"
                     .to_owned(),
             ),
@@ -1577,8 +1793,8 @@ mod tests {
 
         // Then it exits 0 naming every pane verb.
         let verbs = [
-            "list", "split", "stack", "float", "close", "rename", "focus", "send", "keys", "run",
-            "read",
+            "list", "split", "stack", "float", "close", "rename", "focus", "send", "keys", "type",
+            "run", "read",
         ];
         let missing: Vec<&str> = verbs
             .into_iter()
@@ -1701,6 +1917,17 @@ mod tests {
         Op::PaneRun { pane: PaneId(3), command: "x".into() },
         "orb pane read 3 shows the pane",
     )]
+    #[case::agent_in_a_new_pane(
+        Op::AgentStart {
+            pane: None,
+            kind: AgentKind::Claude,
+            name: None,
+            args: vec![],
+            split: Some(Direction::Right),
+            tab: false,
+        },
+        "orb agent list shows where it got to",
+    )]
     #[case::other(
         Op::SessionSettle { session: Some(SessionId(3)) },
         "orb session list",
@@ -1709,7 +1936,8 @@ mod tests {
         // Given / When working out where to look after `op` timed out.
         let hint = timeout_hint(&op);
 
-        // Then it points at the agent or pane named, else the sessions.
+        // Then it points at the agent or pane named, the agents for one
+        // started in a new pane, else the sessions.
         assert_eq!(hint, expected, "{op:?} times out with that hint");
     }
 

@@ -183,10 +183,10 @@ orb pane list [--session <id>]
 orb agent list [--all] [--session <id>] [--status <status>[,<status>...]]
 orb project list
 orb session create [--project <id>] [--worktree] [--name <text>]
-orb tab create [--session <id>]
-orb pane split [<pane>] --direction right|down
-orb pane stack [<pane>]
-orb pane float [--session <id>]
+orb tab create [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]
+orb pane split [<pane>] --direction right|down [--name <text>] [--run <command>] [--cwd <dir>]
+orb pane stack [<pane>] [--name <text>] [--run <command>] [--cwd <dir>]
+orb pane float [--session <id>] [--name <text>] [--run <command>] [--cwd <dir>]
 orb pane close <pane>
 orb pane rename <pane> <name>
 orb pane focus <pane>
@@ -196,9 +196,10 @@ orb session settle [<session>]
 orb session focus <session>
 orb pane send <pane> <text>
 orb pane keys <pane> <key>...
+orb pane type <pane> <text>
 orb pane run <pane> <command>
 orb pane read [<pane>] [--lines <n>] [--head <n>] [--tail <n>] [--json]
-orb agent start --kind claude|pi [--pane <id>] [--name <text>] [-- <args>...]
+orb agent start --kind claude|pi [--pane <id> | --split right|down | --tab] [--name <text>] [-- <args>...]
 orb agent prompt <pane> <text> [--wait [--timeout <ms>]]
 orb agent wait <pane> [--timeout <ms>]
 orb agent get <pane>

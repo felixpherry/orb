@@ -213,6 +213,9 @@ where
     let made = result_of(orb(&ask(Op::PaneSplit {
         pane: Some(at),
         direction,
+        name: None,
+        run: None,
+        cwd: None,
     })))?;
     let PaneResult { pane } = serde_json::from_value(made).map_err(|error| error.to_string())?;
     let line = command
@@ -459,6 +462,9 @@ mod tests {
                 op: Op::PaneSplit {
                     pane: Some(PaneId(1)),
                     direction,
+                    name: None,
+                    run: None,
+                    cwd: None,
                 },
             }),
             "the split should ask for a pane beside pane 1"

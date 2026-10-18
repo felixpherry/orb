@@ -19,16 +19,14 @@ pub(crate) fn not_settled(app: &AppState, session: SessionId) -> Result<(), ApiE
 }
 
 /// Refuses `pane` with `pane_busy` while an agent bound to it may be running;
-/// the hint starts a `kind` agent in a new pane beside it.
+/// the hint starts a `kind` agent in a new pane split off the caller's.
 pub(crate) fn pane_free(app: &AppState, pane: PaneId, kind: AgentKind) -> Result<(), ApiError> {
     match agent::pane_agent(app, pane) {
         Some(found) if agent::live(found.status) => Err(ApiError::new(
             ErrorCode::PaneBusy,
             format!("an agent is already live in pane {}", pane.0),
             format!(
-                "start it in a new pane: orb pane split {} --direction right, \
-                 then orb agent start --kind {} --pane <new pane>",
-                pane.0,
+                "start it in a new pane: orb agent start --kind {} --split right",
                 kind.program()
             ),
         )),
@@ -137,13 +135,10 @@ mod tests {
             .err()
             .and_then(|error| error.hint);
 
-        // Then the hint splits pane 1 and starts pi in the new pane.
+        // Then the hint starts pi in a new pane split off the caller's.
         assert_eq!(
             hint.as_deref(),
-            Some(
-                "start it in a new pane: orb pane split 1 --direction right, \
-                 then orb agent start --kind pi --pane <new pane>"
-            ),
+            Some("start it in a new pane: orb agent start --kind pi --split right"),
             "a busy pane points at a new pane beside it"
         );
     }

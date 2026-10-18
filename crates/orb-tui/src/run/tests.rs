@@ -2593,6 +2593,34 @@ fn agent_run_types_the_line_and_enter_into_the_pane() -> io::Result<()> {
 }
 
 #[rstest::rstest]
+fn agent_type_types_the_text_with_no_enter() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent types `:wq` into pane 1, then presses Enter.
+    let typed_text = PaneRequest::Type {
+        pane: PaneId(1),
+        text: ":wq".into(),
+    };
+    let enter = PaneRequest::Keys {
+        pane: PaneId(1),
+        keys: vec![KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)],
+    };
+    test.app
+        .handle(LoopEvent::Control(typed_text, tx.clone()), &mut io::sink())?;
+    test.app
+        .handle(LoopEvent::Control(enter, tx), &mut io::sink())?;
+
+    // Then the program gets the text and only the key's one Enter.
+    let typed = log_holding(&test.dir.path().join("typed"), ":wq\n");
+    assert_eq!(typed, ":wq\n", "the text is typed with no Enter of its own");
+    Ok(())
+}
+
+#[rstest::rstest]
 fn agent_run_into_a_silent_pane_waits_for_its_output() -> io::Result<()> {
     // Given attached pane 1 whose client hasn't printed anything.
     let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
