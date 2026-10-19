@@ -482,7 +482,10 @@ mod tests {
     }
 
     fn deps(state: &State, index_path: PathBuf) -> SearchActorDeps {
-        let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(Vec::new())), PathBuf::new());
+        let claude = ClaudeCode::new(
+            Arc::new(ClaudeSupervisor::new(Vec::new(), &PathBuf::new())),
+            PathBuf::new(),
+        );
         SearchActorDeps {
             state: state.clone(),
             harnesses: Harnesses::new(vec![Arc::new(claude)]),

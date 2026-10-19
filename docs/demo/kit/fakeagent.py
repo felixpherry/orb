@@ -8,8 +8,8 @@ matched by a word in the prompt. A script step can run a shell command, such
 as the real `orb` CLI against the demo's orb, and show what it printed.
 
 `claude` reports itself the way orb expects Claude Code to: the hook orb
-installed runs on start and end, `claude agents --json --all` lists the live
-processes with their status, and the transcript gets prompts, replies and an
+installed runs on start and end, a status file in <claude dir>/sessions/<pid>.json
+holds its status while it runs, and the transcript gets prompts, replies and an
 ai-title. `pi` writes its pane file and session file the way orb's pi
 extension and pi do.
 
@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 HOME = os.environ["HOME"]
 DIR = os.path.join(HOME, ".fakeagent")
 SESSIONS = os.path.join(DIR, "sessions")
-LIVE = os.path.join(DIR, "live")
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+LIVE = os.path.join(CLAUDE_DIR, "sessions")
 PANE = os.environ.get("ORB_PANE_ID")
 
 ORANGE, GREY, WHITE, GREEN, RED, BLUE, CYAN, YELLOW = (
@@ -59,16 +60,8 @@ def append(path, line):
         f.write(json.dumps(line, separators=(",", ":")) + "\n")
 
 
-def alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def claude_transcript(cwd, sid):
-    return os.path.join(HOME, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd), sid + ".jsonl")
+    return os.path.join(CLAUDE_DIR, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd), sid + ".jsonl")
 
 
 def pi_transcript(cwd, sid):
@@ -118,7 +111,8 @@ class Agent:
     def report(self, event=None):
         save(self.path, self.s)
         if self.harness == "claude":
-            save(os.path.join(LIVE, f"{os.getpid()}.json"), {"sessionId": self.sid, **self.status()})
+            save(os.path.join(LIVE, f"{os.getpid()}.json"),
+                 {"pid": os.getpid(), "kind": "interactive", "sessionId": self.sid, **self.status()})
             if event:
                 hook = os.path.join(HOME, ".orb", "hooks", "orb-agent-state.sh")
                 name = {"start": "SessionStart", "end": "SessionEnd"}[event]
@@ -408,17 +402,6 @@ class Agent:
             sys.stdout.flush()
 
 
-def claude_agents():
-    out = []
-    for name in sorted(os.listdir(LIVE)) if os.path.isdir(LIVE) else []:
-        pid = int(name.split(".")[0])
-        if alive(pid):
-            out.append({"pid": pid, "kind": "interactive", **load(os.path.join(LIVE, name), {})})
-        else:
-            os.remove(os.path.join(LIVE, name))
-    print(json.dumps(out))
-
-
 def flag(args, *names):
     for name in names:
         if name in args and args.index(name) + 1 < len(args):
@@ -428,8 +411,6 @@ def flag(args, *names):
 
 def main():
     harness, args = sys.argv[1], sys.argv[2:]
-    if harness == "claude" and args[:1] == ["agents"]:
-        return claude_agents()
     if harness == "claude" and args[:1] in (["stop"], ["rm"]):
         return
     if "--version" in args or "-v" in args:

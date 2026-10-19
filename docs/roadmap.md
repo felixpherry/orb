@@ -13,7 +13,7 @@ Phases: 1 debt audit → 2 falsify findings → **checkpoint 1** (user ranks fin
 - **Pre-migration fix:** commit 1a6728a (F-1 triggers + F-3 branch bug; "couldn't read or check never means gone"). The branch was renamed by orb to `orb/simplifying-technical-explanation`.
 - **Done:** Phase 5 `target.md` (16 decisions) and Phase 6 `target-falsified.md` (verdicts: D-1 merged into D-14; D-3, D-4, D-6, D-11, D-12, D-13, D-15 shrunk; D-7's worker-report half is a spike: A report channel vs B local fixes, built in two throwaway worktrees).
 - **Checkpoint 2 (2026-10-11):** the user accepted all 17 decisions below, with answers to each question. Spike A (report channel) chosen over B.
-- **Next:** ff-merge this branch to main; then the backlog below (B-2, B-10, B-11).
+- **Next:** ff-merge this branch to main; then the backlog below (B-2, B-10). B-11 was fixed on 2026-10-19 (see below).
 - **Plans (2026-10-11):** the 18 steps are split into five phased plans in `.plans/` of worktree `orb-696e18ac`, run in order with `/phased-task-loop .plans/<plan>`; one phase = one step, and each phase ends with a checkpoint 3 task that reports to the user without stopping: `overhaul-1-safety-net` (steps 1–5), `overhaul-2-less-waiting` (6–9), `overhaul-3-pane-records` (10–12, **effort high**), `overhaul-4-messaging` (13–15, **effort high**), `overhaul-5-code-shape` (16–18).
 - **Step 1 done (2026-10-11, 728ede1):** AGENTS.md §3 describes today's flow, a name check in `just lint` keeps AGENTS.md and the Record honest, and the user-approved Record corrections are applied (2be25d0).
 - **Step 2 done (2026-10-11, c045a46):** orb writes `~/.orb/orb.log` (rolled to `orb.log.1` at 5 MB): a line per start, every kill, worktree prune, branch delete, session delete and dropped pane row, and the cause chain of every shown or dropped save, git, zmx, pane start and search error; the start screen names the session that exited at start (B-7); `just lint` rejects new `let _ =` kills/removals and `|_report|` drops.
@@ -117,7 +117,9 @@ Each step: tests first → change → `just test` + `just lint` → RECORD facts
 17. **D-13** split hub files + thread→agent rename, in a quiet window.
 18. **D-16** final docs pass.
 
-Still in the backlog after the plan: B-11 a suspended (stopped, state T) old `claude` in the same pane keeps reporting "busy" in `claude agents --json`, so the agent row shows working and "1 running" counts it; ignore stopped processes or prefer the pane's foreground process (seen 2026-10-11: pids 49709 stopped + 28162 live, same session id). B-2 (the "new reply" mark clears when the user moves into the agent's pane), B-10 (jump list may save back empty when layouts can't be read).
+Still in the backlog after the plan: B-2 (the "new reply" mark clears when the user moves into the agent's pane), B-10 (jump list may save back empty when layouts can't be read).
+
+Fixed after the plan: B-11 (2026-10-19), a paused (stopped, state T) `claude` in the same pane as a live one kept the agent row working. orb now reads Claude's status files instead of `claude agents` and skips a stopped process.
 
 ## Drift log
 
