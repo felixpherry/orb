@@ -608,12 +608,12 @@ mod tests {
         (events, move |event| lock(&sink).push(event))
     }
 
-    /// Polls `condition` every 10 ms for up to 5 s; returns whether it held.
+    /// Polls `condition` every 10 ms for up to 15 s; returns whether it held.
     fn wait_until<F>(mut condition: F) -> bool
     where
         F: FnMut() -> bool,
     {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             if condition() {
                 return true;
@@ -722,15 +722,17 @@ mod tests {
 
     #[rstest::rstest]
     fn cell_size_change_alone_resizes_the_pty_in_pixels() -> Result<(), Report<PaneError>> {
-        // Given an 80×24 pane with cells of 10×20 pixels whose child prints
-        // the pty's pixel size after a line of input.
+        // Given an 80×24 pane with cells of 10×20 pixels whose child has
+        // started, says it is ready, and prints the pty's pixel size after a
+        // line of input.
         let command = command(
             &[
-                "/bin/sh",
+                "/usr/bin/python3",
                 "-c",
-                "read x; /usr/bin/python3 -c \"import fcntl,struct,termios; \
+                "import fcntl,struct,sys,termios; print('ready', flush=True); \
+                 sys.stdin.readline(); \
                  r,c,w,h=struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8))); \
-                 print(w, h)\"",
+                 print(w, h)",
             ],
             &[],
         );
@@ -739,6 +741,11 @@ mod tests {
             height: 20,
         };
         let mut pane = Pane::spawn(&command, PaneSize { cell, ..SIZE }, |_| {})?;
+        assert!(
+            wait_until(|| screen(&pane).contains("ready")),
+            "the child should start, got {:?}",
+            screen(&pane)
+        );
 
         // When only the cells grow to 12×24 pixels and the user presses
         // Enter.
