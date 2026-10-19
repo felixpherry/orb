@@ -57,9 +57,13 @@ Entries are added or amended **only with human approval**.
 - (arch) The `SessionsActor`'s methods are split by concern across files under `feat/sessions/sessions_actor/`.
 - (arch) The frontend loop's report handling and its pane lifecycle live in their own files under `crates/orb-tui/src/run/`.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.
-- (arch) While orb waits on a zmx, git or `du` command, it checks whether the command has ended every millisecond for its first 20 ms and every 10 ms after, so one that ends at once holds orb up for only a millisecond or two.
-- (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
-- (sessions) The poll asks `claude agents` only while a pane holds a Claude agent.
+- (arch) While orb waits on a zmx, git, `du` or `ps` command, it checks whether the command has ended every millisecond for its first 20 ms and every 10 ms after, so one that ends at once holds orb up for only a millisecond or two.
+- (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise.
+- (sessions) A Claude agent's status comes from the file Claude keeps for each running Claude in `<claude dir>/sessions/<pid>.json`, matched to its pane by process ancestry.
+- (sessions) The poll reads Claude's status files only while a pane holds a Claude agent.
+- (sessions) A paused (stopped) Claude process counts as not running, so its pane takes the status of another Claude running in it, or reads stopped.
+- (sessions) A Claude status file that can't be read keeps its last good reading.
+- (sessions) When Claude's sessions folder can't be read, or none of its status files has read on two polls in a row, the message box shows why and the Claude agents keep their last status.
 - (sessions) An agent's elapsed time counts from when orb first saw its turn running.
 - (sessions) A Claude agent's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New agent".
 - (sidebar) The sidebar lists orb's top-level sessions as one list across projects, each a two-line card (its most urgent agent's status icon, name and time; then its project, or a colony's world), with its agent rows and, for a session with colonists, a colonists row hanging off the second line.

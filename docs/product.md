@@ -17,7 +17,7 @@ orb is a terminal multiplexer that is mission control for your agents: T3 Code's
 
 - A session is one directory (a checkout, a worktree, a colony's folder, or the Incognito folder) holding tabs of split panes. The user starts `claude` or `pi` in any pane like any other program.
 - Every pane runs under zmx, so quitting orb leaves every program running and orb reattaches at start.
-- Claude's status comes from `claude agents --json --all` (its interactive records), matched to the pane its process runs in; pi's from an orb pi extension. A Claude `SessionStart`/`SessionEnd` hook and that extension tell orb which conversation runs in which pane, through files under `~/.orb/panes/`. `orb integration install` puts both in place.
+- Claude's status comes from the file Claude keeps for each running Claude in `<claude dir>/sessions/<pid>.json`, matched to the pane its process runs in. A Claude paused with Ctrl-Z counts as not running, so its pane shows another Claude running there, or stopped. If orb can't read those files, the message box says why and the Claude agents keep their last status. pi's from an orb pi extension. A Claude `SessionStart`/`SessionEnd` hook and that extension tell orb which conversation runs in which pane, through files under `~/.orb/panes/`. `orb integration install` puts both in place.
 - The sidebar stays T3 Code-style: one card per session with a row per agent pane, and each colony's colonists folded under it.
 - Worlds hold colonies: a colony is a session for an orchestrator agent, and every session that agent makes with `orb session create` becomes its colonist and nests under it (see Worlds and colonies).
 - Model, permission and trust are set inside Claude and pi; orb has no drafts.

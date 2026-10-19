@@ -3,6 +3,7 @@
 > Gathered 2026-09-23/24 against **Claude Code 2.1.280**, **zellij 0.45.0**, **T3 Code v0.0.42 (commit f5ef0dd)**, rustc 1.98.1, macOS.
 > These facts decay. Re-verify anything a milestone depends on (`claude --help`, `claude agents --json`, a real transcript) before building on it.
 > §21 holds the overhaul's facts, verified 2026-10-06/07.
+> §24 holds Claude's status files, which orb reads for a Claude's status since 2026-10-19. orb no longer runs `claude agents`; the facts about it stay as history.
 > Provenance tags: **[verified]** checked on this machine · **[docs]** official docs · **[reported]** from a research pass, not re-checked.
 
 ## 1. Claude Code CLI
@@ -18,6 +19,7 @@
 - Research preview since v2.1.140. **[reported]**
 
 ### `claude agents --json [--all] [--cwd <path>]`
+*No longer used by orb since 2026-10-19: orb reads the status files instead (§24). The status values below still hold for those files.*
 - Official, TTY-free, ~160 ms per call. **[reported]** Lists interactive and background sessions. **[docs]**
 - Observed record for an idle, prompt-less `--bg` session **[verified]**:
   ```json
@@ -154,7 +156,7 @@ Tags: **probe** = PTY byte capture on this machine · **bundle** = read from Cla
 ### Environment
 - Extra session env vars seen in a Claude-spawned shell: `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_EFFORT`, `CLAUDE_AGENT_SDK_VERSION`. **[verified]** The bundle also reads `CLAUDE_CODE_SESSION_KIND` (`bg` = worker). **[verified: bundle]**
 - `claude --bg` refuses in an untrusted dir: "Workspace not trusted. Run `claude` in … once and accept the trust prompt". **[verified]**
-- `agents --json` records: stopped/done background records have no `pid`/`status`; interactive records have no `id` and do have `waitingFor`. **[verified]**
+- `agents --json` records: stopped/done background records have no `pid`/`status`; interactive records have no `id` and do have `waitingFor`. **[verified]** *orb no longer runs `claude agents` (§24).*
 
 ### Libraries
 - **alacritty_terminal 0.26** **[verified: source + probe]**:
@@ -177,6 +179,7 @@ Tags as in §6; **source** for libraries = read from the crate source in `~/.car
 - In an untrusted dir it refuses with "Workspace not trusted. Run `claude` in … once and accept the trust prompt" (§6). **[verified]**
 
 ### `claude agents --json --all`
+*No longer used by orb since 2026-10-19 (§24).*
 - ~175 ms wall, ~120 ms CPU per call — polling every 1 s costs ~12% of a core. **[verified]**
 - Record shapes (running background, stopped background, interactive):
   ```json
@@ -202,7 +205,7 @@ Tags as in §6; **source** for libraries = read from the crate source in `~/.car
 - `{"type":"ai-title","aiTitle":"…"}` appears several times per transcript; the first may be prompt-derived, the latest is the generated title. **[verified]**
 
 ### Env
-- `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` / the `disableAgentView` setting disables `claude agents`, `--bg`, and the daemon — never set it. **[verified: bundle]**
+- `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` / the `disableAgentView` setting disables `claude agents`, `--bg`, and the daemon — never set it. **[verified: bundle]** Whether it also stops the status files of §24 is not checked.
 
 ### T3 sources (commit f5ef0dd)
 - Title: the truncated first message at send (`ChatView.tsx:8289–8305`), replaced by the generated title (`threadTitles.ts` `canReplaceThreadTitle`, `ProviderCommandReactor.ts:971`).
@@ -868,6 +871,7 @@ Probed on this machine with pi 1.0.0 and its example `subagent` extension, `exam
 Tags as in §6.
 
 ### `claude agents` interactive records **[verified]**
+*No longer used by orb since 2026-10-19: orb reads the status files instead (§24). The record fields match the files'.*
 - `claude agents --json --all` lists a Claude the user started by hand as a `kind:"interactive"` record with `cwd, kind, name, pid, sessionId, startedAt, status`, plus `waitingFor` while waiting. Background records add `id` and `state`. In 2.1.281 interactive records had no `sessionId` or `cwd` (§7).
 - Example: `{"pid":60745,"cwd":"/Users/felixpherry","kind":"interactive","startedAt":1791277239194,"sessionId":"e80e4172-…","name":"felixpherry-6c","status":"idle"}`.
 - `pid` is the `claude` process itself (`ps -o pid=,ppid=,args= -p <pid>` gives `claude`, whose parent is the shell it was typed in).
@@ -1111,3 +1115,33 @@ terminal-browser's engine probes `?1049h ?25l ?1003h ?1006h ?1016h ?1004h ?2004h
 - `launchInSplit` runs `getCurrentPane`, then `split` (`{from:{id,tab}, direction, command, size, tty}`, `command` the terminal-browser binary plus `open <args…> --split-dir=<dir> --parent-tty=<tty>`), then waits up to 20 s (600 s with `--ssh`) for the new browser to register. It never calls `focusPane`; only the browser does, after `sendText` to an agent's pane.
 - `--split` beside a browser that's already open adopts it only through `neighbor`; without it a new pane opens.
 - The graphics probe runs in the caller's pane before the split; with no tty (Claude's Bash tool) it's skipped and counted as supported.
+
+## 24. Claude status files (verified 2026-10-19, Claude Code 2.1.303)
+
+Tags as in §6. orb reads these files for a Claude's status instead of running `claude agents`.
+
+### Where and what **[verified: 9 live files, 2.1.303 and 2.1.301]**
+- Each running Claude keeps a file at `<claude dir>/sessions/<pid>.json`, where `<pid>` is the `claude` process. `<claude dir>` is `$CLAUDE_CONFIG_DIR`, else `~/.claude` (§7). The same folder holds `<pid>.<64 hex>.key` files, which aren't status files.
+- Fields: `pid`, `sessionId`, `cwd`, `startedAt`, `procStart`, `version`, `kind`, `name`, `status`, `statusUpdatedAt`, `updatedAt`, `entrypoint`, `messagingSocketPath`, `pidDomain`, `peerFeatures`, `peerProtocol`, `nameSince`, `nameSource`, plus `waitingFor` while waiting. A parked or spare Claude adds `parkedJobId` or `spare`.
+- `status` is one of `busy`, `shell`, `idle` and `waiting` (seen: `busy`, `shell`, `idle`). `waitingFor` takes the values of §1. orb maps `busy` and `shell` to working.
+- Example: `{"pid":18053,"sessionId":"…","cwd":"/Users/…","startedAt":1792390172000,"procStart":"Mon Oct 19 06:29:32 2026","version":"2.1.303","kind":"interactive","status":"busy",…}`.
+
+### How `claude agents` used them **[verified: 2.1.303 bundle]**
+- It reads files named `^\d+\.json$` in `<claude dir>/sessions/`. It keeps a file while its pid is alive and its `procStart` matches the process's start time.
+- It skips parked and spare records (`spare === true || parkedJobId !== undefined`), so a `parkedJobId` key with any value, `null` included, means parked.
+- It prints `shell` as `busy`. With `--all` it also reads every folder under `~/.claude/jobs`, which made each call cost more as old jobs piled up (214 on this machine).
+- Files and `claude agents` agreed in 20 of 20 samples over 7 live Claudes.
+
+### `procStart` **[verified]**
+- It matches `ps -o lstart=` run with `TZ=UTC` and `LC_ALL=C`, for example `Mon Oct 19 06:29:32 2026`, in 9 of 9 live files (2.1.303 and 2.1.301). Without `TZ=UTC` the hour is off by the local offset.
+- `lstart` pads a one-digit day with a space (`Oct  6`), so compare with runs of spaces collapsed. It holds spaces, so it must be the last `ps` column.
+
+### Writes and stale files **[verified]**
+- Claude rewrites its file in place: a file rewritten today still had its Oct 16 inode. A reader can catch one half-written.
+- A Claude killed with `kill -9` leaves its file behind. Whether anything removes it later is not checked.
+
+### Paused Claudes **[verified]**
+- A Claude paused with Ctrl-Z shows state `T` in `ps -o stat=` (macOS adds flags, as in `T+`), and `S` again once resumed. Its file keeps its last status, so `claude agents` kept listing it as busy (backlog B-11).
+
+### Cost **[verified]**
+- One `claude agents --json --all` took 0.16 s of CPU and 180 MB; orb ran it about once a second during a turn, which cost 15% of a core. One `ps -A -o pid=,ppid=,stat=,lstart=` takes about 0.01 s and 3 MB.
