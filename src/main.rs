@@ -322,7 +322,10 @@ fn services(
     links: DesktopLinks,
 ) -> Services {
     let git = GitService::new(Arc::new(GitCli::new(env.to_vec())), log.clone());
-    let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.to_vec())), claude_dir);
+    let claude = ClaudeCode::new(
+        Arc::new(ClaudeSupervisor::new(env.to_vec(), &claude_dir)),
+        claude_dir,
+    );
     let pi = Pi::new(pi_sessions);
     Services {
         harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),

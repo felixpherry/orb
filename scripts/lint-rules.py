@@ -11,8 +11,8 @@
   reviewed ZMX_LIST_SITES, so a new site fails until someone checks that a
   failed list there keeps panes rather than closing or killing them.
 - Unlimited programs: a `.output()` call anywhere in Rust code (tests too)
-  outside the timed runners in OUTPUT_ALLOWED fails, since it runs a program
-  with no time limit.
+  fails, since it runs a program with no time limit; `run_within` runs one
+  with a limit.
 - Unlimited waits: a `.status()` after a call chain in production code fails,
   since it waits on a program with no time limit; so does a `.wait()` anywhere
   in Rust code (tests too) outside the reviewed WAIT_ALLOWED files.
@@ -85,11 +85,8 @@ ZMX_LIST_SITES = {
     # kill_settled: error -> empty -> nothing killed (kill_settled_kills_nothing_when_zmx_cant_list)
 }
 
-# Files that may call `.output()`: each one runs it under its own time limit.
+# A `.output()` call, which runs a program with no time limit.
 OUTPUT = re.compile(r"\.output\(\)")
-OUTPUT_ALLOWED = {
-    "crates/orb-domain/src/feat/harness/claude/supervisor.rs": "the async timed runner: tokio timeout over output() with kill_on_drop",
-}
 # A `.status()` that ends a call chain: `Command::new(..)....status()`.
 STATUS = re.compile(r"\)\s*\.status\(\)")
 # Files that may call a bare `.wait()`, each reviewed.
@@ -190,8 +187,6 @@ def check_zmx_lists(label, text):
 
 def check_outputs(label, text):
     """Report `.output()` calls, which run a program with no time limit."""
-    if label in OUTPUT_ALLOWED:
-        return []
     return [
         f"{label}:{text.count(chr(10), 0, found.start()) + 1}: "
         ".output() runs a program with no time limit; use run_within"
