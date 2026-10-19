@@ -4,7 +4,8 @@
 //! `<claude dir>/sessions/<pid>.json`. A file counts while its pid runs and
 //! the start time it records matches that process's; one `ps` call gives the
 //! start times and each process's parents, which tell the pane a Claude runs
-//! in. Only interactive Claudes count, not parked or spare ones.
+//! in. A stopped process, as one paused with Ctrl-Z, counts as not running.
+//! Only interactive Claudes count, not parked or spare ones.
 //!
 //! Claude rewrites a file in place, so a read can catch one half-written;
 //! such a file keeps its last good reading. A sessions folder that can't be
@@ -12,7 +13,7 @@
 //! `ps` runs with orb's child environment and no stdin, and is killed if it
 //! outlives its time limit.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -23,7 +24,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
-use serde::Deserialize;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer};
 
 use crate::common::{Finished, ancestry, run_within};
 use crate::feat::harness::{HarnessError, RunningAgent};
@@ -185,6 +187,8 @@ struct Processes {
     parents: HashMap<u32, u32>,
     /// Each pid's start time, its words joined by single spaces.
     started: HashMap<u32, String>,
+    /// The pids that are stopped, as by Ctrl-Z.
+    stopped: HashSet<u32>,
 }
 
 impl Processes {
@@ -206,7 +210,7 @@ fn parse_processes(stdout: &str) -> Processes {
     let mut processes = Processes::default();
     for line in stdout.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(pid), Some(parent), Some(_state)) = (
+        let (Some(pid), Some(parent), Some(state)) = (
             fields.next().and_then(|field| field.parse().ok()),
             fields.next().and_then(|field| field.parse().ok()),
             fields.next(),
@@ -214,6 +218,9 @@ fn parse_processes(stdout: &str) -> Processes {
             continue;
         };
         processes.parents.insert(pid, parent);
+        if state.starts_with('T') {
+            processes.stopped.insert(pid);
+        }
         processes
             .started
             .insert(pid, fields.collect::<Vec<_>>().join(" "));
@@ -221,12 +228,16 @@ fn parse_processes(stdout: &str) -> Processes {
     processes
 }
 
-/// The pids whose files are worth reading: those `ps` lists, or all of them
-/// when `ps` failed.
+/// The pids whose files are worth reading: those `ps` lists and doesn't show
+/// stopped, or all of them when `ps` failed.
 fn candidates(pids: &BTreeSet<u32>, processes: Option<&Processes>) -> Vec<u32> {
     pids.iter()
         .copied()
-        .filter(|pid| processes.is_none_or(|processes| processes.parents.contains_key(pid)))
+        .filter(|pid| {
+            processes.is_none_or(|processes| {
+                processes.parents.contains_key(pid) && !processes.stopped.contains(pid)
+            })
+        })
         .collect()
 }
 
@@ -342,8 +353,15 @@ struct StatusRecord {
     state: Option<String>,
     /// When the process started, as `ps -o lstart=` prints it in UTC.
     proc_start: Option<String>,
-    parked_job_id: Option<String>,
+    /// Whether the file has a `parkedJobId` key, whatever its value.
+    #[serde(default, rename = "parkedJobId", deserialize_with = "present")]
+    parked: bool,
     spare: Option<bool>,
+}
+
+/// `true` for a key that is present, `null` included.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    IgnoredAny::deserialize(deserializer).map(|_| true)
 }
 
 impl StatusRecord {
@@ -351,9 +369,7 @@ impl StatusRecord {
     /// spare. A record's own `sessionId` is ignored; orb's hook says which
     /// conversation runs where.
     fn is_interactive(&self) -> bool {
-        self.kind.as_deref() == Some("interactive")
-            && self.spare != Some(true)
-            && self.parked_job_id.is_none()
+        self.kind.as_deref() == Some("interactive") && self.spare != Some(true) && !self.parked
     }
 }
 
@@ -376,12 +392,15 @@ fn status_of(record: &StatusRecord) -> AgentStatus {
     reason = "tests propagate setup and poll failures with `?` and assert on the outcome"
 )]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::ffi::OsStr;
     use std::fs;
     use std::path::Path;
 
     use error_stack::{Report, ResultExt};
+
+    use crate::feat::sessions::pane_status::match_records;
+    use crate::ids::PaneId;
 
     use super::{
         AgentStatus, ClaudeAgents, ClaudeSupervisor, Finished, HarnessError, LIST_TIMEOUT, Memory,
@@ -533,6 +552,8 @@ mod tests {
     #[case(r#"{"pid":1,"kind":"daemon-worker","status":"busy"}"#)]
     #[case(r#"{"pid":1,"status":"busy"}"#)]
     #[case(r#"{"pid":1,"kind":"interactive","status":"busy","parkedJobId":"j1"}"#)]
+    #[case(r#"{"pid":1,"kind":"interactive","status":"busy","parkedJobId":null}"#)]
+    #[case(r#"{"pid":1,"kind":"interactive","status":"busy","parkedJobId":7}"#)]
     #[case(r#"{"pid":1,"kind":"interactive","status":"busy","spare":true}"#)]
     fn record_that_is_not_a_pane_claude_is_skipped(
         #[case] record: &str,
@@ -571,6 +592,60 @@ mod tests {
 
         // Then both are read.
         assert_eq!(picked, [200, 300], "without `ps` every file should be read");
+    }
+
+    #[rstest::rstest]
+    #[case("T", false)]
+    #[case("T+", false)]
+    #[case("Ts", false)]
+    #[case("S", true)]
+    #[case("R+", true)]
+    fn file_of_a_stopped_pid_is_not_read(#[case] state: &str, #[case] read: bool) {
+        // Given a running pid's file and `ps` showing that pid in `state`.
+        let pids = BTreeSet::from([200]);
+        let processes =
+            parse_processes(&format!("  200   100 {state}   Mon Oct 19 06:29:32 2026\n"));
+
+        // When picking the files to read.
+        let picked = candidates(&pids, Some(&processes));
+
+        // Then the file is read only when the process isn't stopped.
+        assert_eq!(
+            !picked.is_empty(),
+            read,
+            "a process in state {state} should be read: {read}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn paused_claude_beside_a_live_one_leaves_the_pane_the_live_ones_status()
+    -> Result<(), Report<HarnessError>> {
+        // Given a pane's shell 100 with a paused working Claude 200 and a live
+        // idle Claude 300 under it.
+        let processes = parse_processes(
+            "  100     1 S    Mon Oct 19 05:00:00 2026\n  200   100 T    Mon Oct 19 06:00:00 2026\n  300   100 S+   Mon Oct 19 06:29:32 2026\n",
+        );
+        let records = HashMap::from([
+            (200, r#"{"pid":200,"kind":"interactive","status":"busy"}"#),
+            (300, r#"{"pid":300,"kind":"interactive","status":"idle"}"#),
+        ]);
+        let pids: BTreeSet<u32> = records.keys().copied().collect();
+
+        // When polling and matching the Claudes to the pane.
+        let files = candidates(&pids, Some(&processes))
+            .into_iter()
+            .filter_map(|pid| records.get(&pid).map(|json| file(pid, json)))
+            .collect();
+        let agents = poll(&mut Memory::default(), files, Some(&processes))?;
+        let panes = match_records(&agents, &HashMap::from([(100, PaneId(7))]));
+
+        // Then the pane takes the live Claude's status.
+        assert_eq!(
+            panes,
+            HashMap::from([(PaneId(7), AgentStatus::Idle)]),
+            "a paused Claude shouldn't speak for its pane"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
