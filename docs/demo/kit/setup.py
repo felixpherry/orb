@@ -121,6 +121,8 @@ w("dev/rfcs/index.md", "# RFCs\n\nDesign docs for upcoming platform work.\n")
 w("dev/rfcs/roadmap.md", "# Roadmap\n\n- Beta in Q4\n")
 for d in ["Desktop", "Documents", "Downloads", "dotfiles"]:
     os.makedirs(f"{HOME}/{d}", exist_ok=True)
+# Claude makes this folder when it first runs; orb reports it missing while a pane holds a Claude agent.
+os.makedirs(f"{HOME}/.claude/sessions", exist_ok=True)
 w("notes/todo.md", "- renew TLS certs\n- review storefront PR\n")
 
 # --- orb's store: let orb create it now, as its start-up sweep would prune a worktree no session uses yet ---
