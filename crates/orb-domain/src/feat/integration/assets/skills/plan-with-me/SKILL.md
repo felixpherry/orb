@@ -66,13 +66,21 @@ When the record exists, its format rules govern proposed entries. When it does n
     - Present viable technical paths as options derived from the exploration.
     - Do not speculate on what code exists in the codebase. You should actually verify that your assumptions hold based on exploration.
 
-3.  **Propose High-Level Plan AFTER YOU HAVE ENOUGH INFORMATION:**
+3.  **Probe Risky Guesses:**
+    - When the plan depends on how a real program behaves (a shell, a terminal, an editor, a browser, another app, a library, an outside API) and reading the code can't settle it, run a throwaway probe before you present the plan: a small script or a command against the real program.
+    - Probe the guesses that would change the design if they're wrong. Skip the ones the build would catch anyway.
+    - Probe in a temp folder, never change the user's real data, and leave no probe files in the repo.
+    - If a probe needs anything you don't have (production access, credentials, a device, paid calls, someone else's account), ask the user before you run it. They may grant it, or run the probe and paste the result. If they can't, list the guess in the plan as an open risk.
+    - If a probe shows a guess was wrong, go back to (1) before you write the plan. Tell the user what the probe showed and which part of the design it breaks, offer the ways around it as lettered options, and probe the path they pick if it rests on a new guess. If no path works, tell the user and don't present a plan.
+    - Put what each probe showed in the plan, including the ones that changed the design.
+
+4.  **Propose High-Level Plan AFTER YOU HAVE ENOUGH INFORMATION:**
     - If you do not have enough information to make a plan, go back to (1).
     - **DO NOT** propose a plan if you still have outstanding questions.
     - **DO NOT** roll in assumptions or questions into a plan. Ask explicitly prior to proposing the plan.
     - Once the architecture is sound, present the **High-Level Plan** as a lavish page (load the lavish skill if you have it, else run `npx -y lavish-axi --help`).
     - **Put it on the user's plate (in orb only).** When `$ORB_PANE_ID` is set, right after presenting the plan run `orb plate add "Approve the plan for <task>" --verb approve --link <the plan page's address>` and keep the ID it prints (`{"item": N}`). The address is the lavish page's URL, or the HTML file's absolute path. If you revise and present the plan again, run `orb plate update <id>` (a new `--link` if the page moved) instead of adding another. Once the user approves, run `orb plate done <id>`. If orb refuses with `colonist`, you're a colonist: skip the plate and keep going. Outside orb, skip this step.
-    - **Format Constraint:** The Plan must be _brief_ and readable. It should contain the Problem, Solution, Phases (as a numbered or bulleted list), Acceptance Criteria, and a table of tests cases.
+    - **Format Constraint:** The Plan must be _brief_ and readable. It should contain the Problem, Solution, Phases (as a numbered or bulleted list), Acceptance Criteria, a table of tests cases, and what each probe showed (if any ran).
     - **Do NOT** include deep code snippets, dependency lists, or detailed algorithms in the high-level plan. The goal is to confirm _direction_, not _implementation details_.
     - **Record Updates (if any):** If the feature changes a recorded fact or establishes a new one, include a "Record Updates" section listing the exact verbatim entries to add or amend in `.agents/RECORD.md`. Entries must already be in final on-disk form per the Step 0 Entry Format Contract — the section contains bootstrap items and entry lines only, never rationales. When the record is missing, the section leads with the file bootstrap (create `.agents/RECORD.md` from record-preamble.md, verbatim); when it exists, entries only — never preamble changes. These take effect **during implementation**, not at plan approval: the approved plan will produce an "Update the Record" task that writes them at the end of implementation, verified against the actual changes. DO NOT EDIT THE RECORD during planning.
     - **CRITICAL:** WAIT FOR USER APPROVAL.

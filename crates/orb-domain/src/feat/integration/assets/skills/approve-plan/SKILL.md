@@ -1,6 +1,6 @@
 ---
 name: approve-plan
-description: Turns an approved plan into a standalone spec (.plans/{task}/plan.md) and a task list (tasks.md), then picks the task loop, model and effort and starts an unattended run with ship-plan in its own orb session, which ends in a PR. Use right after the user approves a plan from plan-with-me, or says "approve", "ship it" or "go".
+description: Turns an approved plan into a standalone spec (.plans/{task}/plan.md) and a task list (tasks.md), then picks the task loop, model and effort and starts an unattended run with ship-plan in its own orb session, which ends in a PR. Use right after the user approves a plan from plan-with-me or a fix plan from diagnose-bug, or says "approve", "ship it" or "go".
 ---
 
 <instructions>
@@ -11,6 +11,7 @@ The user has approved the plan discussed previously. Your task is to create the 
 
 1.  **Synthesize History:** Review the entire Socratic dialogue and the approved plan. Extract all technical decisions, code references, and algorithms discussed.
 2.  **Generate Specification:** Create a comprehensive, standalone technical specification and save with `Write` to `.plans/<task>/plan.md` (where `<task>` is a slugified version of the task name). The specification is the "spec" — the authoritative reference for what to implement.
+    - **A fix plan from diagnose-bug:** write the spec and task list into its notes folder, `.plans/<bug>/`, next to `diagnosis.md`, the repro and `fix.patch`. The fix starts from `fix.patch`. The repro becomes a test in the repo where one fits; otherwise rerunning it is an acceptance criterion.
 3.  **Review Specification:** Re-read the generated spec end-to-end. Verify that every phase from the approved plan is covered, that all mandatory sections are present, and that a fresh agent could implement the feature using only this document. Fix any gaps, inconsistencies, or ambiguities you find.
 4.  **Create Task List:** `Write` `.plans/<task>/tasks.md` with every task from the approved plan, in phase order — one `##` header per phase, one `- [ ]` line per task:
 
@@ -29,10 +30,11 @@ The user has approved the plan discussed previously. Your task is to create the 
     - **run-simple-loop:** everyday work, steered by `check`, including refactors where the build breaks between tasks.
     - **run-phased-loop:** work where later phases depend on what earlier ones discover, or anything risky or large.
 6.  **Pick the model and effort,** with a one-line reason. Default to the model you run on at `high` effort; use a faster model at `medium` only for micro runs. If the user's approval named a loop, model or effort ("phased, opus"), use those instead.
-7.  **Start the run.** Don't wait for another OK: the plan's approval covers it.
+7.  **Check for a recipe.** taste-test tries the build with the repo's recipe, `~/.orb/recipes/<repo>/RECIPE.md`, where `<repo>` is the end of the repo's `origin` remote, else its main checkout's folder name. If there is none, ask the user: "<repo> has no recipe yet, so the taste test will build its own setup. Write one now? write-recipe asks you a few questions first." On yes, run write-recipe, then go on. On no, go on.
+8.  **Start the run.** Don't wait for another OK: the plan's approval covers it.
     - **In orb** (`$ORB_PANE_ID` is set): use the hand-off skill with a new worktree, the chosen model and effort, and this goal: run `/ship-plan <absolute path to .plans/<task>> <loop> report-to <your pane id>`, where `<loop>` is `micro`, `simple` or `phased`.
     - **Not in orb:** create a branch and run that same command yourself, minus `report-to`.
-8.  **Report** in three lines: where the spec and task list are; the loop, model and effort, each with its reason; and where the run is going and that it reports back with a PR.
+9.  **Report** in three lines: where the spec and task list are; the loop, model and effort, each with its reason; and where the run is going and that it reports back with a PR.
 
 ## Mandatory Elements
 

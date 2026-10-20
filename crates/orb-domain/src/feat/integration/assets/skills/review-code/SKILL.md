@@ -12,7 +12,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
 Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings.
 
-If the arguments say `standards-only`, skip the Spec axis: the caller has already checked the spec (the autopilot runs check-gaps first).
+If the arguments say `standards-only`, skip the Spec axis: the caller has already checked the spec.
 
 ## Process
 

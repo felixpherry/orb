@@ -640,11 +640,12 @@ mod tests {
             .map(String::as_str)
             .filter(|line| line.contains("skills to "))
             .collect();
+        let count = super::skills::skill_count();
         assert_eq!(
             skill_lines,
             [
-                "wrote 19 skills to ~/.claude/skills",
-                "wrote 19 skills to ~/.agents/skills"
+                format!("wrote {count} skills to ~/.claude/skills"),
+                format!("wrote {count} skills to ~/.agents/skills")
             ],
             "the output should have one line per skills folder"
         );

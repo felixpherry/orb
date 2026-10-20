@@ -1,13 +1,13 @@
 ---
 name: run-phased-loop
 user-invocable: false
-description: Execute a phased plan from `.plans/{task}/` with a written execution plan, full test run, commit, review, and spec annotation at the end of every phase. Use for multi-phase work where later phases depend on what earlier ones discover.
+description: Execute a phased plan from `.plans/{task}/`, checking each phase's part of the plan against the code before building it, with a full test run, commit and sync at the end of every phase. Use for multi-phase work where later phases depend on what earlier ones discover.
 argument-hint: "<.plans/task or slug>"
 ---
 
 # Phased Task Loop
 
-A disciplined workflow for implementing multi-phase coding tasks. `tasks.md` tracks progress in real time; each phase leaves behind an execution plan, a review, and an annotated spec, so the next phase plans from current facts.
+A disciplined workflow for implementing multi-phase coding tasks. `tasks.md` tracks progress in real time; before each phase, a short code check finds where the plan is wrong about the code, so each phase builds from current facts.
 
 **Arguments:** `$ARGUMENTS` — the plan (a `.plans/<task>/` path or slug). Always run the whole plan.
 
@@ -21,13 +21,17 @@ A disciplined workflow for implementing multi-phase coding tasks. `tasks.md` tra
 
 - **Sync before the next phase.** Run `sync` at the end of every phase.
 
-Resolve every judgement call yourself and record it in the phase review's **Divergence**.
+Resolve every judgement call yourself. The rules file says when one needs a divergence note.
 
 ---
 
 ## Concepts (on top of the shared ones)
 
-**Execution plan** — The file `phase-N.md`: file-by-file implementation details, with an acceptance-criteria checklist at the bottom.
+**Code check** — The file `check-N.md`: where this phase's part of the plan is wrong about the code, one line each, with what the plan assumes, what the code does (`file:line`), and what you'll do instead. Not a how-to: no code snippets, no file-by-file plan.
+
+```markdown
+- Plan says the picker reloads on save; it reloads only on focus (src/picker.rs:212). Added a task to reload on save.
+```
 
 ---
 
@@ -37,14 +41,10 @@ Resolve every judgement call yourself and record it in the phase review's **Dive
 
 1.  **Check status.** `Read` `tasks.md`. Every task `[x]` → go to **When you are done**. Otherwise start at the next task.
 
-2.  **Write the execution plan** to `.plans/<task>/phase-N.md` with these sections:
-    - **Problem** — What and why.
-    - **What Moves / What Stays** — Scope boundary.
-    - **File Changes** — Numbered list. For each: created/modified/deleted, before/after code snippets, source→destination for moves.
-    - **Implementation Order** — Sequence of file changes.
-    - **Acceptance Criteria** — `- [ ]` checklist; each item independently verifiable (file exists, named test passes, import resolves).
-
-    The execution plan says _how_, file by file; point at the spec rather than copying it. Before implementing, check: follows conventions? No circular deps? All consumers updated? Tests preserved?
+2.  **Check the plan against the code** (skip if this phase already has a `check-N.md`). Re-read this phase in `plan.md`, then read the code it touches and the library source it calls into (the installed copy, not the docs). Write `.plans/<task>/check-N.md`, one line per place the plan is wrong or unclear. If the plan holds, write one line saying so and what you read. Then act on each line:
+    - Fix `tasks.md` to match: add, cancel or move lines.
+    - A fix that changes something the user approved → divergence note in `plan.md`.
+    - Something reading can't settle (how another program behaves, say) → a line in `risks.md`.
 
 3.  **Implement, one task at a time:**
 
@@ -58,15 +58,11 @@ Resolve every judgement call yourself and record it in the phase review's **Dive
 
 3.5. **Audit.** Re-read `tasks.md`. Any task in this phase not `[x]` means you drifted: return to step 3 with it. The list must be clean before you test or commit.
 
-4.  **Verify.** Run the full `test` suite; all tests pass. Then take the acceptance criteria **one at a time**: gather its evidence (test name, command output, file check), and only then flip that line to `[x]`. Fix any gap before proceeding. Flipping criteria in bulk turns them back into a task list.
+4.  **Test.** Run the full `test` suite; all tests pass. Fix any failure before going on.
 
 5.  **Commit and sync.** `commit` with message `<TASK> Phase N: <one sentence>`, then `sync` (resolve conflicts, re-test, commit the merge). Commit only green code.
 
-6.  **Review.** _Append_ to `phase-N.md`: **Changes** (what and why), **Divergence** (what didn't go to plan, or "None"), **Verification** (how verified), **Risks** (concerns or follow-up).
-
-7.  **Annotate the spec** — strikethrough and divergence notes only, every phase. The next execution plan is written from the spec, so it must reflect what actually happened.
-
-8.  **Go to step 1.**
+6.  **Go to step 1.**
 
 ## When you are done
 

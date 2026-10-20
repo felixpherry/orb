@@ -38,6 +38,10 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         include_str!("assets/skills/deslop/SKILL.md"),
     ),
     (
+        "diagnose-bug/SKILL.md",
+        include_str!("assets/skills/diagnose-bug/SKILL.md"),
+    ),
+    (
         "falsify/SKILL.md",
         include_str!("assets/skills/falsify/SKILL.md"),
     ),
@@ -121,6 +125,14 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
     (
         "ship-plan/SKILL.md",
         include_str!("assets/skills/ship-plan/SKILL.md"),
+    ),
+    (
+        "taste-test/SKILL.md",
+        include_str!("assets/skills/taste-test/SKILL.md"),
+    ),
+    (
+        "write-recipe/SKILL.md",
+        include_str!("assets/skills/write-recipe/SKILL.md"),
     ),
     ("run-micro-loop/task-loop-rules.md", LOOP_RULES),
     ("run-phased-loop/task-loop-rules.md", LOOP_RULES),
