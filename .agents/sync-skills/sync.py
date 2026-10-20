@@ -2,7 +2,7 @@
 """Copy the skills orb ships from the skills repo (~/.agents/skills) into orb's assets.
 
   sync.py [--add NAME ...]   copy, regenerate the embedded list and the doc counts
-  sync.py --commit           the same, then `just test` and `just lint`, then commit on main
+  sync.py --commit           the same, then `just test` and `just lint`, then commit and push main
   sync.py --install-hook     make the skills repo run `--commit` after every commit and pull
 
 The skills repo is where skills are edited; orb's copies are never edited by hand.
@@ -10,8 +10,10 @@ See README.md next to this file.
 """
 
 import argparse
+import base64
 import fcntl
 import filecmp
+import os
 import re
 import shutil
 import subprocess
@@ -139,6 +141,32 @@ def commit():
     print(f"committed {git('rev-parse', '--short', 'HEAD')} on orb's main")
 
 
+def push():
+    git("fetch", "-q", "origin", "main")
+    if not git("rev-list", "origin/main..main"):
+        return
+    # The keychain may hold another GitHub account, so push as the repo's owner with gh's token.
+    # The token goes in through the environment, never on a command line or in the log.
+    owner = re.search(r"github\.com[/:]([^/]+)/", git("remote", "get-url", "origin"))
+    token = owner and subprocess.run(
+        ["gh", "auth", "token", "--user", owner.group(1)], capture_output=True, text=True
+    ).stdout.strip()
+    env = dict(os.environ)
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env |= {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_1": f"AUTHORIZATION: basic {basic}",
+        }
+    pushed = subprocess.run(["git", "push", "-q", "origin", "main"], cwd=ORB, env=env, capture_output=True, text=True)
+    if pushed.returncode != 0:
+        die(f"push to origin failed: {pushed.stderr.strip()}")
+    print("pushed orb's main to origin")
+
+
 HOOK = """#!/usr/bin/env python3
 # Written by orb's .agents/sync-skills/sync.py --install-hook. Syncs orb in the background.
 import subprocess
@@ -171,7 +199,7 @@ def install_hook():
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--add", nargs="+", default=[], metavar="NAME", help="also ship these skills")
-    parser.add_argument("--commit", action="store_true", help="test, lint and commit on main")
+    parser.add_argument("--commit", action="store_true", help="test, lint, commit and push main")
     parser.add_argument("--install-hook", action="store_true", help="install the skills repo's hooks")
     parser.add_argument("--from-hook", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -193,6 +221,7 @@ def main():
         print(f"synced {total} skills from {SOURCE}")
         if args.commit:
             commit()
+            push()
 
 
 if __name__ == "__main__":

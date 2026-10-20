@@ -8,11 +8,12 @@ The skills orb installs are edited in the skills repo (`~/.agents/skills`), neve
 
 ```
 python3 .agents/sync-skills/sync.py --add NAME   # copy now, nothing committed
-python3 .agents/sync-skills/sync.py --commit     # copy, just test, just lint, commit on main
+python3 .agents/sync-skills/sync.py --commit     # copy, just test, just lint, commit and push main
 python3 .agents/sync-skills/sync.py --install-hook
 ```
 
 - **The hook:** `--install-hook` writes `post-commit` and `post-merge` in the skills repo. Each runs `--commit` in the background and logs to the skills repo's `.git/orb-sync.log`. A failure shows a macOS notification.
+- **`--commit` pushes main to origin** as the repo's owner, with gh's token for that account, since the keychain may hold another account. It pushes any other unpushed commits on main too.
 - **`--commit` skips** when orb isn't on main, has staged changes, or already has uncommitted edits in the synced files. A failed test or lint leaves the copied files uncommitted.
 - **CHANGELOG.md isn't touched.** Add a line by hand when a sync changes what users see.
 - **Don't run `orb integration install` from an old build.** It writes orb's built-in copies over the skills repo.
