@@ -1,0 +1,118 @@
+<!doctype html>
+<!--
+  Progress page skeleton. The orchestrator copies this once to .lavish/progress.html
+  and then edits the copy in place. Rules are in AGENTS.md, "Progress page".
+  Keep every section. Replace the example items; delete none of the section headings.
+-->
+<html lang="en" data-theme="luxury" data-lavish-annotate="off">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Research progress</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :where(.grid, .flex) > * { min-width: 0; }
+    :where(p, li, td, th, .badge) { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body class="bg-base-100 text-base-content">
+<main class="mx-auto max-w-3xl p-6 space-y-6">
+
+  <!-- Header: slug, the question in plain words, last update time. -->
+  <header class="space-y-2">
+    <div class="flex flex-wrap items-center gap-2 text-sm opacity-70">
+      <span class="font-mono">SLUG</span>
+      <span>·</span>
+      <span>Updated <span id="updated">YYYY-MM-DD HH:MM TZ</span></span>
+      <span>·</span>
+      <span>Round K of 3</span>
+    </div>
+    <h1 class="text-2xl font-bold">The question, in one plain sentence</h1>
+    <p class="opacity-80">What we'll decide with the answer, in one sentence.</p>
+  </header>
+
+  <!-- Phase bar. Mark every finished phase and the current one with step-primary. -->
+  <ul class="steps steps-horizontal w-full text-xs">
+    <li class="step step-primary">Intake</li>
+    <li class="step">Gather data</li>
+    <li class="step">Size it up</li>
+    <li class="step">Ideas</li>
+    <li class="step">Try to break them</li>
+    <li class="step">Test</li>
+    <li class="step">Report</li>
+  </ul>
+
+  <!-- Best answer so far. Before there is one, say "No answer yet" and why. -->
+  <section class="card bg-base-200">
+    <div class="card-body gap-2">
+      <h2 class="card-title text-base">Best answer so far</h2>
+      <p class="text-lg font-semibold">One sentence.</p>
+      <p class="text-sm opacity-80"><b>Could still change if</b> one sentence.</p>
+    </div>
+  </section>
+
+  <!-- Waiting on you. Delete the whole section when nothing is open. -->
+  <section class="alert alert-warning items-start">
+    <div class="space-y-2">
+      <h2 class="font-bold">Waiting on you</h2>
+      <ol class="list-decimal pl-5 space-y-1">
+        <li value="1">The question, short. Answer in the chat.</li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- What we know. At most 6 bullets. Badge each one: measured (badge-success) or guess (badge-ghost).
+       Put badge-info "new" on bullets added in this update; remove last update's "new" badges. -->
+  <section class="space-y-2">
+    <h2 class="text-lg font-bold">What we know</h2>
+    <ul class="space-y-2">
+      <li class="flex gap-2 items-start">
+        <span class="badge badge-success badge-sm shrink-0">measured</span>
+        <span><b>The point, bold.</b> One short supporting sentence.</span>
+      </li>
+      <li class="flex gap-2 items-start">
+        <span class="badge badge-ghost badge-sm shrink-0">guess</span>
+        <span><b>The point, bold.</b> One short supporting sentence.</span>
+        <span class="badge badge-info badge-sm shrink-0">new</span>
+      </li>
+    </ul>
+  </section>
+
+  <!-- Working on now. One line per running helper: what it's checking, in plain words. "Nothing running" when idle. -->
+  <section class="space-y-2">
+    <h2 class="text-lg font-bold">Working on now</h2>
+    <ul class="space-y-1">
+      <li class="flex gap-2 items-center">
+        <span class="loading loading-dots loading-xs"></span>
+        <span>Checking how often X happens on Y, last 7 days.</span>
+      </li>
+    </ul>
+  </section>
+
+  <!-- Next step. One or two bullets. -->
+  <section class="space-y-2">
+    <h2 class="text-lg font-bold">Next</h2>
+    <ul class="list-disc pl-5 space-y-1">
+      <li>One concrete step.</li>
+    </ul>
+  </section>
+
+  <!-- Timeline, newest first. One plain line per update. Keep the last 15. -->
+  <section class="space-y-2">
+    <h2 class="text-lg font-bold">Timeline</h2>
+    <ul class="timeline timeline-vertical timeline-compact">
+      <li>
+        <div class="timeline-start text-xs opacity-60 font-mono">HH:MM</div>
+        <div class="timeline-middle"><span class="status status-primary"></span></div>
+        <div class="timeline-end timeline-box text-sm">What happened, in one line.</div>
+        <hr>
+      </li>
+    </ul>
+  </section>
+
+</main>
+</body>
+</html>

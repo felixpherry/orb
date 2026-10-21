@@ -60,6 +60,10 @@ const RESEARCH: &[(&str, &str)] = &[
         ".research/REPORT_TEMPLATE.md",
         include_str!("../../../templates/research/.research/REPORT_TEMPLATE.md"),
     ),
+    (
+        ".research/PROGRESS_TEMPLATE.html",
+        include_str!("../../../templates/research/.research/PROGRESS_TEMPLATE.html"),
+    ),
 ];
 /// The built-in Learn template: each file's path in the folder and its text.
 const LEARN: &[(&str, &str)] = &[

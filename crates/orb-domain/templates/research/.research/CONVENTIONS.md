@@ -13,7 +13,8 @@ Read by the orchestrator and every subagent. Subagents: read this first, every t
   .claude/settings.json     denies Read(./.env)
   .claude/agents/           investigator, falsifier, simulator (frozen copy)
   .pi/agents/               investigator, falsifier, simulator for pi (frozen copy)
-  .research/                CONVENTIONS.md, REPORT_TEMPLATE.md (frozen copy)
+  .research/                CONVENTIONS.md, REPORT_TEMPLATE.md, PROGRESS_TEMPLATE.html (frozen copy)
+  .lavish/progress.html     live progress page for the user, gitignored
   STATE.md                  orchestrator only (the falsifier never reads it)
   PROBLEM.md                question, decision, premise ledger, target metric
   HYPOTHESES.md
@@ -29,7 +30,7 @@ No agent ever edits `AGENTS.md`/`CLAUDE.md`, `.claude/` or `.pi/` during an inve
 
 **Who writes what:**
 
-- **Orchestrator:** `STATE.md`, `PROBLEM.md`, `HYPOTHESES.md`, the `EVIDENCE.md` index, `REPORT.md`, `SOURCES.md`, and creates `.env` placeholders.
+- **Orchestrator:** `STATE.md`, `PROBLEM.md`, `HYPOTHESES.md`, the `EVIDENCE.md` index, `REPORT.md`, `SOURCES.md`, `.lavish/progress.html`, and creates `.env` placeholders.
 - **Investigator and simulator:** their own `evidence/<prefix>.md`, `scripts/<prefix>*` and `data/{raw,sim}/<prefix>/`.
 - **Falsifier:** `rounds/<tag>.md`, `rounds/<tag>-checks/`, `evidence/<tag>f.md`, with the tag from its task.
 

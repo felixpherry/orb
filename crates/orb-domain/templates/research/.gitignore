@@ -3,3 +3,6 @@ data/
 # tokens, sourced by scripts only
 .env
 .claude/settings.local.json
+
+# live progress page, rebuilt from STATE.md
+.lavish/

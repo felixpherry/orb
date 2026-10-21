@@ -26,7 +26,7 @@ Each investigation lives in its own folder, `~/.orb/research/<slug>/`, which is 
 
 1. **No `STATE.md` means a new investigation.**
    - The problem statement is the user's first message.
-   - The rule files (`AGENTS.md`, `CLAUDE.md`, `SOURCES.md`, `.claude/`, `.pi/`, `.research/`, `.gitignore`, `.env`) aren't inputs. Leave them where they are.
+   - The rule files (`AGENTS.md`, `CLAUDE.md`, `SOURCES.md`, `.claude/`, `.pi/`, `.research/`, `.lavish/`, `.gitignore`, `.env`) aren't inputs. Leave them where they are.
    - Any other files already in the folder are user inputs. Move them to `data/provided/` and give each a `.meta.md` sidecar (see CONVENTIONS). Mark unknown fields as unknown.
    - If anything looks like earlier research (notes, reports, scripts) rather than inputs, list it and ask before moving anything.
    - Go to Phase 1.
@@ -35,6 +35,7 @@ Each investigation lives in its own folder, `~/.orb/research/<slug>/`, which is 
    - If STATE says `Session: open`, the previous session died. Say so in one line. Resume from the last completed phase in the log, and re-check anything that session was writing.
    - If STATE lists `Waiting on user` items, check whether the user's message or new files in `data/provided/` answer them. Register the answers (sidecars, `SOURCES.md`, evidence) before doing anything else.
 3. Set `Session: open since <timestamp local>` in `STATE.md`.
+4. Open the progress page (§7).
 
 ## 2. Phases
 
@@ -42,7 +43,7 @@ Each investigation lives in its own folder, `~/.orb/research/<slug>/`, which is 
 1 Intake → 2 Evidence sweep → 3 Decompose, propose & bound → 4 Hypotheses → 5 Falsify ⇄ 6 Experiment → 7 Report
 ```
 
-Loops and stop rules are in §3. Update `STATE.md` at every phase transition, including its plain-words summary. Bug investigations follow the same phases with the changes in "Bug mode" below.
+Loops and stop rules are in §3. Update `STATE.md` at every phase transition, including its plain-words summary, and update the progress page (§7) whenever there's something new. Bug investigations follow the same phases with the changes in "Bug mode" below.
 
 ### Phase 1: Intake (you alone, no subagents)
 
@@ -289,6 +290,38 @@ Write: scripts/sim-<name>/, data/sim/<name>/, evidence/sim-<name>.md.
 - At every stop:
   1. Write the handoff in `STATE.md`, starting with its plain-words summary. The "Next action" must be concrete enough for a fresh session to act on without re-reading everything.
   2. Set `Session: closed <timestamp local>`.
-  3. If this folder is a git repo, commit: `git add -A . && git commit -m "<slug>: <phase> — <one line>"`. `data/` is gitignored.
+  3. Update the progress page (§7).
+  4. If this folder is a git repo, commit: `git add -A . && git commit -m "<slug>: <phase> — <one line>"`. `data/` is gitignored.
 - If this session has already finished a full round, recommend a fresh session for the next one.
 - Only the user can approve shared-system actions. Don't grant them to a subagent yourself.
+
+## 7. Progress page
+
+The user follows the investigation on a live page instead of reading `STATE.md`. Lavish reloads it whenever the file changes.
+
+**Open it** at every session start:
+
+1. If `.lavish/progress.html` doesn't exist, copy `.research/PROGRESS_TEMPLATE.html` there.
+2. Fill it from `STATE.md` and `PROBLEM.md`.
+3. Run `LAVISH_AXI_NO_OPEN=1 npx -y lavish-axi .lavish/progress.html`. It prints the page URL.
+4. Inside orb (`ORB_PANE_ID` is set), show it with `terminal-browser open <url> --split right`. Skip this if `terminal-browser ls` already shows the URL open. Outside orb, give the user the URL.
+
+Never run `lavish-axi poll`; it would block the investigation. The user answers in the chat.
+
+**Update it** whenever there's something new:
+
+- a subagent starts or returns;
+- a premise or hypothesis changes status;
+- a phase transition or a loop;
+- a question is asked of the user, or answered;
+- every stop.
+
+**Write it in plain words.**
+
+- No evidence IDs, hypothesis numbers, file paths or field names. Say what a thing is ("the cache counters from Cloudflare"), not its label.
+- Bold the point of each bullet; one short sentence after it at most.
+- Every fact is badged measured or guess. A number carries its window.
+- Keep the template's sections and their order. Edit them in place; don't redesign the page.
+- "Waiting on you" repeats the open questions with their numbers from §4, shortened. Delete the section when none are open.
+- The timeline is newest first, one line per update, last 15 kept.
+- The page never says more than `STATE.md`. If they disagree, `STATE.md` wins and the page is fixed.
