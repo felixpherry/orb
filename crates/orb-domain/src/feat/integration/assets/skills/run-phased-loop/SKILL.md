@@ -60,7 +60,7 @@ Resolve every judgement call yourself. The rules file says when one needs a dive
 
 4.  **Test.** Run the full `test` suite; all tests pass. Fix any failure before going on.
 
-5.  **Commit and sync.** `commit` with message `<TASK> Phase N: <one sentence>`, then `sync` (resolve conflicts, re-test, commit the merge). Commit only green code.
+5.  **Commit and sync.** `commit`, then `sync` (resolve conflicts, re-test, commit the merge). Commit only green code.
 
 6.  **Go to step 1.**
 

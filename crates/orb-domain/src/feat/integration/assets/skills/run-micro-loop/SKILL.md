@@ -53,7 +53,7 @@ All phases are done and the list is clean. Run these in order without stopping, 
 
 3.  **Lint and format** as in **Finishing** step 1 of the rules file.
 
-4.  **Commit once** with message `<TASK>: <one sentence>`, only after check, tests and lints pass. If an unrecoverable failure blocks verification, stop and report instead of committing.
+4.  **Commit once**, only after check, tests and lints pass. If an unrecoverable failure blocks verification, stop and report instead of committing.
 
 5.  **Sync.** Run `sync` once (resolve conflicts, re-test, commit the merge).
 

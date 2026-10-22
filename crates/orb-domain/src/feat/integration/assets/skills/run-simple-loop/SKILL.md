@@ -43,7 +43,7 @@ A disciplined workflow for implementing multi-phase coding tasks. `tasks.md` tra
 
 4.  **Verify.** Run the full `test` suite and fix failures before proceeding. If a phase must end with a broken build (a refactor spanning phases), first try reordering tasks so every phase ends green; accept a red phase boundary only when no order allows it.
 
-5.  **Commit and sync.** On a green build: `commit` with message `<TASK> Phase N: <one sentence>`, then `sync` (resolve conflicts, re-test, commit the merge). On a red build: skip both and commit at the next phase that builds.
+5.  **Commit and sync.** On a green build: `commit`, then `sync` (resolve conflicts, re-test, commit the merge). On a red build: skip both and commit at the next phase that builds.
 
 6.  **Go to step 1.**
 

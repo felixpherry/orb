@@ -4,7 +4,7 @@ Shared by run-phased-loop, run-simple-loop and run-micro-loop. Each loop adds it
 
 ## Project commands
 
-Named by role: `check`, `test`, `lint`, `format`, `commit`, `sync`. Resolve each from the project's `CLAUDE.md` / `AGENTS.md`, else from its task runner (`justfile`, `package.json` scripts, `Makefile`). Defaults: `commit` = `git commit` of your staged changes; `sync` = `git merge` of the main line into your branch. A role with no command → skip it.
+Named by role: `check`, `test`, `lint`, `format`, `commit`, `sync`. Resolve each from the project's `CLAUDE.md` / `AGENTS.md`, else from its task runner (`justfile`, `package.json` scripts, `Makefile`). Defaults: `commit` = `git commit` of your staged changes; `sync` = `git merge` of the main line into your branch. A role with no command → skip it. Commit messages follow the convention in the project's `CLAUDE.md` / `AGENTS.md` and match its recent `git log`.
 
 ## Constraints
 
@@ -61,5 +61,5 @@ Add a line the moment you notice the risk, with where it lives and how to check 
 
 ## Finishing
 
-1.  **Lint and format.** Run `lint` and `format`. Fix every error and warning in the files you changed, and leave untouched files alone so the diff stays about the task. Continue only when your changed files have zero warnings. Commit the fixes with `<TASK>: Lints fixed` (micro folds them into its single commit).
+1.  **Lint and format.** Run `lint` and `format`. Fix every error and warning in the files you changed, and leave untouched files alone so the diff stays about the task. Continue only when your changed files have zero warnings. Commit the fixes (micro folds them into its single commit).
 2.  **Hand back** to whoever started you: what changed, the divergence notes, how many risks `risks.md` holds, and the test result. Opening the PR is the caller's job (ship-plan does it).
