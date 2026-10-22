@@ -46,11 +46,12 @@ Keep the exact commands, so anyone can run them again.
 
 ## Pictures
 
-- **Every check you try gets a picture of where it ended and a video of the actions that led there.** Pass and broke alike: a broke picture shows what went wrong. Use the recipe's picture scripts.
+- **Every check a person sees on screen gets a picture of where it ended and a recording of the actions that led there.** Pass and broke alike: a broke picture shows what went wrong. Use the recipe's picture and recording scripts.
+- **A check whose proof is text gets no picture or video.** Command output, logs, responses and stored data go in your report as text: a table or a short code block.
 - **Requests, redirects, caching or speed? Also take a picture of DevTools' Network panel** for each such check, with the recipe's DevTools script if it has one, named like `criterion-2-network.png`. It sits beside the text table of statuses and timings, never instead of it.
 - **Make them all, whatever they show.** The PR step picks which go in and judges what's fine to publish.
 - **They go in `<plan folder>/media/`,** named after the check, like `criterion-2.png` and `criterion-2.mp4`. `media/media.md` has one line per file: the file, its check, the verdict, and what it shows.
-- **No picture scripts in the recipe,** or no recipe: take them with the tools you drive it with, like a browser's screenshot and recording, and say how under Setup.
+- **No picture or recording scripts in the recipe,** or no recipe: take them with the tools you drive it with, like a browser's screenshot and recording, and say how under Setup.
 - **On a second run,** replace the files of each check you try again, so `media/` always shows the latest build.
 
 ## Verdicts
