@@ -402,6 +402,9 @@ Entries are added or amended **only with human approval**.
 - (api) A first word orb doesn't know is a usage error and never starts the app.
 - (api) A usage error names the word orb couldn't take and prints only that command's usage line, with exit code 2.
 - (api) Every API refusal carries a code, a message and a hint naming the command that fixes it.
+- (api) `orb pane browser <pane>` requires exactly one explicit pane ID and sends `pane.browser` with that pane; its successful reply prints as `{"key":"…"}`, unchanged by `--json`. It matches browser terminals against the pane's process terminals, ignoring cached browser ownership and refusing no match or several distinct keys.
+- (api) The terminal-browser socket resolves a supplied terminal to its distinct live pane owner instead of the shared daemon PID's launch pane. Unusable or ambiguous supplied terminals return no pane; missing or null terminals retain caller-process lookup.
+- (api) The embedded orb skill teaches browser control through `orb tab list`, `orb pane browser <pane>` and stock terminal-browser actions with the returned `--browser` key, ending with `action --browser <key> done` without `--` before `done`; it forbids `orb pane run` into a browser pane.
 - (api) `orb` with no arguments inside an orb pane prints the caller's pane and session and how to get help instead of starting a second orb.
 - (api) `orb session list` lists open sessions and `orb agent list` live agents unless `--all` is given, and each reply says how many rows it hid.
 - (api) API lists cut session and agent names to 60 graphemes, and `orb agent get` returns the full text.

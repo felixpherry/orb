@@ -15,6 +15,7 @@
 
 pub(crate) mod agent;
 pub(crate) mod agent_ops;
+pub mod browser;
 pub mod browser_socket;
 pub mod change;
 pub mod client;

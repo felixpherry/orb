@@ -137,7 +137,7 @@ fn run(command: Command, what: &str) -> Result<Vec<u8>, Report<LinkError>> {
 
 /// The terminals the processes of orb pane `pane` run on, from each process's
 /// start-up environment: `ps -E` on macOS, `/proc/<pid>/environ` on Linux.
-fn pane_ttys(pane: PaneId) -> Result<Vec<String>, Report<LinkError>> {
+pub(crate) fn pane_ttys(pane: PaneId) -> Result<Vec<String>, Report<LinkError>> {
     let text = if cfg!(target_os = "linux") {
         let mut command = Command::new("ps");
         command.args(["-e", "-o", "pid=,tty="]);

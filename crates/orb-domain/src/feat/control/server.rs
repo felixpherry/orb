@@ -19,6 +19,7 @@ use wherror::Error;
 
 use crate::feat::control::agent::Timing;
 use crate::feat::control::agent_ops::PromptAsk;
+use crate::feat::control::browser::{self, BrowserLookup};
 use crate::feat::control::change::Change;
 use crate::feat::control::lists::{ended, route, settled, tab_panes};
 use crate::feat::control::pane_control::{PaneControl, PaneRequest};
@@ -65,6 +66,7 @@ pub struct ControlDeps {
     /// What orb last pasted into each pane's agent; only the control server
     /// reads or writes it.
     pub prompts: Prompts,
+    pub browsers: Arc<dyn BrowserLookup>,
 }
 
 impl ControlDeps {
@@ -213,6 +215,7 @@ where
 pub(super) enum Action {
     /// Answered from the state alone.
     Answered(Reply),
+    Browser(PaneId),
     /// A new shell the sessions actor adds, then named and given its command
     /// on the screen loop.
     Add {
@@ -225,7 +228,10 @@ pub(super) enum Action {
     /// A change the screen loop applies.
     Change(Change),
     /// A close or settle the screen loop applies, replying with what it ended.
-    Ending { change: Change, ended: Ended },
+    Ending {
+        change: Change,
+        ended: Ended,
+    },
     /// Typing the screen loop does into a pane: a send, keys or a type.
     Pane(PaneRequest),
     /// Keys or a type, then the pane's screen read back once it settles.
@@ -259,9 +265,15 @@ pub(super) enum Action {
     },
     /// What a pane's agent wrote since orb's prompt, else its last reply;
     /// cut to its end unless `full`.
-    Reply { pane: PaneId, full: bool },
+    Reply {
+        pane: PaneId,
+        full: bool,
+    },
     /// An agent's full row, its status read through a just-sent prompt.
-    Get { pane: PaneId, detail: AgentDetail },
+    Get {
+        pane: PaneId,
+        detail: AgentDetail,
+    },
     /// A plate add, update or close the sessions actor answers.
     Plate(PlateAsk),
 }
@@ -307,6 +319,14 @@ pub(super) fn answer(deps: &ControlDeps, request: &Request, gone: &dyn Fn() -> b
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
         Ok(Action::Answered(reply)) => return reply,
+        Ok(Action::Browser(pane)) => {
+            return Reply::from_result(
+                deps.browsers
+                    .key(pane)
+                    .map(|key| serde_json::json!({"key": key}))
+                    .map_err(|report| browser::api_error(&report)),
+            );
+        }
         Ok(Action::Read {
             pane,
             lines,
@@ -400,6 +420,10 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         | Op::AgentList { .. }
         | Op::ProjectList
         | Op::Here => Ok(Action::Answered(route(app, request))),
+        Op::PaneBrowser { pane } => {
+            changing(app, Some(Target::Pane(*pane)), None)?;
+            Ok(Action::Browser(*pane))
+        }
         Op::PaneSplit { .. }
         | Op::PaneStack { .. }
         | Op::PaneFloat { .. }
@@ -699,6 +723,58 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn browser_lookup_uses_the_explicit_pane_across_sessions() {
+        let app = state_with(
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+            1,
+        );
+        let planned = plan(
+            &app,
+            &Request {
+                caller: Some(PaneId(1)),
+                op: Op::PaneBrowser { pane: PaneId(2) },
+            },
+        );
+        assert!(
+            matches!(planned, Ok(Action::Browser(PaneId(2)))),
+            "explicit browser lookup must use the named pane, not the caller or shown session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn browser_lookup_rejects_an_unknown_pane() {
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        let planned = plan(
+            &app,
+            &Request {
+                caller: Some(PaneId(1)),
+                op: Op::PaneBrowser { pane: PaneId(99) },
+            },
+        );
+        assert_eq!(
+            planned.map(drop).map_err(|error| error.code),
+            Err(ErrorCode::NotFound),
+            "an unknown explicit pane must fail rather than fall back to the caller"
+        );
+    }
+
+    #[rstest::rstest]
+    fn browser_lookup_does_not_need_a_caller() {
+        let app = state_with(vec![agent(1, AgentStatus::Idle)], 1);
+        let planned = plan(
+            &app,
+            &Request {
+                caller: None,
+                op: Op::PaneBrowser { pane: PaneId(1) },
+            },
+        );
+        assert!(
+            matches!(planned, Ok(Action::Browser(PaneId(1)))),
+            "explicit browser lookup must work from outside orb too"
+        );
+    }
+
+    #[rstest::rstest]
     fn socket_is_created_with_mode_0600() -> Result<(), Report<ControlServerError>> {
         // Given / When orb listens on a socket.
         let (_dir, socket) = listening(AppState::default())?;
@@ -793,6 +869,7 @@ mod tests {
     #[case::pane_type(Op::PaneType { pane: PaneId(1), text: "x".into(), enter: false, read: None })]
     #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: false, timeout: None, force: false, tail: None })]
     #[case::pane_run_wait(Op::PaneRun { pane: PaneId(1), command: "x".into(), wait: true, timeout: Some(5), force: false, tail: None })]
+    #[case::pane_browser(Op::PaneBrowser { pane: PaneId(1) })]
     #[case::pane_read(Op::PaneRead {
         pane: None,
         lines: 0,
