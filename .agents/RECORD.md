@@ -192,6 +192,7 @@ Entries are added or amended **only with human approval**.
 - (folders) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents for Claude Code and for pi, conventions its agents follow, a report template and an empty `SOURCES.md`.
 - (folders) The Research kit's pi subagents run through pi's `subagent` tool, from pi's example extension, which the user installs (filtering out pi-amplike's own `subagent` tool) and orb doesn't.
 - (folders) The Research kit's pi subagents run on the agent's model and thinking level.
+- (folders) A Research folder's agent orchestrates only research requests: a new problem in a folder with no `STATE.md`, a resume, answers to its open questions, new facts or data, or a change of question, hypotheses, scope or report. It answers any other message directly, without writing files, opening the progress page or spawning subagents.
 - (folders) A Research folder shares no files with other Research folders.
 - (folders) orb's built-in Learn template is a learning kit: an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files under `.learn/`, an epub ingest script and a `.gitignore` that keeps `source/` out of any repository.
 - (folders) A Learn folder's agents share one campaign: each agent appends its event to `EVENTS.md`, writes learning records for every challenge attempted, and leaves syllabus status and notes for the next agent.
