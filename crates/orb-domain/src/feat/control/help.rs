@@ -405,6 +405,17 @@ pub(crate) const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         noun: "pane",
+        verb: "browser",
+        usage: "orb pane browser <pane>",
+        summary: "Find the terminal-browser key for exactly one browser in the named pane. \
+                  The pane is required; no browser or multiple matches are refused. \
+                  Nothing is opened, focused or typed.",
+        params: &[PANE],
+        examples: &["orb pane browser 42", "orb pane browser 42 --json"],
+        reply: "{\"key\": \"…\"}; the key for terminal-browser --browser; --json changes nothing",
+    },
+    CommandHelp {
+        noun: "pane",
         verb: "close",
         usage: "orb pane close <pane>",
         summary: "Close a pane and whatever runs in it.",
@@ -1131,7 +1142,7 @@ mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
 
-    use super::{COMMANDS, STATUSES, command, suggest, verbs};
+    use super::{COMMANDS, STATUSES, command, command_help, suggest, verbs};
     use crate::feat::control::client::parse;
     use crate::feat::control::protocol::Op;
     use crate::feat::plate::Verb;
@@ -1184,6 +1195,24 @@ mod tests {
             wrong,
             Vec::<String>::new(),
             "every example should parse to its own command's request"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_browser_help_requires_one_pane_and_names_its_json_reply() {
+        let help = command("pane", "browser")
+            .map(command_help)
+            .unwrap_or_default();
+
+        assert!(
+            help.contains("usage: orb pane browser <pane>")
+                && !help.contains("[<pane>]")
+                && !help.contains("the caller's pane")
+                && help.contains("orb pane browser 42\n")
+                && help.contains("orb pane browser 42 --json\n")
+                && help.contains("reply: {\"key\": \"…\"}")
+                && help.contains("--json changes nothing"),
+            "browser help requires an explicit pane and promises a JSON key, got {help}"
         );
     }
 

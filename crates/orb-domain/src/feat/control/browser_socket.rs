@@ -47,6 +47,8 @@ pub trait PaneFinder: Send + Sync {
     /// The pane process `pid` was started in, from its `ORB_PANE_ID`; `None`
     /// when it has none, has exited, or its environment can't be read.
     fn pane_of(&self, pid: u32) -> Option<PaneId>;
+
+    fn panes_on(&self, tty: &str) -> Vec<PaneId>;
 }
 
 /// Reads a process's environment as it was when it started: `ps -E` on
@@ -74,6 +76,35 @@ impl PaneFinder for LaunchEnv {
         };
         pane_in(&String::from_utf8_lossy(&env))
     }
+
+    fn panes_on(&self, tty: &str) -> Vec<PaneId> {
+        if terminal_name(tty).is_none() {
+            return Vec::new();
+        }
+        let mut command = Command::new("ps");
+        command.args(["-t", tty, "-o", "pid="]);
+        let output = match run_within(command, ENV_LIMIT) {
+            Ok(Finished::Exited(output)) if output.status.success() => output.stdout,
+            _ => return Vec::new(),
+        };
+        String::from_utf8_lossy(&output)
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .filter_map(|pid| self.pane_of(pid))
+            .collect()
+    }
+}
+
+fn terminal_name(tty: &str) -> Option<&str> {
+    let name = tty.strip_prefix("/dev/")?;
+    name.split('/')
+        .all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        .then_some(name)
 }
 
 /// The pane the last `ORB_PANE_ID=<id>` word in `env` names. Words split at
@@ -167,7 +198,7 @@ where
     let result = match call.method.as_str() {
         "hello" => Ok(json!({ "name": "orb", "methods": METHODS })),
         "getCurrentPane" => Ok(json!({
-            "pane": current_pane(state, finder, call.caller.as_ref())
+            "pane": current_pane(state, finder, &call.params, call.caller.as_ref())
         })),
         "split" => split(orb, call.params),
         "focusPane" => focus(orb, call.params),
@@ -187,11 +218,30 @@ fn reply_text(id: &str, result: Result<Value, String>) -> String {
 
 /// The pane `caller` runs in and its session; `None` outside orb, or for a
 /// pane orb no longer has. The process is read before the state is locked.
-fn current_pane(state: &State, finder: &dyn PaneFinder, caller: Option<&Caller>) -> Option<Pane> {
-    let pane = finder.pane_of(caller?.pid)?;
-    let session = target::resolve(&state.read(), Some(Target::Pane(pane)), None)
-        .ok()?
-        .session;
+fn current_pane(
+    state: &State,
+    finder: &dyn PaneFinder,
+    params: &Value,
+    caller: Option<&Caller>,
+) -> Option<Pane> {
+    let panes = match params.get("tty") {
+        None | Some(Value::Null) => vec![finder.pane_of(caller?.pid)?],
+        Some(tty) => {
+            let tty = tty.as_str()?;
+            terminal_name(tty)?;
+            finder.panes_on(tty)
+        }
+    };
+    let app = state.read();
+    let mut owners = panes.into_iter().filter_map(|pane| {
+        target::resolve(&app, Some(Target::Pane(pane)), None)
+            .ok()
+            .map(|owner| (pane, owner.session))
+    });
+    let (pane, session) = owners.next()?;
+    if owners.any(|(other, _)| other != pane) {
+        return None;
+    }
     Some(Pane {
         id: pane.0.to_string(),
         tab: session.0.to_string(),
@@ -288,13 +338,18 @@ mod tests {
         ApiError, Direction, Done, ErrorCode, Op, PaneResult, Reply, Request,
     };
     use crate::feat::control::server::{ControlServerError, open};
+    use crate::feat::layout::state::test_entry;
+    use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::AgentStatus;
-    use crate::ids::PaneId;
+    use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{agent, state_with};
     use crate::{AppState, Log, State};
 
     /// Puts every process in one pane, or in none.
-    struct Fixed(Option<PaneId>);
+    struct Fixed {
+        process: Option<PaneId>,
+        terminals: Vec<(&'static str, Vec<PaneId>)>,
+    }
 
     impl PaneFinder for Fixed {
         fn name(&self) -> &'static str {
@@ -302,7 +357,15 @@ mod tests {
         }
 
         fn pane_of(&self, _pid: u32) -> Option<PaneId> {
-            self.0
+            self.process
+        }
+
+        fn panes_on(&self, tty: &str) -> Vec<PaneId> {
+            self.terminals
+                .iter()
+                .find(|(terminal, _)| *terminal == tty)
+                .map(|(_, panes)| panes.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -344,8 +407,29 @@ mod tests {
             asked.borrow_mut().push(request.clone());
             orb(request)
         };
-        let text = reply(&line.to_string(), &State::new(app), &Fixed(caller), &record);
+        let finder = Fixed {
+            process: caller,
+            terminals: vec![("/dev/ttys001", caller.into_iter().collect())],
+        };
+        let text = reply(&line.to_string(), &State::new(app), &finder, &record);
         Ok((serde_json::from_str(&text)?, asked.into_inner()))
+    }
+
+    fn located(
+        line: &Value,
+        app: AppState,
+        owners: Vec<PaneId>,
+    ) -> Result<Value, serde_json::Error> {
+        let finder = Fixed {
+            process: Some(PaneId(1)),
+            terminals: vec![("/dev/ttys002", owners)],
+        };
+        serde_json::from_str(&reply(
+            &line.to_string(),
+            &State::new(app),
+            &finder,
+            &obliging,
+        ))
     }
 
     fn hello() -> Value {
@@ -413,6 +497,176 @@ mod tests {
             reply.get("result"),
             Some(&json!({"pane": {"id": "1", "tab": "1"}})),
             "the caller's pane and session should be named"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::same_session(false, "1")]
+    #[case::different_sessions(true, "2")]
+    fn browser_terminal_overrides_the_shared_daemons_pane(
+        #[case] different_sessions: bool,
+        #[case] session: &str,
+    ) -> Result<(), serde_json::Error> {
+        let app = if different_sessions {
+            state_with(
+                vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+                1,
+            )
+        } else {
+            let mut app = one_pane();
+            app.layouts.split(SessionId(1), Split::Right, test_entry(2));
+            app
+        };
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002", "cwd": "/work/2"},
+            "caller": {"pid": 42, "cwd": "/work/1"}
+        });
+        let reply = located(&line, app, vec![PaneId(2)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": {"id": "2", "tab": session}})),
+            "the browser terminal must identify its own pane and session, not the daemon's"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::unknown(json!("/dev/ttys999"))]
+    #[case::empty(json!(""))]
+    #[case::number(json!(42))]
+    #[case::object(json!({"path": "/dev/ttys002"}))]
+    #[case::relative_path(json!("ttys002"))]
+    #[case::empty_device(json!("/dev/"))]
+    #[case::parent_path(json!("/dev/../ttys002"))]
+    #[case::whitespace(json!("/dev/ttys002\n"))]
+    #[case::nul(json!("/dev/ttys002\0"))]
+    fn unusable_browser_terminal_never_falls_back_to_the_daemon(
+        #[case] tty: Value,
+    ) -> Result<(), serde_json::Error> {
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": tty}, "caller": {"pid": 42}
+        });
+        let reply = located(&line, one_pane(), vec![PaneId(1)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": null})),
+            "an unusable supplied terminal must not resolve to the daemon's pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn ambiguous_browser_terminal_has_no_pane() -> Result<(), serde_json::Error> {
+        let mut app = one_pane();
+        app.layouts.split(SessionId(1), Split::Right, test_entry(2));
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002"}, "caller": {"pid": 42}
+        });
+        let reply = located(&line, app, vec![PaneId(1), PaneId(2)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": null})),
+            "a terminal shared by distinct live panes must not select either"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn repeated_processes_in_one_pane_are_not_ambiguous() -> Result<(), serde_json::Error> {
+        let mut app = one_pane();
+        app.layouts.split(SessionId(1), Split::Right, test_entry(2));
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002"}, "caller": {"pid": 42}
+        });
+        let reply = located(&line, app, vec![PaneId(2), PaneId(2)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": {"id": "2", "tab": "1"}})),
+            "several processes in one pane still identify one terminal owner"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::missing(json!({}))]
+    #[case::null(json!({"tty": null}))]
+    fn browser_without_a_terminal_keeps_process_lookup(
+        #[case] params: Value,
+    ) -> Result<(), serde_json::Error> {
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": params, "caller": {"pid": 42}
+        });
+        let reply = located(&line, one_pane(), Vec::new())?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": {"id": "1", "tab": "1"}})),
+            "an absent or null terminal must retain caller process compatibility"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn browser_terminal_resolves_without_a_caller() -> Result<(), serde_json::Error> {
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002"}
+        });
+        let reply = located(&line, one_pane(), vec![PaneId(1)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": {"id": "1", "tab": "1"}})),
+            "a terminal owner does not require a caller process"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::removed(false)]
+    #[case::deleting(true)]
+    fn browser_terminal_owner_must_still_exist(
+        #[case] deleting: bool,
+    ) -> Result<(), serde_json::Error> {
+        let app = if deleting {
+            let mut app = state_with(
+                vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
+                1,
+            );
+            app.sessions.deleting.insert(SessionId(2));
+            app
+        } else {
+            one_pane()
+        };
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002"}, "caller": {"pid": 42}
+        });
+        let reply = located(&line, app, vec![PaneId(2)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": null})),
+            "a removed or deleting terminal owner must not resolve"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn stale_terminal_owner_does_not_make_a_live_owner_ambiguous() -> Result<(), serde_json::Error>
+    {
+        let line = json!({
+            "id": "browser", "method": "getCurrentPane",
+            "params": {"tty": "/dev/ttys002"}, "caller": {"pid": 42}
+        });
+        let reply = located(&line, one_pane(), vec![PaneId(2), PaneId(1)])?;
+        assert_eq!(
+            reply.get("result"),
+            Some(&json!({"pane": {"id": "1", "tab": "1"}})),
+            "only distinct live owners make terminal lookup ambiguous"
         );
         Ok(())
     }
@@ -615,7 +869,15 @@ mod tests {
     #[rstest::rstest]
     fn unreadable_line_gets_an_error() -> Result<(), serde_json::Error> {
         // Given a line that isn't a request.
-        let text = reply("not json", &State::new(one_pane()), &Fixed(None), &obliging);
+        let text = reply(
+            "not json",
+            &State::new(one_pane()),
+            &Fixed {
+                process: None,
+                terminals: Vec::new(),
+            },
+            &obliging,
+        );
 
         // When it's read back.
         let reply: Value = serde_json::from_str(&text)?;
@@ -635,7 +897,15 @@ mod tests {
         let socket = dir.path().join(SOCKET_FILE);
         let state = State::new(one_pane());
         open(&socket, Log::default(), move |line, _gone| {
-            reply(line, &state, &Fixed(None), &obliging)
+            reply(
+                line,
+                &state,
+                &Fixed {
+                    process: None,
+                    terminals: Vec::new(),
+                },
+                &obliging,
+            )
         })?;
 
         // When terminal-browser says hello over it.

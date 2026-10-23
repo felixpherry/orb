@@ -557,6 +557,9 @@ fn build(command: &'static CommandHelp, rest: &[&str]) -> Result<Op, UsageProble
                 name: words.value("--name").map(str::to_owned),
             }
         }
+        ("pane", "browser") => Op::PaneBrowser {
+            pane: PaneId(words()?.one("<pane>")?),
+        },
         ("pane", "close") => Op::PaneClose {
             pane: PaneId(words()?.one("<pane>")?),
         },
@@ -1344,6 +1347,71 @@ mod tests {
                 && err.contains("help: orb session --help")
                 && !err.contains("not_running"),
             "an unknown verb is named and exits 2, got {code}: {err}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::plain(&["pane", "browser", "42"])]
+    #[case::json(&["pane", "browser", "42", "--json"])]
+    fn pane_browser_words_require_an_explicit_pane(#[case] words: &[&str]) {
+        let op = parse(&args(words));
+
+        assert_eq!(
+            op,
+            Ok(Op::PaneBrowser { pane: PaneId(42) }),
+            "browser lookup names exactly the supplied pane"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::missing(&["pane", "browser"], UsageProblem::MissingWord { what: "<pane>" })]
+    #[case::missing_json(&["pane", "browser", "--json"], UsageProblem::MissingWord { what: "<pane>" })]
+    #[case::extra(&["pane", "browser", "42", "43"], UsageProblem::ExtraWord { word: "43".into() })]
+    #[case::extra_json(&["pane", "browser", "42", "43", "--json"], UsageProblem::ExtraWord { word: "43".into() })]
+    fn pane_browser_rejects_missing_or_extra_panes(
+        #[case] words: &[&str],
+        #[case] expected: UsageProblem,
+    ) {
+        assert_eq!(
+            problem(words),
+            Some(expected),
+            "browser lookup requires exactly one pane, got {words:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::missing(&["pane", "browser"])]
+    #[case::missing_json(&["pane", "browser", "--json"])]
+    #[case::extra(&["pane", "browser", "42", "43"])]
+    #[case::extra_json(&["pane", "browser", "42", "43", "--json"])]
+    fn pane_browser_usage_errors_show_the_required_pane(
+        #[case] words: &[&str],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (code, out, err) = ran(words)?;
+
+        assert!(
+            code == 2
+                && out.is_empty()
+                && err.contains("usage: orb pane browser <pane>")
+                && err.contains("help: orb pane browser --help"),
+            "invalid browser lookup prints its required pane and help, got {code}: {err}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::plain(&["pane", "browser", "42"])]
+    #[case::json(&["pane", "browser", "42", "--json"])]
+    fn pane_browser_prints_one_key_as_json(
+        #[case] words: &[&str],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let printed = answered(words, r#"{"ok":true,"result":{"key":"90107-1"}}"#)?;
+
+        assert_eq!(
+            printed,
+            (0, "{\"key\":\"90107-1\"}\n".to_owned()),
+            "browser lookup prints only the key object with or without --json"
         );
         Ok(())
     }

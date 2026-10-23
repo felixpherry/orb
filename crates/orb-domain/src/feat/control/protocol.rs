@@ -79,6 +79,8 @@ pub enum Op {
         #[serde(default)]
         session: Option<SessionId>,
     },
+    #[serde(rename = "pane.browser")]
+    PaneBrowser { pane: PaneId },
     /// Agents in panes: live ones, every one with `all`, or those with
     /// `status`.
     #[serde(rename = "agent.list")]

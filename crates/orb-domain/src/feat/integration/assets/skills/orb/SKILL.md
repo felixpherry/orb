@@ -123,6 +123,20 @@ orb agent get 15
 - **`pane list` and `tab list` cover one session,** yours unless you add `--session <id>`. Your own pane row has `"caller": true`; tabs count from 1.
 - **`agent get` has the full name, `cwd` and `branch`,** which list rows leave out. Names in lists are cut to 60 characters.
 
+## Drive a browser in a known pane
+
+```sh
+orb tab list
+orb pane browser 42
+terminal-browser action --browser 90107-1 -- snapshot
+terminal-browser action --browser 90107-1 done
+```
+
+- **Pick the browser's pane from the tab list.** `orb tab list` lists every tab in your orb session, not only the user's visible tab. Add `--session <id>` for another session; your session need not be the one the user sees.
+- **Use the returned key, not the example key.** `orb pane browser 42` requires an explicit pane and replies `{"key":"…"}` only for exactly one browser there. No match or multiple matches are refused; it never opens a browser or moves the user's keys.
+- **Default browser scope is an orb session, not its visible tab.** Stock terminal-browser selects within a terminal tab; orb reports the session as that tab. Always pass the returned `--browser` key to target the chosen pane, including when releasing control with `done`. There is no `--` before `done`.
+- **Run browser actions from your own command tool.** Never send `orb pane run` into a browser pane; it types shell text into the browser instead of running a command. Use stock terminal-browser commands with the explicit key, with no aliases or background execution.
+
 ## A whole new session
 
 ```sh

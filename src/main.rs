@@ -193,6 +193,9 @@ fn run(
     let context = runtime.enter();
     let tz = TimeZone::system();
     let links = desktop_links();
+    let browsers = Arc::new(orb_domain::feat::control::browser::TerminalBrowsers {
+        program: links.terminal_browser.clone(),
+    });
     let state = State::new(AppState {
         home,
         zone: LocalZone(tz.clone()),
@@ -241,6 +244,7 @@ fn run(
             panes: frontend.controller(),
             harnesses: harnesses.clone(),
             prompts: Prompts::default(),
+            browsers,
         },
     );
     let ended = frontend
