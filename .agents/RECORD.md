@@ -49,6 +49,7 @@ Entries are added or amended **only with human approval**.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
 - (pane) orb tracks the prompt marks a pane's shell sends (fish sends them by default), so it knows when a command starts and ends and with which exit code.
 - (identity) An agent is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
+- (identity) orb's Claude lifecycle hook skips SDK-marked headless CLI and Agent SDK reports, leaving any parent agent's pane file intact.
 - (identity) orb's code and screens call each agent conversation an agent; the stored database keeps its older `threads` table and `thread` column names.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.

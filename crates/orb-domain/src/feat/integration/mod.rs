@@ -324,12 +324,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn hook_start_writes_the_session_and_transcript_to_the_pane_file() -> TestResult {
+    #[case::unset(&[("ORB_PANE_ID", "7")])]
+    #[case::interactive(&[("ORB_PANE_ID", "7"), ("CLAUDE_CODE_ENTRYPOINT", "cli")])]
+    fn hook_start_writes_the_session_and_transcript_to_the_pane_file(
+        #[case] vars: &[(&str, &str)],
+    ) -> TestResult {
         // Given a Claude session starting in pane 7.
         let home = Home::new()?;
 
         // When the hook runs on SessionStart.
-        run_hook(home.path(), &[("ORB_PANE_ID", "7")], &start_input())?;
+        run_hook(home.path(), vars, &start_input())?;
 
         // Then pane 7's file names the session, its transcript and its source.
         let report: Value = serde_json::from_str(&read(&pane_file(home.path()))?)
@@ -353,16 +357,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn hook_end_writes_an_end() -> TestResult {
+    #[case::unset(&[("ORB_PANE_ID", "7")])]
+    #[case::interactive(&[("ORB_PANE_ID", "7"), ("CLAUDE_CODE_ENTRYPOINT", "cli")])]
+    fn hook_end_writes_an_end(#[case] vars: &[(&str, &str)]) -> TestResult {
         // Given a Claude session in pane 7.
         let home = Home::new()?;
 
         // When the hook runs on SessionEnd because the user quit.
-        run_hook(
-            home.path(),
-            &[("ORB_PANE_ID", "7")],
-            &end_input("prompt_input_exit"),
-        )?;
+        run_hook(home.path(), vars, &end_input("prompt_input_exit"))?;
 
         // Then pane 7's file holds an end.
         let report: Value = serde_json::from_str(&read(&pane_file(home.path()))?)
@@ -371,6 +373,45 @@ mod tests {
             report.get("event"),
             Some(&json!("end")),
             "the pane file should hold the end"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::print_start("sdk-cli", start_input())]
+    #[case::print_end("sdk-cli", end_input("other"))]
+    #[case::typescript_sdk_start("sdk-ts", start_input())]
+    #[case::typescript_sdk_end("sdk-ts", end_input("other"))]
+    #[case::python_sdk_start("sdk-py", start_input())]
+    #[case::python_sdk_end("sdk-py", end_input("other"))]
+    fn hook_headless_reports_preserve_parent(
+        #[case] entrypoint: &str,
+        #[case] input: Value,
+        #[values("pi", "claude")] parent_agent: &str,
+    ) -> TestResult {
+        let home = Home::new()?;
+        let panes = home.path().join(".orb/panes");
+        fs::create_dir_all(&panes).change_context(IntegrationError)?;
+        let parent = json!({
+            "agent": parent_agent,
+            "event": "start",
+            "session_id": "parent",
+            "transcript": "/t/parent.jsonl",
+            "at": 1,
+        })
+        .to_string();
+        fs::write(pane_file(home.path()), &parent).change_context(IntegrationError)?;
+
+        run_hook(
+            home.path(),
+            &[("ORB_PANE_ID", "7"), ("CLAUDE_CODE_ENTRYPOINT", entrypoint)],
+            &input,
+        )?;
+
+        assert_eq!(
+            read(&pane_file(home.path()))?,
+            parent,
+            "a headless child's start or end must leave the parent's pane report unchanged"
         );
         Ok(())
     }
