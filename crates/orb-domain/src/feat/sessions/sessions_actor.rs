@@ -106,6 +106,7 @@ use kameo::prelude::{
     Actor, ActorRef, Context, DelegatedReply, Message, Reply, ReplySender, Spawn,
 };
 use tokio::sync::Notify;
+use tokio::time::MissedTickBehavior;
 
 use super::pane_status::{PaneReport, match_records, pane_status};
 use super::state::{
@@ -144,6 +145,7 @@ mod projects;
 mod restore;
 mod settle;
 mod start;
+mod sync;
 
 use self::plate::restore_plate;
 pub use self::plate::{ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, PlateApiError};
@@ -151,6 +153,8 @@ use self::poll::{agent_mut, display_title, show};
 use self::projects::{KitCopy, own_folder};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
 use self::start::{answer_name_box, current_branch, rename_hex_branch};
+pub use self::sync::SyncRan;
+use self::sync::{SYNC_EVERY, sync};
 
 /// How long to wait between polls while a turn is underway in any agent pane.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -474,6 +478,20 @@ impl Actor for SessionsActor {
             let actor_ref = actor_ref.clone();
             tokio::spawn(async move {
                 let _ = actor_ref.tell(KillSettled).await;
+            });
+        }
+        {
+            let actor_ref = actor_ref.clone();
+            let script = actor.orb_root.join("sync");
+            tokio::spawn(async move {
+                let mut ticks = tokio::time::interval(SYNC_EVERY);
+                ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                loop {
+                    ticks.tick().await;
+                    if !sync(&actor_ref, &script).await {
+                        break;
+                    }
+                }
             });
         }
         let poke = actor.poke.clone();
