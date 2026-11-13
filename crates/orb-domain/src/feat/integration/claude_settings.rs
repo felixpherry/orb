@@ -15,12 +15,17 @@ use super::{IntegrationError, SCRIPT_NAME};
 const SESSION_START_MATCHER: &str = "^(startup|resume|clear|compact|fork)$";
 const TIMEOUT_SECS: u64 = 10;
 
-/// The command Claude runs: `sh '<script>'`, quoted for sh.
-pub fn hook_command(script: &Path) -> String {
-    format!(
-        "sh '{}'",
-        script.display().to_string().replace('\'', r"'\''")
-    )
+/// The command Claude runs, quoted for sh: `sh "$HOME/<rest>"` when `script`
+/// sits under `home`, so one settings file works under any home folder, else
+/// `sh '<script>'`.
+pub fn hook_command(script: &Path, home: &Path) -> String {
+    match script.strip_prefix(home) {
+        Ok(rest) => format!("sh \"$HOME/{}\"", rest.display()),
+        Err(_) => format!(
+            "sh '{}'",
+            script.display().to_string().replace('\'', r"'\''")
+        ),
+    }
 }
 
 /// `content` (`None` for no file) with orb's old entries removed and its
@@ -347,16 +352,63 @@ mod tests {
 
     #[rstest::rstest]
     fn hook_command_quotes_a_path_with_a_quote() {
-        // Given a script path with a single quote.
+        // Given a script path outside home with a single quote.
         let script = Path::new("/tmp/it's/x.sh");
 
         // When building the hook command.
-        let command = hook_command(script);
+        let command = hook_command(script, Path::new("/home/u"));
 
         // Then the quote is escaped for sh.
         assert_eq!(
             command, r"sh '/tmp/it'\''s/x.sh'",
             "the quote should be escaped"
         );
+    }
+
+    #[rstest::rstest]
+    fn hook_command_names_a_script_under_home_through_home() {
+        // Given orb's script under the home folder.
+        let script = Path::new("/home/u/.orb/hooks/orb-agent-state.sh");
+
+        // When building the hook command.
+        let command = hook_command(script, Path::new("/home/u"));
+
+        // Then it names the script through $HOME, not the home folder's path.
+        assert_eq!(
+            command, r#"sh "$HOME/.orb/hooks/orb-agent-state.sh""#,
+            "the command should work under any home folder"
+        );
+    }
+
+    #[rstest::rstest]
+    fn merge_replaces_an_absolute_path_entry_with_the_home_relative_one() -> TestResult {
+        // Given settings from an older orb that named the script by its
+        // absolute path.
+        let old = merge(None, "sh '/home/u/.orb/hooks/orb-agent-state.sh'")?;
+        let current = hook_command(
+            Path::new("/home/u/.orb/hooks/orb-agent-state.sh"),
+            Path::new("/home/u"),
+        );
+
+        // When merging the home-relative command.
+        let merged = parse(&merge(Some(&old), &current)?)?;
+
+        // Then each event holds one orb hook, the home-relative one.
+        let commands: Vec<Option<Value>> = ["SessionStart", "SessionEnd"]
+            .iter()
+            .map(|event| {
+                let groups = merged.pointer(&format!("/hooks/{event}"))?.as_array()?;
+                match groups.as_slice() {
+                    [group] => group.pointer("/hooks/0/command").cloned(),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            vec![Some(Value::String(current.clone())); 2],
+            "the absolute line should be replaced, not joined by a second hook"
+        );
+        Ok(())
     }
 }

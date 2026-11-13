@@ -10,6 +10,7 @@ pub mod pane_file;
 mod skills;
 
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -82,13 +83,53 @@ impl IntegrationPaths {
     pub fn any_installed(&self) -> bool {
         self.hook_script().exists() || self.pi_extension().exists()
     }
+
+    /// The file `install` leaves the fingerprint of what it wrote in.
+    pub fn stamp(&self) -> PathBuf {
+        self.orb_root.join("integration-stamp")
+    }
+}
+
+/// A hash of everything `install` writes: the hook script, the hook entries,
+/// the pi extension and the skills.
+fn fingerprint(paths: &IntegrationPaths, home: &Path) -> String {
+    let command = claude_settings::hook_command(&paths.hook_script(), home);
+    let mut hasher = DefaultHasher::new();
+    (
+        SCRIPT,
+        EXTENSION,
+        skills::SKILLS,
+        claude_settings::merge(None, &command).ok(),
+    )
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Runs `install` again when an integration is installed and the stamp the
+/// last install left doesn't match what this orb writes. Returns the install's
+/// lines, or `None` when nothing ran.
+///
+/// # Errors
+///
+/// Returns the install's error.
+pub fn reinstall_if_changed(
+    paths: &IntegrationPaths,
+    home: &Path,
+) -> Result<Option<Vec<String>>, Report<IntegrationError>> {
+    let current =
+        fs::read_to_string(paths.stamp()).is_ok_and(|stamp| stamp == fingerprint(paths, home));
+    if current || !paths.any_installed() {
+        return Ok(None);
+    }
+    install(paths, home).map(Some)
 }
 
 /// Writes the hook script, adds orb's hooks to Claude's `settings.json`,
 /// writes the pi extension, writes orb's skills into Claude's skills folder
 /// and into `~/.agents/skills` for pi, and removes the `orb` skill copy older
 /// versions wrote under pi's agent dir unless that copy is one of the folders
-/// written. Returns one line per step for the user, `~` for `home`.
+/// written, then leaves a stamp of what it wrote. Returns one line per step for
+/// the user, `~` for `home`.
 ///
 /// # Errors
 ///
@@ -102,7 +143,7 @@ pub fn install(
     let script = paths.hook_script();
     write_atomic(&script, SCRIPT)?;
     let settings = paths.claude_settings();
-    let command = claude_settings::hook_command(&script);
+    let command = claude_settings::hook_command(&script, home);
     let before = match fs::read_to_string(&settings) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -164,6 +205,7 @@ pub fn install(
         }
         lines.push(format!("wrote {count} skills to {}", tilde(dir, home)));
     }
+    write_atomic(&paths.stamp(), &fingerprint(paths, home))?;
     Ok(lines)
 }
 
@@ -214,7 +256,7 @@ mod tests {
     use super::skills::{LOOP_RULES, SKILLS};
     use super::{
         IntegrationError, IntegrationPaths, SCRIPT, claude_dir, claude_settings, install,
-        pi_agent_dir,
+        pi_agent_dir, reinstall_if_changed,
     };
     use crate::common::wait_within;
 
@@ -728,7 +770,7 @@ mod tests {
         let command = settings
             .pointer("/hooks/SessionEnd/0/hooks/0/command")
             .cloned();
-        let expected = claude_settings::hook_command(&home.paths.hook_script());
+        let expected = claude_settings::hook_command(&home.paths.hook_script(), home.path());
         assert_eq!(
             command,
             Some(Value::String(expected)),
@@ -916,6 +958,89 @@ mod tests {
 
         // Then one is.
         assert!(installed, "the pi extension alone should count");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::no_stamp(None)]
+    #[case::an_older_stamp(Some("0000000000000000"))]
+    fn reinstall_if_changed_rewrites_an_install_from_another_orb(
+        #[case] stamp: Option<&str>,
+    ) -> TestResult {
+        // Given an install whose hook script and stamp came from another orb.
+        let home = Home::new()?;
+        home.install()?;
+        fs::write(home.paths.hook_script(), "old").change_context(IntegrationError)?;
+        match stamp {
+            Some(text) => fs::write(home.paths.stamp(), text).change_context(IntegrationError)?,
+            None => fs::remove_file(home.paths.stamp()).change_context(IntegrationError)?,
+        }
+
+        // When orb starts.
+        let ran = reinstall_if_changed(&home.paths, home.path())?;
+
+        // Then it installs again and the hook script is this orb's.
+        let script = read(&home.paths.hook_script())?;
+        assert_eq!(
+            (ran.is_some(), script.as_str()),
+            (true, SCRIPT),
+            "an install from another orb should be replaced"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reinstall_if_changed_leaves_an_install_from_this_orb_alone() -> TestResult {
+        // Given an install from this orb with a hook script changed by hand.
+        let home = Home::new()?;
+        home.install()?;
+        fs::write(home.paths.hook_script(), "edited").change_context(IntegrationError)?;
+
+        // When orb starts.
+        let ran = reinstall_if_changed(&home.paths, home.path())?;
+
+        // Then nothing is written.
+        let script = read(&home.paths.hook_script())?;
+        assert_eq!(
+            (ran.is_none(), script.as_str()),
+            (true, "edited"),
+            "an install from this orb should be left as it is"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reinstall_if_changed_installs_nothing_in_an_empty_home() -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When orb starts.
+        let ran = reinstall_if_changed(&home.paths, home.path())?;
+
+        // Then nothing is installed.
+        assert_eq!(
+            (ran.is_none(), home.paths.any_installed()),
+            (true, false),
+            "orb should not install on its own when nothing was installed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_names_the_hook_script_through_home() -> TestResult {
+        // Given an empty home.
+        let home = Home::new()?;
+
+        // When installing.
+        home.install()?;
+
+        // Then Claude's settings name the script through $HOME, not the full path.
+        let settings = read(&home.paths.claude_settings())?;
+        assert!(
+            settings.contains(r#"sh \"$HOME/.orb/hooks/orb-agent-state.sh\""#)
+                && !settings.contains(&home.path().display().to_string()),
+            "the hook should name the script through $HOME: {settings}"
+        );
         Ok(())
     }
 }

@@ -177,6 +177,14 @@ fn run(
     if args.first().is_some_and(|arg| arg == "integration") {
         return install_integrations(args, &integrations, &home);
     }
+    let upgrade = upgrade_policy(&home, args);
+    if upgrade == Upgrade::Allowed {
+        match integration::reinstall_if_changed(&integrations, &home) {
+            Ok(Some(lines)) => log.line("integration", &lines.join("; ")),
+            Ok(None) => {}
+            Err(report) => log.error("couldn't reinstall the integrations", &report),
+        }
+    }
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let env = child_env(std::env::vars_os());
@@ -184,8 +192,7 @@ fn run(
     let sockets = socket_paths(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
     let store_lock = store::lock(&store_path).change_context(OrbError)?;
-    let store =
-        Store::open_live(&store_path, upgrade_policy(&home, args), log).change_context(OrbError)?;
+    let store = Store::open_live(&store_path, upgrade, log).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let history_dir = orb_root.join("history");
