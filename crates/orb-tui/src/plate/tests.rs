@@ -482,6 +482,37 @@ fn preview_shows_the_title_and_description() {
 }
 
 #[rstest::rstest]
+fn preview_puts_each_line_of_the_description_on_its_own_line() {
+    // Given an item whose description has two lines.
+    let state = with_items(vec![PlateItem {
+        what: Some("fatal: no remote\nexit 1".to_owned()),
+        ..item(1, ItemState::YourMove)
+    }]);
+
+    // When drawing the start screen 80×40.
+    let buf = draw(&state, 80, 40);
+
+    // Then each line of the description starts its own screen line.
+    let lines = lines(&buf);
+    let top = row_of(&buf, "Fix the bug · orb").map(usize::from);
+    let at = |below: usize| {
+        top.and_then(|top| lines.get(top + below)).map(|line| {
+            line.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                .to_owned()
+        })
+    };
+    assert_eq!(
+        [at(6), at(7)],
+        [
+            Some("fatal: no remote".to_owned()),
+            Some("exit 1".to_owned()),
+        ],
+        "screen was\n{}",
+        lines.join("\n")
+    );
+}
+
+#[rstest::rstest]
 fn preview_numbers_the_links_with_their_labels() {
     // Given an item with a Jira link and a pull request.
     let state = with_items(vec![PlateItem {

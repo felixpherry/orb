@@ -11,6 +11,7 @@ use super::links::LinkJob;
 use super::poll::notice_kind;
 use super::projects::project_title;
 use super::settle::settle_session_row;
+use super::sync::{SYNC_FAILED, sync};
 use super::{
     ApiAdd, ApiPlace, ApiPlateAdd, ApiPlateDone, ApiPlateUpdate, ApiStart, ApiStartError,
     ColonyFolderReady, ColonyJob, FAST_POLL, Placement, PlateApiError, RemoveFolder, SAVE_FAILED,
@@ -10961,6 +10962,135 @@ fn removing_a_world_keeps_its_colonies() -> Result<(), Report<StoreError>> {
         state.read().sessions.sessions.len(),
         1,
         "removing a world should keep its colonies"
+    );
+    Ok(())
+}
+
+/// A sync script in `dir` that runs `body` under `sh`, with `mode` as its
+/// permissions.
+fn sync_script(dir: &Path, body: &str, mode: u32) -> Result<PathBuf, Report<StoreError>> {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("sync");
+    fs::write(&script, format!("#!/bin/sh\n{body}\n")).change_context(StoreError)?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(mode)).change_context(StoreError)?;
+    Ok(script)
+}
+
+/// Each plate item's id, state, title and description.
+fn plate_rows(state: &State) -> Vec<(PlateItemId, ItemState, String, Option<String>)> {
+    state
+        .read()
+        .plate
+        .items()
+        .iter()
+        .map(|item| (item.id, item.state, item.title.clone(), item.what.clone()))
+        .collect()
+}
+
+#[rstest::rstest]
+#[case::missing(None)]
+#[case::not_executable(Some(0o644))]
+#[tokio::test]
+async fn sync_script_that_cant_run_adds_nothing(
+    #[case] mode: Option<u32>,
+) -> Result<(), Report<StoreError>> {
+    // Given the actor, and a failing sync script that's missing or not executable.
+    let (actor, state, dir, _path) = spawned_over_a_file().await?;
+    let script = match mode {
+        Some(mode) => sync_script(dir.path(), "exit 1", mode)?,
+        None => dir.path().join("sync"),
+    };
+
+    // When orb syncs.
+    sync(&actor, &script).await;
+
+    // Then nothing is on the plate.
+    assert_eq!(
+        plate_titles(&state),
+        Vec::<String>::new(),
+        "a sync script that can't run should add nothing"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn failed_sync_script_adds_one_item_with_its_last_lines() -> Result<(), Report<StoreError>> {
+    // Given the actor and a sync script that prints seven lines, then fails.
+    let (actor, state, dir, _path) = spawned_over_a_file().await?;
+    let script = sync_script(
+        dir.path(),
+        "for n in 1 2 3 4 5 6; do echo line $n; done\necho line 7 >&2\nexit 1",
+        0o755,
+    )?;
+
+    // When orb syncs.
+    sync(&actor, &script).await;
+
+    // Then one item holds the last five lines.
+    let rows: Vec<_> = plate_rows(&state)
+        .into_iter()
+        .map(|(_, item_state, title, what)| (item_state, title, what))
+        .collect();
+    assert_eq!(
+        rows,
+        [(
+            ItemState::YourMove,
+            SYNC_FAILED.to_owned(),
+            Some("line 3\nline 4\nline 5\nline 6\nline 7".to_owned()),
+        )],
+        "a failed sync should add one item with its last lines"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn second_sync_failure_updates_the_same_item() -> Result<(), Report<StoreError>> {
+    // Given a failed sync on the plate.
+    let (actor, state, dir, _path) = spawned_over_a_file().await?;
+    let script = sync_script(dir.path(), "echo first\nexit 1", 0o755)?;
+    sync(&actor, &script).await;
+    let first = plate_rows(&state);
+
+    // When the sync fails again with other output.
+    sync_script(dir.path(), "echo second\nexit 2", 0o755)?;
+    sync(&actor, &script).await;
+
+    // Then the same item now holds the new output.
+    let expected: Vec<_> = first
+        .into_iter()
+        .map(|(id, item_state, title, _)| (id, item_state, title, Some("second".to_owned())))
+        .collect();
+    assert_eq!(
+        plate_rows(&state),
+        expected,
+        "a second failure should update the one item, not add another"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn sync_success_closes_the_failure_item() -> Result<(), Report<StoreError>> {
+    // Given a failed sync on the plate.
+    let (actor, state, dir, _path) = spawned_over_a_file().await?;
+    let script = sync_script(dir.path(), "echo offline\nexit 1", 0o755)?;
+    sync(&actor, &script).await;
+
+    // When the next sync passes.
+    sync_script(dir.path(), "exit 0", 0o755)?;
+    sync(&actor, &script).await;
+
+    // Then the item is done.
+    let states: Vec<ItemState> = plate_rows(&state)
+        .into_iter()
+        .map(|(_, item_state, _, _)| item_state)
+        .collect();
+    assert_eq!(
+        states,
+        [ItemState::Done],
+        "a passing sync should close the failure item"
     );
     Ok(())
 }
