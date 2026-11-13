@@ -9,6 +9,7 @@ pub mod claude_settings;
 pub mod pane_file;
 mod skills;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use error_stack::{Report, ResultExt};
 use wherror::Error;
 
+use crate::feat::git::git_service::Git;
 use crate::tilde;
 
 /// The hook script's file name; orb's entries in Claude's settings are found
@@ -115,13 +117,14 @@ fn fingerprint(paths: &IntegrationPaths, home: &Path) -> String {
 pub fn reinstall_if_changed(
     paths: &IntegrationPaths,
     home: &Path,
+    git: &dyn Git,
 ) -> Result<Option<Vec<String>>, Report<IntegrationError>> {
     let current =
         fs::read_to_string(paths.stamp()).is_ok_and(|stamp| stamp == fingerprint(paths, home));
     if current || !paths.any_installed() {
         return Ok(None);
     }
-    install(paths, home).map(Some)
+    install(paths, home, git).map(Some)
 }
 
 /// Writes the hook script, adds orb's hooks to Claude's `settings.json`,
@@ -139,6 +142,7 @@ pub fn reinstall_if_changed(
 pub fn install(
     paths: &IntegrationPaths,
     home: &Path,
+    git: &dyn Git,
 ) -> Result<Vec<String>, Report<IntegrationError>> {
     let script = paths.hook_script();
     write_atomic(&script, SCRIPT)?;
@@ -200,10 +204,31 @@ pub fn install(
     }
     let count = skills::skill_count();
     for dir in skill_dirs {
+        let tracked: BTreeSet<String> = git
+            .tracked_files(dir)
+            .iter()
+            .filter_map(|path| path.split_once('/'))
+            .map(|(skill, _)| skill.to_owned())
+            .collect();
+        let mut skipped = BTreeSet::new();
         for (file, text) in skills::SKILLS {
-            write_atomic(&dir.join(file), text)?;
+            match file.split_once('/') {
+                Some((skill, _)) if tracked.contains(skill) => {
+                    skipped.insert(skill);
+                }
+                _ => write_atomic(&dir.join(file), text)?,
+            }
         }
-        lines.push(format!("wrote {count} skills to {}", tilde(dir, home)));
+        lines.push(if skipped.is_empty() {
+            format!("wrote {count} skills to {}", tilde(dir, home))
+        } else {
+            format!(
+                "wrote {} of {count} skills to {}, skipped {} tracked by git",
+                count - skipped.len(),
+                tilde(dir, home),
+                skipped.len()
+            )
+        });
     }
     write_atomic(&paths.stamp(), &fingerprint(paths, home))?;
     Ok(lines)
@@ -258,7 +283,8 @@ mod tests {
         IntegrationError, IntegrationPaths, SCRIPT, claude_dir, claude_settings, install,
         pi_agent_dir, reinstall_if_changed,
     };
-    use crate::common::wait_within;
+    use crate::common::{Finished, run_within, wait_within};
+    use crate::feat::git::git_cli::GitCli;
 
     type TestResult = Result<(), Report<IntegrationError>>;
 
@@ -269,6 +295,7 @@ mod tests {
     struct Home {
         tmp: TempDir,
         paths: IntegrationPaths,
+        git: GitCli,
     }
 
     impl Home {
@@ -280,7 +307,8 @@ mod tests {
                 pi_dir: tmp.path().join(".pi/agent"),
                 agents_skills_dir: tmp.path().join(".agents/skills"),
             };
-            Ok(Self { tmp, paths })
+            let git = GitCli::new(git_env(tmp.path()));
+            Ok(Self { tmp, paths, git })
         }
 
         fn path(&self) -> &Path {
@@ -288,8 +316,37 @@ mod tests {
         }
 
         fn install(&self) -> Result<Vec<String>, Report<IntegrationError>> {
-            install(&self.paths, self.path())
+            install(&self.paths, self.path(), &self.git)
         }
+
+        fn git(&self, dir: &Path, args: &[&str]) -> TestResult {
+            let mut command = Command::new("git");
+            command
+                .current_dir(dir)
+                .args(args)
+                .env_clear()
+                .envs(git_env(self.path()));
+            match run_within(command, HOOK_LIMIT).change_context(IntegrationError)? {
+                Finished::Exited(output) if output.status.success() => Ok(()),
+                finished => Err(Report::new(IntegrationError).attach(format!("{finished:?}"))),
+            }
+        }
+
+        fn skill_checkout(&self, repo: &Path, skill: &str) -> TestResult {
+            let folder = repo.join(skill);
+            fs::create_dir_all(&folder).change_context(IntegrationError)?;
+            fs::write(folder.join("SKILL.md"), "mine").change_context(IntegrationError)?;
+            self.git(repo, &["init", "-q"])
+        }
+    }
+
+    fn git_env(home: &Path) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        vec![
+            ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+            ("HOME".into(), home.into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]
     }
 
     fn read(path: &Path) -> Result<String, Report<IntegrationError>> {
@@ -736,6 +793,94 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::checkout(".agents/skills", None)]
+    #[case::linked_checkout("skills-repo", Some(".claude/skills"))]
+    fn install_leaves_a_skill_the_checkout_tracks(
+        #[case] repo: &str,
+        #[case] link: Option<&str>,
+    ) -> TestResult {
+        let home = Home::new()?;
+        let repo = home.path().join(repo);
+        home.skill_checkout(&repo, "falsify")?;
+        home.git(&repo, &["add", "falsify"])?;
+        if let Some(link) = link {
+            let link = home.path().join(link);
+            fs::create_dir_all(link.parent().unwrap_or(home.path()))
+                .change_context(IntegrationError)?;
+            std::os::unix::fs::symlink(&repo, link).change_context(IntegrationError)?;
+        }
+
+        home.install()?;
+
+        assert_eq!(
+            read(&repo.join("falsify/SKILL.md"))?,
+            "mine",
+            "a skill tracked in the skills folder's checkout should be left alone"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_reports_the_skills_it_skipped() -> TestResult {
+        let home = Home::new()?;
+        let repo = home.paths.agents_skills_dir.clone();
+        home.skill_checkout(&repo, "falsify")?;
+        home.git(&repo, &["add", "falsify"])?;
+
+        let lines = home.install()?;
+
+        let count = super::skills::skill_count();
+        assert!(
+            lines.contains(&format!(
+                "wrote {} of {count} skills to ~/.agents/skills, skipped 1 tracked by git",
+                count - 1
+            )),
+            "the output should say how many skills git keeps, got {lines:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::untracked("falsify", "")]
+    #[case::ignored("orb", "orb/\n")]
+    fn install_writes_a_skill_the_checkout_doesnt_track(
+        #[case] name: &str,
+        #[case] ignore: &str,
+    ) -> TestResult {
+        let home = Home::new()?;
+        let repo = home.paths.agents_skills_dir.clone();
+        home.skill_checkout(&repo, name)?;
+        fs::write(repo.join(".gitignore"), ignore).change_context(IntegrationError)?;
+        home.git(&repo, &["add", ".gitignore"])?;
+
+        home.install()?;
+
+        assert_eq!(
+            read(&repo.join(name).join("SKILL.md")).ok().as_deref(),
+            skill(&format!("{name}/SKILL.md")),
+            "a skill the checkout doesn't track should be written"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn install_overwrites_a_skill_in_a_folder_outside_git() -> TestResult {
+        let home = Home::new()?;
+        let folder = home.paths.agents_skills_dir.join("falsify");
+        fs::create_dir_all(&folder).change_context(IntegrationError)?;
+        fs::write(folder.join("SKILL.md"), "mine").change_context(IntegrationError)?;
+
+        home.install()?;
+
+        assert_eq!(
+            read(&folder.join("SKILL.md")).ok().as_deref(),
+            skill("falsify/SKILL.md"),
+            "a skill in a folder outside git should be written"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     #[case::claude(".claude/skills")]
     #[case::pi(".agents/skills")]
     fn install_twice_leaves_the_same_skill_files(#[case] dir: &str) -> TestResult {
@@ -977,7 +1122,7 @@ mod tests {
         }
 
         // When orb starts.
-        let ran = reinstall_if_changed(&home.paths, home.path())?;
+        let ran = reinstall_if_changed(&home.paths, home.path(), &home.git)?;
 
         // Then it installs again and the hook script is this orb's.
         let script = read(&home.paths.hook_script())?;
@@ -997,7 +1142,7 @@ mod tests {
         fs::write(home.paths.hook_script(), "edited").change_context(IntegrationError)?;
 
         // When orb starts.
-        let ran = reinstall_if_changed(&home.paths, home.path())?;
+        let ran = reinstall_if_changed(&home.paths, home.path(), &home.git)?;
 
         // Then nothing is written.
         let script = read(&home.paths.hook_script())?;
@@ -1015,7 +1160,7 @@ mod tests {
         let home = Home::new()?;
 
         // When orb starts.
-        let ran = reinstall_if_changed(&home.paths, home.path())?;
+        let ran = reinstall_if_changed(&home.paths, home.path(), &home.git)?;
 
         // Then nothing is installed.
         assert_eq!(

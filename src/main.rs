@@ -174,12 +174,14 @@ fn run(
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_dir = integration::claude_dir(config_dir, &home);
     let integrations = integration_paths(&home, &orb_root, &claude_dir);
+    let env = child_env(std::env::vars_os());
+    let integration_git = GitCli::new(env.clone());
     if args.first().is_some_and(|arg| arg == "integration") {
-        return install_integrations(args, &integrations, &home);
+        return install_integrations(args, &integrations, &home, &integration_git);
     }
     let upgrade = upgrade_policy(&home, args);
     if upgrade == Upgrade::Allowed {
-        match integration::reinstall_if_changed(&integrations, &home) {
+        match integration::reinstall_if_changed(&integrations, &home, &integration_git) {
             Ok(Some(lines)) => log.line("integration", &lines.join("; ")),
             Ok(None) => {}
             Err(report) => log.error("couldn't reinstall the integrations", &report),
@@ -187,7 +189,6 @@ fn run(
     }
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
-    let env = child_env(std::env::vars_os());
     let (notifier, sounds) = (desktop_notifier(&home), desktop_sounds(&orb_root, log));
     let sockets = socket_paths(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
@@ -405,11 +406,12 @@ fn install_integrations(
     args: &[OsString],
     paths: &IntegrationPaths,
     home: &Path,
+    git: &GitCli,
 ) -> Result<(), Report<OrbError>> {
     if args.get(1).is_none_or(|arg| arg != "install") || args.len() > 2 {
         return Err(Report::new(OrbError).attach("usage: orb integration install"));
     }
-    let lines = integration::install(paths, home).change_context(OrbError)?;
+    let lines = integration::install(paths, home, git).change_context(OrbError)?;
     let mut out = std::io::stdout().lock();
     for line in lines {
         writeln!(out, "{line}").change_context(OrbError)?;
