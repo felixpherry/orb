@@ -179,6 +179,8 @@ pub trait Git: Send + Sync {
     /// repository's root for a worktree, as a real path. `None` outside
     /// git.
     fn project_path(&self, cwd: &Path) -> Option<PathBuf>;
+
+    fn tracked_files(&self, dir: &Path) -> Vec<String>;
 }
 
 /// The one-line reason a git failure carries.
@@ -478,6 +480,10 @@ mod tests {
         }
         fn project_path(&self, _: &Path) -> Option<PathBuf> {
             None
+        }
+
+        fn tracked_files(&self, _: &Path) -> Vec<String> {
+            Vec::new()
         }
     }
 

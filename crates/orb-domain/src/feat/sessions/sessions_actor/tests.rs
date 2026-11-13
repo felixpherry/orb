@@ -458,6 +458,10 @@ impl Git for FakeGit {
         }
         self.project.clone()
     }
+
+    fn tracked_files(&self, _dir: &Path) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A zmx whose `list` prints `stdout` on every socket dir, on the pane

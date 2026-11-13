@@ -406,6 +406,18 @@ impl Git for GitCli {
             .parent()
             .map(Path::to_owned)
     }
+
+    fn tracked_files(&self, dir: &Path) -> Vec<String> {
+        self.read(dir, ["ls-files", "-z"])
+            .map(|listed| {
+                listed
+                    .split('\0')
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// A report whose reason is git's first stderr line, else

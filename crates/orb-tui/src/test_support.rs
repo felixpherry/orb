@@ -230,6 +230,10 @@ impl Git for NoGit {
     fn project_path(&self, _cwd: &Path) -> Option<PathBuf> {
         None
     }
+
+    fn tracked_files(&self, _dir: &Path) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The sessions `projects`' agents run in, one per pane session, as the

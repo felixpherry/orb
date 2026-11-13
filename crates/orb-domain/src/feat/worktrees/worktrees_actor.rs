@@ -521,6 +521,10 @@ mod tests {
         fn project_path(&self, _cwd: &Path) -> Option<PathBuf> {
             Some(PathBuf::from(REPO))
         }
+
+        fn tracked_files(&self, _dir: &Path) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     fn clean() -> WorktreeFacts {
