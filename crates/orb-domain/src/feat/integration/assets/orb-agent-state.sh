@@ -6,6 +6,7 @@
 # that /clear or /resume replaces are skipped. Always exits 0.
 [ -n "${ORB_PANE_ID:-}" ] || exit 0
 [ -z "${CURSOR_VERSION:-}" ] || exit 0
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in sdk-*) exit 0 ;; esac
 command -v python3 >/dev/null 2>&1 || exit 0
 program=$(cat <<'PY'
 import json, os, sys, time
