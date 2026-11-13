@@ -90,7 +90,10 @@ impl SessionsActor {
     /// # Errors
     ///
     /// [`PlateApiError::Unsaved`] when the store can't save it.
-    fn add_plate_item(&self, add: ApiPlateAdd) -> Result<PlateItemId, Report<PlateApiError>> {
+    pub(super) fn add_plate_item(
+        &self,
+        add: ApiPlateAdd,
+    ) -> Result<PlateItemId, Report<PlateApiError>> {
         let now = SystemTime::now();
         let id = self
             .store
@@ -109,7 +112,10 @@ impl SessionsActor {
     /// [`PlateApiError::Done`] when it's done, the user's x landing while the
     /// change was saving included, and [`PlateApiError::Unsaved`] when the
     /// store can't save it.
-    fn update_plate_item(&self, update: &ApiPlateUpdate) -> Result<(), Report<PlateApiError>> {
+    pub(super) fn update_plate_item(
+        &self,
+        update: &ApiPlateUpdate,
+    ) -> Result<(), Report<PlateApiError>> {
         let now = SystemTime::now();
         self.change_plate_item(update.item, |item| {
             item.updated(&update.change, now)
@@ -125,7 +131,10 @@ impl SessionsActor {
     ///
     /// [`PlateApiError::NotFound`] when there's no such item, and
     /// [`PlateApiError::Unsaved`] when the store can't save it.
-    fn finish_plate_item(&self, done: &ApiPlateDone) -> Result<(), Report<PlateApiError>> {
+    pub(super) fn finish_plate_item(
+        &self,
+        done: &ApiPlateDone,
+    ) -> Result<(), Report<PlateApiError>> {
         let now = SystemTime::now();
         self.change_plate_item(done.item, |item| Ok(item.finished(now)))
     }

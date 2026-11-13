@@ -350,7 +350,10 @@ fn render_preview(
         && let Some(what) = item.what.as_deref().filter(|what| !what.is_empty())
     {
         text.push(Line::default());
-        text.extend(wrapped(what, width, Style::new().fg(FG_DARK)));
+        text.extend(
+            what.lines()
+                .flat_map(|line| wrapped(line, width, Style::new().fg(FG_DARK))),
+        );
     }
     text.push(Line::default());
     text.extend(link_lines(row, width));
