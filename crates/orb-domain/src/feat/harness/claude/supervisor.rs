@@ -61,6 +61,7 @@ pub struct ClaudeSupervisor {
     env: Vec<(OsString, OsString)>,
     /// `<claude dir>/sessions`, holding one status file per running Claude.
     sessions: PathBuf,
+    proc: PathBuf,
     /// What earlier polls read.
     memory: Mutex<Memory>,
 }
@@ -72,6 +73,7 @@ impl ClaudeSupervisor {
         Self {
             env,
             sessions: claude_dir.join("sessions"),
+            proc: PathBuf::from("/proc"),
             memory: Mutex::new(Memory::default()),
         }
     }
@@ -108,8 +110,9 @@ impl ClaudeAgents for ClaudeSupervisor {
     /// Reads the folder, `ps` and the status files on a blocking thread.
     async fn list(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
         let sessions = self.sessions.clone();
+        let proc = self.proc.clone();
         let ps = self.ps();
-        let poll = tokio::task::spawn_blocking(move || read_poll(&sessions, ps))
+        let poll = tokio::task::spawn_blocking(move || read_poll(&sessions, &proc, ps))
             .await
             .change_context(HarnessError)
             .attach("couldn't read Claude's status files".to_owned())??;
@@ -135,20 +138,28 @@ struct Poll {
 
 /// Lists `folder`, runs `ps` when it names any Claude, then reads the files
 /// of the Claudes still running; `None` when it names none.
-fn read_poll(folder: &Path, ps: Command) -> Result<Option<Poll>, Report<HarnessError>> {
+fn read_poll(
+    folder: &Path,
+    proc: &Path,
+    ps: Command,
+) -> Result<Option<Poll>, Report<HarnessError>> {
     let pids = session_pids(folder)?;
     if pids.is_empty() {
         return Ok(None);
     }
     // ponytail: a failed `ps` leaves each agent its own pid, which
     // still matches a Claude that is its zmx session's program.
-    let processes = match run_within(ps, LIST_TIMEOUT) {
+    let mut processes = match run_within(ps, LIST_TIMEOUT) {
         Ok(Finished::Exited(output)) if output.status.success() => {
             Some(parse_processes(&String::from_utf8_lossy(&output.stdout)))
         }
         _ => None,
     };
-    let files = read_files(folder, &candidates(&pids, processes.as_ref()));
+    let candidates = candidates(&pids, processes.as_ref());
+    if let Some(processes) = processes.as_mut() {
+        processes.ticks = read_start_ticks(proc, &candidates);
+    }
+    let files = read_files(folder, &candidates);
     Ok(Some(Poll { files, processes }))
 }
 
@@ -189,6 +200,7 @@ struct Processes {
     started: HashMap<u32, String>,
     /// The pids that are stopped, as by Ctrl-Z.
     stopped: HashSet<u32>,
+    ticks: HashMap<u32, String>,
 }
 
 impl Processes {
@@ -199,8 +211,26 @@ impl Processes {
             self.started
                 .get(&pid)
                 .is_some_and(|started| started.split_whitespace().eq(proc_start.split_whitespace()))
+                || self
+                    .ticks
+                    .get(&pid)
+                    .is_some_and(|ticks| ticks == proc_start.trim())
         })
     }
+}
+
+fn read_start_ticks(proc: &Path, pids: &[u32]) -> HashMap<u32, String> {
+    pids.iter()
+        .filter_map(|&pid| {
+            let stat = fs::read_to_string(proc.join(pid.to_string()).join("stat")).ok()?;
+            Some((pid, start_ticks(&stat)?.to_owned()))
+        })
+        .collect()
+}
+
+fn start_ticks(stat: &str) -> Option<&str> {
+    let (_, after_name) = stat.rsplit_once(')')?;
+    after_name.split_whitespace().nth(19)
 }
 
 /// `ps -o pid=,ppid=,stat=,lstart=` lines: pid, parent, state, then the
@@ -405,7 +435,7 @@ mod tests {
     use super::{
         AgentStatus, ClaudeAgents, ClaudeSupervisor, Finished, HarnessError, LIST_TIMEOUT, Memory,
         Processes, RunningAgent, StatusFile as File, candidates, parse_processes, parse_record,
-        pid_of, run_within,
+        pid_of, read_poll, run_within, start_ticks,
     };
 
     const FOLDER: &str = "/claude/sessions";
@@ -686,6 +716,84 @@ mod tests {
             statuses(&agents),
             [AgentStatus::Working],
             "start times should compare word by word"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case("2194929", &[AgentStatus::Working])]
+    #[case("2194930", &[])]
+    fn file_with_start_ticks_is_kept_only_when_they_match(
+        #[case] recorded: &str,
+        #[case] expected: &[AgentStatus],
+    ) -> Result<(), Report<HarnessError>> {
+        let json = format!(
+            r#"{{"pid":200,"kind":"interactive","status":"busy","procStart":"{recorded}"}}"#
+        );
+        let files = vec![file(200, &json)];
+        let mut processes = parse_processes(PS);
+        processes.ticks.insert(200, "2194929".to_owned());
+
+        let agents = poll(&mut Memory::default(), files, Some(&processes))?;
+
+        assert_eq!(
+            statuses(&agents),
+            expected,
+            "a file recording start ticks should count only when the process has the same ticks"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(
+        "200 (claude) S 100 200 100 34816 200 4194304 1 2 3 4 5 6 7 8 20 0 12 0 2194929 1 2",
+        Some("2194929")
+    )]
+    #[case(
+        "200 (a) b (c) S 100 200 100 34816 200 4194304 1 2 3 4 5 6 7 8 20 0 12 0 77 1 2",
+        Some("77")
+    )]
+    #[case("200 (claude) S 100", None)]
+    #[case("", None)]
+    fn stat_line_gives_its_start_ticks(#[case] stat: &str, #[case] expected: Option<&str>) {
+        let ticks = start_ticks(stat);
+
+        assert_eq!(
+            ticks, expected,
+            "the start ticks are the 22nd field, counted after the name's last bracket"
+        );
+    }
+
+    #[rstest::rstest]
+    fn status_file_recording_proc_start_ticks_is_listed() -> Result<(), Report<HarnessError>> {
+        let dir = tempfile::tempdir().change_context(HarnessError)?;
+        let sessions = dir.path().join("sessions");
+        let proc = dir.path().join("proc");
+        let pid = std::process::id();
+        fs::create_dir_all(&sessions).change_context(HarnessError)?;
+        fs::create_dir_all(proc.join(pid.to_string())).change_context(HarnessError)?;
+        fs::write(
+            proc.join(pid.to_string()).join("stat"),
+            format!("{pid} (orb test) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 424242 1 2"),
+        )
+        .change_context(HarnessError)?;
+        fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"kind":"interactive","status":"busy","procStart":"424242"}}"#),
+        )
+        .change_context(HarnessError)?;
+        let mut ps = std::process::Command::new("ps");
+        ps.args(["-A", "-o", "pid=,ppid=,stat=,lstart="]);
+
+        let agents = read_poll(&sessions, &proc, ps)?
+            .map(|poll| Memory::default().select(&sessions, poll.files, poll.processes.as_ref()))
+            .transpose()?
+            .unwrap_or_default();
+
+        assert_eq!(
+            statuses(&agents),
+            [AgentStatus::Working],
+            "a status file whose start ticks match the proc folder's should be listed"
         );
         Ok(())
     }

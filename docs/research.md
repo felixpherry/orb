@@ -1133,8 +1133,9 @@ Tags as in §6. orb reads these files for a Claude's status instead of running `
 - Files and `claude agents` agreed in 20 of 20 samples over 7 live Claudes.
 
 ### `procStart` **[verified]**
-- It matches `ps -o lstart=` run with `TZ=UTC` and `LC_ALL=C`, for example `Mon Oct 19 06:29:32 2026`, in 9 of 9 live files (2.1.303 and 2.1.301). Without `TZ=UTC` the hour is off by the local offset.
+- On macOS it matches `ps -o lstart=` run with `TZ=UTC` and `LC_ALL=C`, for example `Mon Oct 19 06:29:32 2026`, in 9 of 9 live files (2.1.303 and 2.1.301). Without `TZ=UTC` the hour is off by the local offset.
 - `lstart` pads a one-digit day with a space (`Oct  6`), so compare with runs of spaces collapsed. It holds spaces, so it must be the last `ps` column.
+- On Linux it is the process's start time in clock ticks since boot, the 22nd field of `/proc/<pid>/stat`, for example `2194929`, in 8 of 8 live files (2.1.325, Arch, procps-ng 4.0.7). `ps` has no column that prints it. The second field is the program's name in brackets and can hold spaces and brackets, so count fields after the last `)`.
 
 ### Writes and stale files **[verified]**
 - Claude rewrites its file in place: a file rewritten today still had its Oct 16 inode. A reader can catch one half-written.
