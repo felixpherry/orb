@@ -18,6 +18,14 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         include_str!("assets/skills/approve-plan/agents/openai.yaml"),
     ),
     (
+        "approve-plan/references/spec-template.md",
+        include_str!("assets/skills/approve-plan/references/spec-template.md"),
+    ),
+    (
+        "approve-plan/scripts/check_spec.py",
+        include_str!("assets/skills/approve-plan/scripts/check_spec.py"),
+    ),
+    (
         "babysit/SKILL.md",
         include_str!("assets/skills/babysit/SKILL.md"),
     ),
@@ -62,6 +70,10 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         include_str!("assets/skills/hand-off/SKILL.md"),
     ),
     (
+        "hand-off/scripts/start.sh",
+        include_str!("assets/skills/hand-off/scripts/start.sh"),
+    ),
+    (
         "interrogate/SKILL.md",
         include_str!("assets/skills/interrogate/SKILL.md"),
     ),
@@ -85,6 +97,10 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         "make-pr-easy-to-review/SKILL.md",
         include_str!("assets/skills/make-pr-easy-to-review/SKILL.md"),
     ),
+    (
+        "make-pr-easy-to-review/scripts/tree_guard.sh",
+        include_str!("assets/skills/make-pr-easy-to-review/scripts/tree_guard.sh"),
+    ),
     ("orb/SKILL.md", include_str!("assets/skills/orb/SKILL.md")),
     (
         "plan-with-me/SKILL.md",
@@ -99,12 +115,20 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
         include_str!("assets/skills/plan-with-me/record-preamble.md"),
     ),
     (
+        "plan-with-me/references/record-entry-format.md",
+        include_str!("assets/skills/plan-with-me/references/record-entry-format.md"),
+    ),
+    (
         "review-code/SKILL.md",
         include_str!("assets/skills/review-code/SKILL.md"),
     ),
     (
         "review-code/agents/openai.yaml",
         include_str!("assets/skills/review-code/agents/openai.yaml"),
+    ),
+    (
+        "review-code/references/smells.md",
+        include_str!("assets/skills/review-code/references/smells.md"),
     ),
     (
         "run-micro-loop/SKILL.md",
@@ -133,6 +157,10 @@ pub(super) const SKILLS: &[(&str, &str)] = &[
     (
         "write-recipe/SKILL.md",
         include_str!("assets/skills/write-recipe/SKILL.md"),
+    ),
+    (
+        "write-recipe/scripts/recipe_dir.sh",
+        include_str!("assets/skills/write-recipe/scripts/recipe_dir.sh"),
     ),
     ("run-micro-loop/task-loop-rules.md", LOOP_RULES),
     ("run-phased-loop/task-loop-rules.md", LOOP_RULES),

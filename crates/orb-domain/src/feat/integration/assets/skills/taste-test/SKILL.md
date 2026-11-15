@@ -15,7 +15,7 @@ Tests pass against fakes; users hit the real thing. You run the build the way it
 
 ## Set up a throwaway copy
 
-1. **Use the project's recipe if it has one:** `~/.orb/recipes/<repo>/RECIPE.md`, where `<repo>` is the repo's name: the end of its `origin` remote, like `orb`, else its main checkout's folder name. Run its scripts as it shows; don't retype their steps. Launch, check and drive the program, and clean up, as it says. Else look in the repo's `AGENTS.md` / `CLAUDE.md` for how to try it.
+1. **Use the project's recipe if it has one.** `~/.agents/skills/write-recipe/scripts/recipe_dir.sh` prints its folder and exits 1 when there is no `RECIPE.md` in it. Run its scripts as it shows; don't retype their steps. Launch, check and drive the program, and clean up, as it says. Else look in the repo's `AGENTS.md` / `CLAUDE.md` for how to try it.
 2. **Otherwise build a setup,** and put the steps in your report, so write-recipe can turn them into a recipe:
    - a temp folder for the program's home, config and state, so nothing you do reaches the user's real copy;
    - a copy of the user's real data where the program keeps some locally, because empty setups hide the bugs users hit;
@@ -49,6 +49,7 @@ Keep the exact commands, so anyone can run them again.
 - **Every check a person sees on screen gets a picture of where it ended and a recording of the actions that led there.** Pass and broke alike: a broke picture shows what went wrong. Use the recipe's picture and recording scripts.
 - **A check whose proof is text gets no picture or video.** Command output, logs, responses and stored data go in your report as text: a table or a short code block.
 - **Requests, redirects, caching or speed? Also take a picture of DevTools' Network panel** for each such check, with the recipe's DevTools script if it has one, named like `criterion-2-network.png`. It sits beside the text table of statuses and timings, never instead of it.
+- **Recordings show the actions at a person's pace, not your thinking time.** Plan the steps, then run them in one go while recording. Look at every picture and video before you keep it: the proportions are right and it ends on the claim.
 - **Make them all, whatever they show.** The PR step picks which go in and judges what's fine to publish.
 - **They go in `<plan folder>/media/`,** named after the check, like `criterion-2.png` and `criterion-2.mp4`. `media/media.md` has one line per file: the file, its check, the verdict, and what it shows.
 - **No picture or recording scripts in the recipe,** or no recipe: take them with the tools you drive it with, like a browser's screenshot and recording, and say how under Setup.
@@ -66,7 +67,7 @@ After each `risks.md` line, add its verdict (`→ pass`, `→ broke`, `→ could
 
 ## Second run
 
-Try again everything that broke or couldn't be tried, and each criterion the fixes touched. Anything still broken goes to the user, not to another fix round.
+Try again only the checks that the changes since the first run touched, including each broke line a fix aimed at. Every other check keeps its first verdict. Anything still broken goes to the user, not to another fix round.
 
 ## Clean up
 

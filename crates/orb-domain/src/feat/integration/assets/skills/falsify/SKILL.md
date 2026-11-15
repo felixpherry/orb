@@ -53,7 +53,7 @@ One line per finding, worst harm first:
 <verdict>: <the finding, short> (<who raised it>). <why: the run or the trace; say unproven or hypothetical when it is>
 ```
 
-Then three lists:
+Then four lists:
 
 - **For the fixer:** cut, narrow and fix.
 - **For the user:** your call, each with the rule the fix would add.

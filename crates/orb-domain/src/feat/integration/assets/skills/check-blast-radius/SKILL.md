@@ -1,6 +1,6 @@
 ---
 name: check-blast-radius
-description: "Finds what a change could break somewhere else before it ships, beyond the diff, and proves the one fact it's safe because of by running real code instead of writing it up. Use for 'blast radius of X', 'what could this break', reviewing a small diff you don't trust, or a brief that asserts something about existing code ('make X public', 'X already handles Y') before you design against that assertion."
+description: "Finds what a change could break outside its diff. Use for 'blast radius of X', 'what could this break', a small diff you don't trust, or a brief that asserts something about existing code."
 metadata:
   based-on: "blast-radius from pstack by Lauren Tan, via michael-denyer/pstack-claude (MIT)"
 ---

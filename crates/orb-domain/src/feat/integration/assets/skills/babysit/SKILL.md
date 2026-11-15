@@ -2,18 +2,14 @@
 name: babysit
 description: Watches an open PR and drives it to a mergeable state by fixing failing CI, resolving merge conflicts, and applying the straightforward review comments. Never replies to reviewers or merges. Use after opening a PR when the user wants it kept green without re-prompting, or when they say "babysit this PR".
 metadata:
-  based-on: "babysit from pstack by Lauren Tan, via michael-denyer/pstack-claude (MIT)"
+  based-on: "babysit from pstack by Lauren Tan, via michael-denyer/pstack-claude (MIT). Independently written; the workflow follows the public behavior of Cursor's closed-source /babysit."
 ---
 
 # Babysit a PR
 
 A loop over the `gh` CLI: check the PR, fix what's broken, push, check again.
 
-## When to use
-
-- There's an open PR and the user wants it kept green.
-- The user invokes `/babysit` directly.
-- A subagent that opens a PR does NOT babysit. It returns to the parent and lets the parent decide.
+A subagent that opens a PR doesn't babysit it: it returns to the parent and lets the parent decide.
 
 ## Steps
 
@@ -50,12 +46,3 @@ If the arguments say `ci-only`, skip review comments and don't wait for reviewer
 - Never skip hooks (`--no-verify`).
 - Never bypass a failing check by marking it as not required.
 - Never mark a draft PR ready: that notifies reviewers. Say in the report that it's ready and let the user flip it.
-
-## Cross-refs
-
-- Use `interrogate` before opening if the diff is contested; once open, babysit takes over.
-- Use `unslop`, if you have it, on any prose you write here (commit messages, the report).
-
-## Provenance
-
-This is a Claude Code analog of Cursor's `/babysit`, not a port: Cursor's implementation is closed source. The skill is independently authored; the workflow is informed by Cursor's public `/babysit` behavior.

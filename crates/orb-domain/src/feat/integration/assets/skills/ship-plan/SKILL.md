@@ -18,7 +18,8 @@ You run unattended: nobody answers questions. Never stop to ask. When something 
 Your context is for decisions, not file contents. Run every step below in a fresh subagent and keep only what it reports back. Use subagents, not orb sessions or colonists: helpers must work in this worktree, and a new session would get a different checkout.
 
 - **Each helper gets** the plan folder, the step's skill and arguments, the unattended rule above (never ask; note divergences in `plan.md` and risks in `risks.md`), and what to return: at most ten lines on what it did, what it changed, what failed, and what's left open.
-- **You read only** those reports, `tasks.md`, and `git status`. Don't open source files, diffs or test logs yourself. If a report is unclear, send a helper to find out.
+- **You read only** those reports, `tasks.md`, `ship.md` and `git status`. Don't open source files, diffs or test logs yourself. If a report is unclear, send a helper to find out.
+- **Keep a step log in `ship.md`, in the plan folder.** After each step, add one line: the step's number and name, done or skipped, and the two lines of its report a successor would need, such as which findings falsify ruled on, what is still open, or the PR link. Before step 1, read the log: if it exists, start at the first step it doesn't list. After a compaction, read it again before the next step.
 - **One helper at a time,** since they share the worktree. The only exception is the review step's reviewers, which only read.
 - **A helper that has reported is done.** If it's still running (in the background, in a pane, in a session you started), stop it.
 - **Helpers may start their own helpers** when their skill says so, like interrogate's reviewers or the phased loop's per-phase agents.
@@ -28,10 +29,16 @@ Your context is for decisions, not file contents. Run every step below in a fres
 
 Run the steps in order. Each step names the skill it uses, so changing this list changes the pipeline.
 
+`check`, `test`, `lint` and `format` are the repo's own commands, resolved the way **Project commands** in [the task loops' rules](../run-simple-loop/task-loop-rules.md) says. Pass a helper the role names, never a tool you picked.
+
+**Before the first step you run, check that you can push.** Run `git push --dry-run origin HEAD` yourself. It asks the remote for write access and sends nothing. If it fails, stop and go to **Report back** with its error. Step 11 would fail the same way, after every step before it had run.
+
+**Then set up the worktree.** A fresh worktree has the repo's tracked files but nothing its install generates, such as dependencies and commit hooks. Run the repo's install command yourself, resolved the same way as the commands above. Then run `test -d "$(git rev-parse --git-path hooks)"`. Git skips commit hooks without a word when their folder is missing, so if this fails, stop and go to **Report back** with the missing path.
+
 1.  **Build.** A helper runs the chosen loop: `/run-<loop>-loop <plan folder>`. For the phased loop, the helper is that loop's orchestrator, so don't tell it to run solo.
 2.  **Taste test.** A helper runs taste-test on the plan folder. Its broke lines go to the fixer. Its couldn't-try lines go to **Known limitations**. Any change it made to the recipe goes in your report back, not the PR.
 3.  **Review.** Helpers at the same time, read-only:
-    - interrogate;
+    - interrogate, told to run correctness only when the loop is micro;
     - check-blast-radius on the branch's diff;
     - the repo's own review skill or agent, if it has one.
 
@@ -40,8 +47,8 @@ Run the steps in order. Each step names the skill it uses, so changing this list
 5.  **Fix, once.** One helper does what falsify ruled (cut, narrow, fix) and fixes taste-test's broke lines. Each fix comes with a test that fails without it, where a test can show it. A fix that needs a new rule or special case (a branch for one input, a new setting or flag) isn't made: it goes to **Known limitations**, since it often means the design is wrong. There is no second fix round.
 6.  **Simplify.** A helper runs the `simplify` skill if you have it, then deslop, on the branch's changes, then runs `test`.
 7.  **Spec check.** A helper runs check-gaps on the plan folder, fixes every gap it lists, then runs `check` and `test` until both pass.
-8.  **Verify.** A helper runs `check` and `test`, then lints and formats the files that changed, and fixes until everything passes.
-9.  **Taste test again.** A helper runs taste-test's second run. Anything still broken goes to **Known limitations**; don't fix it.
+8.  **Verify.** A helper runs `check`, `test`, `lint` and `format`, and fixes the files that changed until everything passes.
+9.  **Taste test again, only if code changed.** If no step since the first taste test changed code, skip this; the first run's verdicts stand. Otherwise a helper runs taste-test's second run. Anything still broken goes to **Known limitations**; don't fix it.
 10. **Tidy the branch.** A helper runs make-pr-easy-to-review before anything is pushed: it squashes noise into clean commits, writes the PR description (see below) to a file, and lists the pictures to attach. Give it the plan folder.
 11. **Open the PR.** A helper pushes the branch and opens the PR with that description, using the repo's own PR skill if it has one, else `gh pr create`. It attaches the listed pictures as make-pr-easy-to-review says, with `gh pr edit` after if the repo's skill can't attach. It returns the link. Then stop every helper still running.
 12. **Babysit CI.** A helper runs babysit with `ci-only` on the new PR: it fixes failing checks and merge conflicts, then stops. It never waits for reviewers.

@@ -7,7 +7,7 @@ metadata:
 
 # Interrogate
 
-Spawn four reviewers on the same model to adversarially review code changes. Each owns one angle, so they don't all find the same things. A problem raised from two angles independently is the strongest signal. Always spawn all four, however small the diff: a small diff is cheap to review, and the angles exist so no single reader decides what's worth checking. The deliverable is a synthesized verdict. Do NOT auto-apply changes.
+Spawn four reviewers on the same model to adversarially review code changes. Each owns one angle, so they don't all find the same things. A problem raised from two angles independently is the strongest signal. Spawn all four, however small the diff: the angles exist so no single reader decides what's worth checking. The one exception is a caller that asks for correctness only, as ship-plan does on micro runs: then spawn Reviewer A alone and leave out the Agreement Map. The deliverable is a synthesized verdict. Do NOT auto-apply changes.
 
 ## Step 1, Scope
 

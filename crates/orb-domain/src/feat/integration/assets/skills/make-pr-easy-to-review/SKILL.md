@@ -7,47 +7,19 @@ metadata:
 
 # Make PR Easy to Review
 
-Prepare a PR so a reviewer can quickly understand the intent, important files, and risk. The default goal is reviewability without behavior changes.
-
-## Workflow
-
-1. Resolve the target PR from the user-provided URL or current branch.
-2. Inspect commits, diff size, changed paths, generated files, and PR description.
-3. Identify reviewability issues: noisy commits, stale description, unrelated changes, mixed mechanical and logic changes, missing tests, or unclear reviewer entry points.
-4. Apply safe improvements, then verify the tree or diff still matches the intended code.
-5. Report what you changed, including whether you rewrote history.
+Prepare a PR so a reviewer can quickly understand the intent, the important files and the risk, without changing what the code does. In the report, say what you changed and whether you rewrote history.
 
 ## Before the PR exists
 
-When the branch has no PR and hasn't been pushed (ship-plan calls it this way), every commit is local and yours, so clean up history without being asked. Note `git rev-parse HEAD^{tree}` before you start and check it's unchanged after. Don't push, and write the description to the file the caller names instead of running `gh pr edit`. If the caller gives the description's sections (ship-plan does), use those. If it gives a plan folder with pictures, pick them as below and list the files to attach after the description.
+When the branch has no PR and hasn't been pushed (ship-plan calls it this way), every commit is local and yours, so clean up history without being asked, between `scripts/tree_guard.sh save` and `scripts/tree_guard.sh verify` (see History Cleanup). Don't push, and write the description to the file the caller names instead of running `gh pr edit`. If the caller gives the description's sections (ship-plan does), use those. If it gives a plan folder with pictures, pick them as below and list the files to attach after the description.
 
 ## History Cleanup
 
-Rewrite history only when the user asked for commit cleanup and every commit on the branch is theirs (check `git log --format='%an' origin/<baseRefName>..origin/<headRefName>`). If someone else has pushed to the branch, leave history alone and say so in the report. Before rewriting:
+Rewrite history only when the user asked for commit cleanup and every commit on the branch is theirs (check `git log --format='%an' origin/<baseRefName>..origin/<headRefName>`). If someone else has pushed to the branch, leave history alone and say so in the report. Fetch the PR's head and base branches. From this skill's folder, run `scripts/tree_guard.sh save origin/<headRefName>` before the rewrite and `scripts/tree_guard.sh verify` after it.
 
-```bash
-gh pr view <PR> --json title,headRefName,baseRefName,state,commits
-git fetch origin <headRefName> <baseRefName>
-ORIGINAL_TREE=$(git rev-parse origin/<headRefName>^{tree})
-```
+`verify` exits non-zero and prints the difference if the code is no longer identical. Don't push then. If it passes, push with `git push --force-with-lease` (never plain `--force`).
 
-Good commit groupings usually follow dependency order:
-
-1. Schema/storage or generated API definitions.
-2. Core logic.
-3. Wiring and integration.
-4. UI or surface behavior.
-5. Tests.
-
-After rewriting, verify content identity:
-
-```bash
-echo "Original tree: $ORIGINAL_TREE"
-echo "Current tree:  $(git rev-parse HEAD^{tree})"
-git diff origin/<headRefName> --stat
-```
-
-Do not push if the tree changed unintentionally. If it matches, push with `git push --force-with-lease` (never plain `--force`) and say in the report that history was rewritten.
+Order commits so each builds on the ones before it, and keep mechanical changes apart from logic changes.
 
 ## Reviewer Guidance
 
