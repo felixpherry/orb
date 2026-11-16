@@ -72,9 +72,9 @@ orb agent start --kind pi --tab -- --model sonnet             # words after -- g
 - **To fan out, prompt each agent without `--wait`,** then `orb agent wait <pane>` and `orb agent reply <pane>` on each in turn.
 - **Prompt an agent that is idle.** A prompt sent mid-turn may be folded into the running turn, so `--wait` ends early. If the answer doesn't cover your prompt, `orb agent wait` and read the reply again.
 - **Long answers keep their last 12,000 characters.** `--full` prints it all.
-- **`timeout` on start:** orb never saw the agent. Either `orb integration install` hasn't run, or Claude is asking whether to trust a new folder. `orb pane read` the pane and tell the user which.
+- **`timeout` on start:** orb never saw the agent. Either `orb integration install` hasn't run, or Claude is asking whether to trust a new folder. `orb pane read` the pane and tell the user which, unless the project's rules say otherwise.
 - **`agent_blocked`:** it stopped to ask the user. Tell them. Only if they asked, read the dialog and answer with `orb pane keys`.
-- **`turn_failed`:** its model call failed (quota, API error). Tell the user.
+- **`turn_failed`:** its model call failed (quota, API error). Tell the user, unless the project's rules say otherwise.
 - **`prompt_stalled`:** `orb pane read` to see why. Don't paste the prompt twice.
 
 ## Find things
